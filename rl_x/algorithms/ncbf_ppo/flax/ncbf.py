@@ -1,4 +1,4 @@
-from typing import Sequence
+from typing import Sequence, Callable, Optional
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -8,11 +8,12 @@ from flax.training.train_state import TrainState
 
 
 def get_ncbf(config, env):
+    # TODO: make different types of ncbf
     ncbf_type = config.algorithm.ncbf.type
     ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
 
     NCBF = NCBF_FFNN(config.algorithm.nr_hidden_units, ncbf_observation_indices)
-    safety_layer_function = make_get_safe_action(NCBF)
+    safety_layer_function = make_get_safe_action(NCBF.apply)
 
     return (NCBF, safety_layer_function)
 
@@ -23,18 +24,19 @@ class NCBF_FFNN(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        x = x[..., self.policy_observation_indices]
-        policy_mean = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
-        policy_mean = nn.tanh(policy_mean)
-        policy_mean = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(policy_mean)
-        policy_mean = nn.tanh(policy_mean)
-        policy_mean = nn.Dense(np.prod(self.as_shape).item(), kernel_init=orthogonal(0.01), bias_init=constant(0.0))(policy_mean)
-        policy_logstd = self.param("policy_logstd", constant(jnp.log(self.std_dev)), (1, np.prod(self.as_shape).item()))
-        return policy_mean, policy_logstd
+        x = x[..., self.observation_indices]
+        # Two hidden layers
+        x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
+        x = nn.tanh(x)
+        x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
+        x = nn.tanh(x)
+        # Scalar CBF output h(x)
+        h = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+        return jnp.squeeze(h, -1)  # shape ()
 
 
 def make_get_safe_action(
-    ncbf_apply: Callable[[Array, Array], Array],  # h_phi(x)
+    ncbf_apply: Callable[[dict, jnp.ndarray], jnp.ndarray],  # h_phi(x)
     *,
     # Option A: known control-affine dynamics x_{t+1} = f(x_t) + g(x_t) u_t
     f: Optional[Callable[[jnp.ndarray], jnp.ndarray]] = None,
@@ -61,10 +63,6 @@ def make_get_safe_action(
       get_safe_action: (action_raw, x_t) -> (u_safe, info)
         where info is a dict with useful diagnostics.
     """
-
-    assert (f is not None and g is not None) ^ (fhat is not None), \
-        "Provide either (f and g) for known dynamics OR fhat for learned dynamics, but not both."
-
     def alpha(s: jnp.ndarray) -> jnp.ndarray:
         # kappa function for CBF constraint
         return eta_cbf * s
@@ -72,16 +70,17 @@ def make_get_safe_action(
     # --------- Option A: Known control-affine dynamics ---------
     if f is not None and g is not None:
         # a = (∇h(x_t))^T g(x_t)
-        def compute_a_c_known(x_t: jnp.ndarray, phi: jnp.ndarray) -> (jnp.ndarray, jnp.ndarray):
-            grad_h = jax.grad(ncbf_apply)(phi, x_t)                    # (n,)
+        def compute_a_c_known(x_t: jnp.ndarray, phi: dict) -> (jnp.ndarray, jnp.ndarray):
+            grad_h = jax.grad(ncbf_apply, argnums=1)(phi, x_t)                    # (n,)
             gx = g(x_t)                                      # (n, m)
             fx = f(x_t)                                      # (n,)
             a = gx.T @ grad_h                                # (m,)
-            c = - grad_h @ fx - alpha(ncbf(x_t) - gamma_c)   # scalar
+            h_vals = ncbf_apply(phi, x_t)
+            c = - grad_h @ fx - alpha(h_vals - gamma_c)   # scalar
             return a, c
 
         @jax.jit
-        def get_safe_action(action_raw: jnp.ndarray, x_t: jnp.ndarray, phi:jnp.ndarray):
+        def get_safe_action(action_raw, x_t, phi):
             a, c = compute_a_c_known(x_t, phi)
             aTa = jnp.dot(a, a) + 1e-12                      # numeric safety
             aTu = jnp.dot(a, action_raw)
