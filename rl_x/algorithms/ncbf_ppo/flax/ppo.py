@@ -17,8 +17,9 @@ import wandb
 from rl_x.algorithms.ncbf_ppo.flax.general_properties import GeneralProperties
 from rl_x.algorithms.ncbf_ppo.flax.policy import get_policy
 from rl_x.algorithms.ncbf_ppo.flax.critic import get_critic
-from rl_x.algorithms.ncbf_ppo.ncbf import get_ncbf
+from rl_x.algorithms.ncbf_ppo.flax.ncbf import get_ncbf
 from rl_x.algorithms.ncbf_ppo.flax.batch import Batch
+from rl_x.algorithms.ncbf_ppo.flax.replay_buffer import ReplayBuffer
 
 rlx_logger = logging.getLogger("rl_x")
 
@@ -62,13 +63,17 @@ class PPO:
         self.ncbf_w_cbf = config.algorithm.ncbf.w_cbf
         self.ncbf_w_lip = config.algorithm.ncbf.w_lip
         self.ncbf_w_wd = config.algorithm.ncbf.w_wd
+        self.ncbf_eta_cbf = config.algorithm.ncbf.eta_cbf
         self.ncbf_L_target = config.algorithm.ncbf.L_max
         self.ncbf_epoch = config.algorithm.ncbf.epoch
         self.ncbf_minibatch_size = config.algorithm.ncbf.batch_size
         self.ncbf_nr_minibatches = self.batch_size // self.ncbf_minibatch_size
 
+        self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
+        self.ncbf_start_learning = config.algorithm.ncbf_buffer.start_learning
+
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
-        if (self.nr_steps * self.nr_envs) % self.ncbf_batch_size != 0:
+        if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
             raise ValueError("NCBF batch size must divide evenly into nr_steps * nr_envs.")
 
         rlx_logger.info(f"Using device: {jax.default_backend()}")
@@ -82,6 +87,7 @@ class PPO:
         self.policy, self.get_processed_action = get_policy(config, env)
         self.ncbf, self.ncbf_safety_layer = get_ncbf(config, env)
         self.critic = get_critic(config, env)
+        self.replay_buffer = ReplayBuffer(capacity=config.algorithm.replay_buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=jax.random.PRNGKey(self.key))
 
         self.policy.apply = jax.jit(self.policy.apply)
         self.critic.apply = jax.jit(self.critic.apply)
@@ -275,7 +281,7 @@ class PPO:
                 # (1) BCE classification: logits = h(x) - gamma_c
                 logits = h_x - gamma_c
                 # BCE with logits: softplus(z) - y*z
-                num = jnp.sum(minib_mast * (jax.nn.softplus(logits) - minib_y * logits))
+                num = jnp.sum(minib_mask * (jax.nn.softplus(logits) - minib_y * logits))
                 den = jnp.sum(minib_mask) + 1e-8
                 clf_loss = num / den
 
@@ -323,88 +329,15 @@ class PPO:
                     loss_cbf=cbf_loss,
                     loss_lip=lip_loss,
                     loss_wd=wd_loss,
-                    mean_mask=jnp.mean(mask),
-                    mean_y=jnp.mean(y),
+                    mean_y=jnp.mean(minib_y),
                 )
                 return total, metrics
-
-            def _future_event_within_H(events: Array, H: int) -> Array:
-                """
-                events: [T, N] bool (True if event occurs at time t in env n)
-                Returns:
-                  any_next_H: [T, N] bool, True if there is an event in (t, t+H] for that env.
-                """
-                T, N = events.shape
-
-                def body(carry, ev_t):
-                    # carry: [N] int, distance to next event seen so far (from future)
-                    dist_prev = carry
-                    # if event at t: distance = 0; else = dist_prev + 1 (capped at H+1)
-                    dist = jnp.where(ev_t, 0, jnp.minimum(dist_prev + 1, H + 1))
-                    return dist, dist
-
-                init = jnp.full((N,), H + 1, dtype=jnp.int32)
-
-                # scan backwards in time
-                _, dists_rev = jax.lax.scan(body, init, events[::-1])  # [T,N], reversed
-                dists = dists_rev[::-1]  # [T,N], distance to next event (0 if at t)
-
-                # “next H steps” = strictly after t: 0 < dist <= H
-                any_next_H = jnp.logical_and(dists > 0, dists <= H)
-                return any_next_H
-
-            def window_any_done_next_H(
-                    dones: Array,
-                    terminates: Array,
-                    H: int
-            ) -> Tuple[Array, Array]:
-                """
-                dones, terminates: [T, N_env, 1] or [T, N_env] bool
-                  - dones: episode ends (terminated or truncated)
-                  - terminates: true termination (failure) events
-
-                Returns:
-                  y: [T, N_env] bool
-                     horizon-safe label: True if NO terminate in next H steps, else False
-                  mask: [T, N_env] bool
-                     training mask: ~dones  (valid only on non-done steps)
-                """
-                # squeeze last dim if present
-                if dones.ndim == 3:
-                    dones_flat = jnp.squeeze(dones, axis=-1)  # [T, N]
-                else:
-                    dones_flat = dones
-
-                if terminates.ndim == 3:
-                    terms_flat = jnp.squeeze(terminates, axis=-1)  # [T, N]
-                else:
-                    terms_flat = terminates
-
-                # any terminate in (t, t+H] -> y[t] = False, else True
-                any_term_next_H = _future_event_within_H(terms_flat, H)  # [T, N]
-                y = ~any_term_next_H  # [T, N] bool
-
-                # mask is simply "not done at this step"
-                mask = ~dones_flat  # [T, N] bool
-
-                return y, mask
-
-            y_bool, mask_valid = window_any_done_next_H(dones, terminates, self.ncbf_H)  # get true if any done in next H steps for each env
-            y = y_bool.astype(jnp.float32)
-
-            # generate batch indices for ncbf minibatches
-            batch_states = states.reshape((-1, ) + self.os_shape)
-            batch_next_states = next_states.reshape((-1, ) + self.os_shape)
-            batch_dones = dones.reshape((-1, ))
-            batch_terminates = terminates.reshape((-1, ))
-            batch_mask_valid = mask_valid.reshape((-1, ))
-            batch_y = y.reshape((-1, ))
 
             vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, 0), out_axes=0)
             grad_ncbf_loss_fn = jax.value_and_grad(vmap_loss_fn, argnums=0, has_aux=True)
 
             key, subkey = jax.random.split(key)
-            batch_indices = jnp.tile(jnp.arange(self.batch_size), (self.ncbf_epoch, 1))
+            batch_indices = jnp.tile(jnp.arange(self.replay_buffer.size), (self.ncbf_epoch, 1))
             batch_indices = jax.random.permutation(subkey, batch_indices, axis=1, independent=True)
             batch_indices = batch_indices.reshape((self.ncbf_epoch * self.ncbf_nr_minibatches, self.ncbf_minibatch_size))
 
@@ -415,10 +348,10 @@ class PPO:
                     minibatch_indices
             ):
                 ncbf_state = carry
-                minib_obs = batch_states[minibatch_indices]
-                minib_nxt = batch_next_states[minibatch_indices]
-                minib_y = batch_y[minibatch_indices]
-                minib_mask = batch_mask_valid[minibatch_indices]
+                minib_obs = self.replay_buffer.states[minibatch_indices]
+                minib_nxt = self.replay_buffer.next_states[minibatch_indices]
+                minib_y = self.replay_buffer.y_targets[minibatch_indices]
+                minib_mask = self.replay_buffer.masks[minibatch_indices]
 
 
                 (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
@@ -429,7 +362,7 @@ class PPO:
                     minib_mask
                 )
                 metrics["grad_norm"] = optax.global_norm(ncbf_grads)
-                new_state = state.apply_gradients(grads=grads)
+                new_state = state.apply_gradients(grads=ncbf_grads)
 
                 return new_state, metrics
 
@@ -458,6 +391,8 @@ class PPO:
             log_probs=np.zeros((self.nr_steps, self.nr_envs)),
             advantages=np.zeros((self.nr_steps, self.nr_envs)),
             returns=np.zeros((self.nr_steps, self.nr_envs)),
+            masks=np.zeros((self.nr_steps, self.nr_envs)),
+            y_targets=np.zeros((self.nr_steps, self.nr_envs))
         )
 
         saving_return_buffer = deque(maxlen=100 * self.nr_envs)
@@ -511,7 +446,85 @@ class PPO:
             time_metrics["time/calc_adv_and_return_time"] = calc_adv_return_end_time - acting_end_time
 
             # updating the ncbf
-            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, batch.states, batch.dones, batch.terminations, self.key)
+            # acquire y label and mask, add to replay buffer
+            def _future_event_within_H(events: jnp.array, H: int):
+                """
+                events: [T, N] bool (True if event occurs at time t in env n)
+                Returns:
+                  any_next_H: [T, N] bool, True if there is an event in (t, t+H] for that env.
+                """
+                T, N = events.shape
+
+                def body(carry, ev_t):
+                    # carry: [N] int, distance to next event seen so far (from future)
+                    dist_prev = carry
+                    # if event at t: distance = 0; else = dist_prev + 1 (capped at H+1)
+                    dist = jnp.where(ev_t, 0, jnp.minimum(dist_prev + 1, H + 1))
+                    return dist, dist
+
+                init = jnp.full((N,), H + 1, dtype=jnp.int32)
+
+                # scan backwards in time
+                _, dists_rev = jax.lax.scan(body, init, events[::-1])  # [T,N], reversed
+                dists = dists_rev[::-1]  # [T,N], distance to next event (0 if at t)
+
+                # “next H steps” = strictly after t: 0 < dist <= H
+                any_next_H = jnp.logical_and(dists > 0, dists <= H)
+                return any_next_H
+
+            def window_any_done_next_H(
+                    dones: jnp.array,
+                    terminates: jnp.array,
+                    H: int
+            ):
+                """
+                dones, terminates: [T, N_env, 1] or [T, N_env] bool
+                  - dones: episode ends (terminated or truncated)
+                  - terminates: true termination (failure) events
+
+                Returns:
+                  y: [T, N_env] bool
+                     horizon-safe label: True if NO terminate in next H steps, else False
+                  mask: [T, N_env] bool
+                     training mask: ~dones  (valid only on non-done steps)
+                """
+                # squeeze last dim if present
+                if dones.ndim == 3:
+                    dones_flat = jnp.squeeze(dones, axis=-1)  # [T, N]
+                else:
+                    dones_flat = dones
+
+                if terminates.ndim == 3:
+                    terms_flat = jnp.squeeze(terminates, axis=-1)  # [T, N]
+                else:
+                    terms_flat = terminates
+
+                # any terminate in (t, t+H] -> y[t] = False, else True
+                any_term_next_H = _future_event_within_H(terms_flat, H)  # [T, N]
+                y = ~any_term_next_H  # [T, N] bool
+
+                # mask is simply "not done at this step"
+                mask = ~dones_flat  # [T, N] bool
+
+                return y, mask
+
+            y_bool, mask_valid = window_any_done_next_H(batch.dones, batch.terminations, self.ncbf_H)  # get true if any done in next H steps for each env
+            y = y_bool.astype(jnp.float32)
+            batch.masks = mask_valid
+            batch.y_targets = y
+
+            # add batch to buffer
+            self.replay_buffer.add(
+                states=batch.states,
+                next_states=batch.next_states,
+                actions=batch.actions,
+                rewards=batch.rewards,
+                terminations=batch.terminations,
+                masks=batch.masks,
+                y_targets=batch.y_targets
+            )
+
+            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key)
 
             # Optimizing
             self.policy_state, self.critic_state, optimization_metrics, self.key = update(

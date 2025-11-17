@@ -1,5 +1,6 @@
 class Batch:
-    def __init__(self, states, next_states, actions, rewards, values, dones, terminations, log_probs, advantages, returns):
+    def __init__(self, states, next_states, actions, rewards, values, dones, terminations, log_probs, advantages, returns,
+                 masks, y_targets):
         self.states = states
         self.next_states = next_states
         self.actions = actions
@@ -10,3 +11,5 @@ class Batch:
         self.advantages = advantages
         self.returns = returns
         self.dones = dones
+        self.masks = masks
+        self.y_targets = y_targets

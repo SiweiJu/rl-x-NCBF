@@ -38,4 +38,9 @@ def get_config(algorithm_name):
     config.ncbf.w_wd = 0.0     # weight for weight decay loss
     config.ncbf.lip_target = 0.0    # lipschitz target, set to 0.0 if just want small gradient
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
+
+    config.ncbf_buffer = config_dict.ConfigDict()
+    config.ncbf_buffer.buffersize = int(1e6)
+    config.ncbf_buffer.start_learning = 10000
+
     return config

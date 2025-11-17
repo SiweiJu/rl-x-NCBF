@@ -269,7 +269,6 @@ class SAC:
             acting_end_time = time.time()
             time_metrics_collection.setdefault("time/acting_time", []).append(acting_end_time - start_time)
 
-
             # What to do in this step after acting
             should_learning_start = global_step > self.learning_starts
             should_optimize = should_learning_start
