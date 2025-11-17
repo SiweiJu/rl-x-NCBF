@@ -28,8 +28,8 @@ def get_config(algorithm_name):
     # ncbf config
     config.ncbf.type = 'FFNN'
     config.ncbf.H = 10  # prediction horizon
-    config.ncbf.epoch = 10
-    config.ncbf.minibatch_size = 64
+    config.ncbf.nr_minibatches = 10
+    config.ncbf.minibatch_size = 512
     config.ncbf.lr = 1e-3
     config.ncbf.gamma_c = 0.0     # safety threshold
     config.ncbf.w_clf = 1.0    # weight for classification loss
@@ -39,8 +39,12 @@ def get_config(algorithm_name):
     config.ncbf.lip_target = 0.0    # lipschitz target, set to 0.0 if just want small gradient
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
 
+    config.ncbf.pretrain = config_dict.ConfigDict()
+    config.ncbf.pretrain.nr_minibatches = 20
+    config.ncbf.pretrain.nr_steps = 16384
+
+
     config.ncbf_buffer = config_dict.ConfigDict()
     config.ncbf_buffer.buffersize = int(1e6)
-    config.ncbf_buffer.start_learning = 10000
 
     return config

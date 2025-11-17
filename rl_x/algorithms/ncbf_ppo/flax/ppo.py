@@ -65,12 +65,12 @@ class PPO:
         self.ncbf_w_wd = config.algorithm.ncbf.w_wd
         self.ncbf_eta_cbf = config.algorithm.ncbf.eta_cbf
         self.ncbf_L_target = config.algorithm.ncbf.L_max
-        self.ncbf_epoch = config.algorithm.ncbf.epoch
         self.ncbf_minibatch_size = config.algorithm.ncbf.batch_size
         self.ncbf_nr_minibatches = self.batch_size // self.ncbf_minibatch_size
 
         self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
-        self.ncbf_start_learning = config.algorithm.ncbf_buffer.start_learning
+        self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps // self.nr_envs
+        self.ncbf_pretrain_n_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
 
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
         if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
@@ -136,6 +136,69 @@ class PPO:
 
     
     def train(self):
+        @jax.jit
+        def _future_event_within_H(events: jnp.array, H: int):
+            """
+            events: [T, N] bool (True if event occurs at time t in env n)
+            Returns:
+              any_next_H: [T, N] bool, True if there is an event in (t, t+H] for that env.
+            """
+            T, N = events.shape
+
+            def body(carry, ev_t):
+                # carry: [N] int, distance to next event seen so far (from future)
+                dist_prev = carry
+                # if event at t: distance = 0; else = dist_prev + 1 (capped at H+1)
+                dist = jnp.where(ev_t, 0, jnp.minimum(dist_prev + 1, H + 1))
+                return dist, dist
+
+            init = jnp.full((N,), H + 1, dtype=jnp.int32)
+
+            # scan backwards in time
+            _, dists_rev = jax.lax.scan(body, init, events[::-1])  # [T,N], reversed
+            dists = dists_rev[::-1]  # [T,N], distance to next event (0 if at t)
+
+            # “next H steps” = strictly after t: 0 < dist <= H
+            any_next_H = jnp.logical_and(dists > 0, dists <= H)
+            return any_next_H
+
+        @jax.jit
+        def window_any_done_next_H(
+                dones: jnp.array,
+                terminates: jnp.array,
+                H: int
+        ):
+            """
+            dones, terminates: [T, N_env, 1] or [T, N_env] bool
+              - dones: episode ends (terminated or truncated)
+              - terminates: true termination (failure) events
+
+            Returns:
+              y: [T, N_env] bool
+                 horizon-safe label: True if NO terminate in next H steps, else False
+              mask: [T, N_env] bool
+                 training mask: ~dones  (valid only on non-done steps)
+            """
+            # squeeze last dim if present
+            if dones.ndim == 3:
+                dones_flat = jnp.squeeze(dones, axis=-1)  # [T, N]
+            else:
+                dones_flat = dones
+
+            if terminates.ndim == 3:
+                terms_flat = jnp.squeeze(terminates, axis=-1)  # [T, N]
+            else:
+                terms_flat = terminates
+
+            # any terminate in (t, t+H] -> y[t] = False, else True
+            any_term_next_H = _future_event_within_H(terms_flat, H)  # [T, N]
+            y = ~any_term_next_H  # [T, N] bool
+
+            # mask is simply "not done at this step"
+            mask = ~dones_flat  # [T, N] bool
+
+            return y, mask
+
         @jax.jit
         def get_action_and_value(policy_state: TrainState, critic_state: TrainState, state: np.ndarray, key: jax.random.PRNGKey):
             action_mean, action_logstd = self.policy.apply(policy_state.params, state)
@@ -263,8 +326,7 @@ class PPO:
 
             return policy_state, critic_state, mean_metrics, key
 
-        @jax.jit
-        def train_ncbf(ncbf_state: TrainState, states: np.ndarray, next_states: np.ndarray, dones: np.ndarray, terminates: np.ndarray, key: jax.random.PRNGKey):
+        def train_ncbf(ncbf_state: TrainState, key: jax.random.PRNGKey, nr_minibatches: int):
             """
             ncbf_state: TrainState
             states: (T, E, D)
@@ -337,9 +399,9 @@ class PPO:
             grad_ncbf_loss_fn = jax.value_and_grad(vmap_loss_fn, argnums=0, has_aux=True)
 
             key, subkey = jax.random.split(key)
-            batch_indices = jnp.tile(jnp.arange(self.replay_buffer.size), (self.ncbf_epoch, 1))
+            batch_indices = jnp.tile(jnp.arange(self.replay_buffer.size), (nr_minibatches, 1))
             batch_indices = jax.random.permutation(subkey, batch_indices, axis=1, independent=True)
-            batch_indices = batch_indices.reshape((self.ncbf_epoch * self.ncbf_nr_minibatches, self.ncbf_minibatch_size))
+            batch_indices = batch_indices.reshape((nr_minibatches, self.ncbf_minibatch_size))
 
             # ---------- one minibatch step ----------
             @jax.jit
@@ -397,6 +459,67 @@ class PPO:
 
         saving_return_buffer = deque(maxlen=100 * self.nr_envs)
 
+        # pre-sampling and pretrain ncbf
+        state, _ = self.env.reset()
+        if self.ncbf_pretrain_steps > 0:
+            # initialize a temporary buffer to collect ncbf pretrian data
+            ncbf_batch = Batch(
+                states=np.zeros((self.ncbf_pretrain_steps, self.nr_envs) + self.os_shape),
+                next_states=np.zeros((self.nr_steps, self.nr_envs) + self.os_shape),
+                actions=np.zeros((self.nr_steps, self.nr_envs) + self.as_shape),
+                rewards=np.zeros((self.nr_steps, self.nr_envs)),
+                values=np.zeros((self.nr_steps, self.nr_envs)),
+                terminations=np.zeros((self.nr_steps, self.nr_envs)),
+                dones=np.zeros((self.nr_steps, self.nr_envs)),
+                log_probs=np.zeros((self.nr_steps, self.nr_envs)),
+                advantages=np.zeros((self.nr_steps, self.nr_envs)),
+                returns=np.zeros((self.nr_steps, self.nr_envs)),
+                masks=np.zeros((self.nr_steps, self.nr_envs)),
+                y_targets=np.zeros((self.nr_steps, self.nr_envs))
+            )
+
+            for step in range(self.ncbf_pretrain_steps):
+                raw_processed_action, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
+                next_state, reward, terminated, truncated, info = self.env.step(action)
+                done = terminated | truncated
+                actual_next_state = next_state.copy()
+                for i, single_done in enumerate(done):
+                    if single_done:
+                        actual_next_state[i] = np.array(self.env.get_final_observation_at_index(info, i))
+                        saving_return_buffer.append(self.env.get_final_info_value_at_index(info, "episode_return", i))
+
+                ncbf_batch.states[step] = state
+                ncbf_batch.next_states[step] = actual_next_state
+                ncbf_batch.actions[step] = action
+                ncbf_batch.rewards[step] = reward
+                ncbf_batch.values[step] = value
+                ncbf_batch.terminations[step] = terminated
+                ncbf_batch.log_probs[step] = log_prob
+                state = next_state
+
+            # calculate y labels and masks
+            y_bool, masks = window_any_done_next_H(ncbf_batch.dones, ncbf_batch.terminations, self.ncbf_H)
+            y = y_bool.astype(jnp.float32)
+            ncbf_batch.masks = masks
+            ncbf_batch.y_targets = y
+
+            # add batch to buffer
+            self.replay_buffer.add(
+                states=ncbf_batch.states,
+                next_states=ncbf_batch.next_states,
+                actions=ncbf_batch.actions,
+                rewards=ncbf_batch.rewards,
+                terminations=ncbf_batch.terminations,
+                masks=ncbf_batch.masks,
+                y_targets=ncbf_batch.y_targets
+            )
+            # pretrain ncbf
+            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key, self.ncbf_pretrain_n_minibatches)
+
+            # log ncbf pretrain metrics
+            for key, value in ncbf_metrics.items():
+                self.log(key, value, 0)
+
         state, _ = self.env.reset()
         global_step = 0
         nr_updates = 0
@@ -446,68 +569,6 @@ class PPO:
             time_metrics["time/calc_adv_and_return_time"] = calc_adv_return_end_time - acting_end_time
 
             # updating the ncbf
-            # acquire y label and mask, add to replay buffer
-            def _future_event_within_H(events: jnp.array, H: int):
-                """
-                events: [T, N] bool (True if event occurs at time t in env n)
-                Returns:
-                  any_next_H: [T, N] bool, True if there is an event in (t, t+H] for that env.
-                """
-                T, N = events.shape
-
-                def body(carry, ev_t):
-                    # carry: [N] int, distance to next event seen so far (from future)
-                    dist_prev = carry
-                    # if event at t: distance = 0; else = dist_prev + 1 (capped at H+1)
-                    dist = jnp.where(ev_t, 0, jnp.minimum(dist_prev + 1, H + 1))
-                    return dist, dist
-
-                init = jnp.full((N,), H + 1, dtype=jnp.int32)
-
-                # scan backwards in time
-                _, dists_rev = jax.lax.scan(body, init, events[::-1])  # [T,N], reversed
-                dists = dists_rev[::-1]  # [T,N], distance to next event (0 if at t)
-
-                # “next H steps” = strictly after t: 0 < dist <= H
-                any_next_H = jnp.logical_and(dists > 0, dists <= H)
-                return any_next_H
-
-            def window_any_done_next_H(
-                    dones: jnp.array,
-                    terminates: jnp.array,
-                    H: int
-            ):
-                """
-                dones, terminates: [T, N_env, 1] or [T, N_env] bool
-                  - dones: episode ends (terminated or truncated)
-                  - terminates: true termination (failure) events
-
-                Returns:
-                  y: [T, N_env] bool
-                     horizon-safe label: True if NO terminate in next H steps, else False
-                  mask: [T, N_env] bool
-                     training mask: ~dones  (valid only on non-done steps)
-                """
-                # squeeze last dim if present
-                if dones.ndim == 3:
-                    dones_flat = jnp.squeeze(dones, axis=-1)  # [T, N]
-                else:
-                    dones_flat = dones
-
-                if terminates.ndim == 3:
-                    terms_flat = jnp.squeeze(terminates, axis=-1)  # [T, N]
-                else:
-                    terms_flat = terminates
-
-                # any terminate in (t, t+H] -> y[t] = False, else True
-                any_term_next_H = _future_event_within_H(terms_flat, H)  # [T, N]
-                y = ~any_term_next_H  # [T, N] bool
-
-                # mask is simply "not done at this step"
-                mask = ~dones_flat  # [T, N] bool
-
-                return y, mask
-
             y_bool, mask_valid = window_any_done_next_H(batch.dones, batch.terminations, self.ncbf_H)  # get true if any done in next H steps for each env
             y = y_bool.astype(jnp.float32)
             batch.masks = mask_valid
@@ -524,7 +585,8 @@ class PPO:
                 y_targets=batch.y_targets
             )
 
-            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key)
+            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key, self.ncbf_nr_minibatches)
+
 
             # Optimizing
             self.policy_state, self.critic_state, optimization_metrics, self.key = update(
