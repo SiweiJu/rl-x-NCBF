@@ -25,4 +25,26 @@ def get_config(algorithm_name):
     config.evaluation_and_save_frequency = 17301504  # -1 to disable
     config.evaluation_active = True
 
+    # ncbf config
+    config.ncbf = config_dict.ConfigDict()
+    config.ncbf.type = 'FFNN'
+    config.ncbf.H = 10  # prediction horizon
+    config.ncbf.nr_minibatches = 10
+    config.ncbf.minibatch_size = 512
+    config.ncbf.lr = 1e-3
+    config.ncbf.gamma_c = 0.0  # safety threshold
+    config.ncbf.w_clf = 1.0  # weight for classification loss
+    config.ncbf.w_cbf = 1.0  # weight for CBF loss
+    config.ncbf.w_lip = 0.0  # weight for lipschitz loss
+    config.ncbf.w_wd = 0.0  # weight for weight decay loss
+    config.ncbf.lip_target = 0.0  # lipschitz target, set to 0.0 if just want small gradient
+    config.ncbf.eta_cbf = 1.0  # class Kappa function parameter for CBF constraint
+
+    config.ncbf.pretrain = config_dict.ConfigDict()
+    config.ncbf.pretrain.nr_minibatches = 20
+    config.ncbf.pretrain.nr_steps = 16384
+
+    config.ncbf_buffer = config_dict.ConfigDict()
+    config.ncbf_buffer.buffersize = int(1e6)
+
     return config

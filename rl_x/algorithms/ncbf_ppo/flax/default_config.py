@@ -26,6 +26,7 @@ def get_config(algorithm_name):
     config.evaluation_episodes = 10
 
     # ncbf config
+    config.ncbf = config_dict.ConfigDict()
     config.ncbf.type = 'FFNN'
     config.ncbf.H = 10  # prediction horizon
     config.ncbf.nr_minibatches = 10
@@ -42,7 +43,6 @@ def get_config(algorithm_name):
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_minibatches = 20
     config.ncbf.pretrain.nr_steps = 16384
-
 
     config.ncbf_buffer = config_dict.ConfigDict()
     config.ncbf_buffer.buffersize = int(1e6)

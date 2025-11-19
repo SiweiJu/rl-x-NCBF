@@ -47,22 +47,6 @@ def make_get_safe_action(
     eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s   Kappa function
     lambda_s: float = 1e3      # slack penalty (large -> hard projection)
 ):
-    """
-    Factory that returns a JIT-able safety layer:
-        get_safe_action(action_raw, x_t) -> u_safe, info
-
-    Args:
-      ncbf: h_phi(x): R^n -> R, predictive neural CBF (differentiable)
-      f, g: known control-affine dynamics pieces (set both or none)
-      fhat: learned predictor x_{t+1} = fhat(x, u) (set if f,g not provided)
-      gamma_c: CBF margin \gamma_c
-      eta_cbf: CBF gain \tilde{alpha}(s) = eta_cbf * s
-      lambda_s: slack penalty in QP (Eq. closed-form); large -> hard projection
-
-    Returns:
-      get_safe_action: (action_raw, x_t) -> (u_safe, info)
-        where info is a dict with useful diagnostics.
-    """
     def alpha(s: jnp.ndarray) -> jnp.ndarray:
         # kappa function for CBF constraint
         return eta_cbf * s

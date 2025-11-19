@@ -71,11 +71,15 @@ class PPO:
         rlx_logger.info(f"Using device: {jax.default_backend()}")
 
         self.key = jax.random.PRNGKey(self.seed)
-        self.key, policy_key, critic_key, reset_key = jax.random.split(self.key, 4)
+        self.key, policy_key, critic_key, reset_key, ncbf_key = jax.random.split(self.key, 5)
         reset_key = jax.random.split(reset_key, 1)
 
         self.policy, self.get_processed_action = get_policy(self.config, self.env)
         self.critic = get_critic(self.config, self.env)
+
+        self.ncbf, self.ncbf_safety_layer = get_ncbf(config, env)
+        self.ncbf.apply = jax.jit(self.ncbf.apply)
+
 
         def linear_schedule(count):
             fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates
@@ -100,6 +104,15 @@ class PPO:
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
                 optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
+            )
+        )
+
+        self.ncbf_state = TrainState.create(
+            apply_fn=self.ncbf.apply,
+            params=self.ncbf.init(ncbf_key, env_state.next_observation),
+            tx=optax.chain(
+                optax.clip_by_global_norm(self.max_grad_norm),
+                optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
             )
         )
 
