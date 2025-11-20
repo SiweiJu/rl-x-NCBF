@@ -14,8 +14,8 @@
 #SBATCH --array=0
 
 
-eval "$(/home/bohlinger/miniconda3/bin/conda shell.bash hook)"
-conda activate rlx
+eval "$(/home/ju/miniconda3/bin/conda shell.bash hook)"
+conda activate loco_mjx
 
 python experiment.py \
     --algorithm.name="ppo.flax_full_jit" \
