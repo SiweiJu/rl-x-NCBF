@@ -11,12 +11,17 @@ from flax.training.train_state import TrainState
 def get_ncbf(config, env):
     # TODO: make different types of ncbf
     ncbf_type = config.algorithm.ncbf.type
+    use_safety_layer = config.algorithm.ncbf.use_safety_layer
+
     ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
 
     NCBF = NCBF_FFNN(config.algorithm.nr_hidden_units, ncbf_observation_indices)
-    dynamics_step_function = get_dynamics_step_function(config)
-    safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function)
-
+    if use_safety_layer:
+        dynamics_step_function = get_dynamics_step_function(config)
+        safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices)
+    else:
+        # dummy safety layer that does nothing
+        safety_layer_function = lambda x: x
     return (NCBF, safety_layer_function)
 
 
@@ -38,103 +43,109 @@ class NCBF_FFNN(nn.Module):
 
 
 def make_get_safe_action(
-    ncbf_apply: Callable[[dict, jnp.ndarray], jnp.ndarray],  # h_phi(x)
-    system_forward_dynamics_function: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray], # x_{t+1} = f(x_t, u_t)
+    ncbf_apply: Callable[[dict, Array], Array],   # h_phi(obs)
+    system_forward_dynamics_function: Callable[[Array, Array, Array], Array],
+    state_from_obs_id: Array,
     *,
-    # Option A: known control-affine dynamics x_{t+1} = f(x_t) + g(x_t) u_t
-    f: Optional[Callable[[jnp.ndarray], jnp.ndarray]] = None,
-    g: Optional[Callable[[jnp.ndarray], jnp.ndarray]] = None,
-    # Option B: learned differentiable one-step predictor x_{t+1} = fhat(x_t, u_t)
-    fhat: Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
     gamma_c: float = 0.0,
-    eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s   Kappa function
-    lambda_s: float = 1e3      # slack penalty (large -> hard projection)
+    eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s
+    lambda_s: float = 1e3,     # slack penalty
 ):
-    def alpha(s: jnp.ndarray) -> jnp.ndarray:
-        # kappa function for CBF constraint
+    """
+    Returns a JIT-able safety layer:
+        get_safe_action(action_raw, x_t, t, contact, phi) -> (u_safe, info)
+
+    Args:
+      ncbf_apply: flax apply function h_phi(obs)
+      system_forward_dynamics_function: x_next = f(x, u, t, contact) (your MJX WBD step)
+      state_from_obs_id: indices to get dynamics state from observation [pos(3), quat(4), joint_pos, joint_vel, contact (4)]
+      gamma_c: conservative margin
+      eta_cbf: class-K gain
+      lambda_s: slack penalty (large -> hard projection)
+      obs_from_state: optional mapping if your NCBF uses an observation (not full state).
+                      If None, we assume NCBF takes the raw state x_t / x_next directly.
+
+    Notes:
+      - Uses linearization:
+          h_phi(x_{t+1}(u)) ≈ h_phi(x_{t+1}(u0)) + a^T (u - u0)
+        where a = d/du h_phi(x_{t+1}(u))|_{u0}
+      - No explicit g(x) needed.
+    """
+
+    def alpha(s: Array) -> Array:
         return eta_cbf * s
 
-    # --------- Option A: Known control-affine dynamics ---------
-    if f is not None and g is not None:
-        # a = (∇h(x_t))^T g(x_t)
-        def compute_a_c_known(x_t: jnp.ndarray, phi: dict) -> (jnp.ndarray, jnp.ndarray):
-            grad_h = jax.grad(ncbf_apply, argnums=1)(phi, x_t)                    # (n,)
-            gx = g(x_t)                                      # (n, m)
-            fx = f(x_t)                                      # (n,)
-            a = gx.T @ grad_h                                # (m,)
-            h_vals = ncbf_apply(phi, x_t)
-            c = - grad_h @ fx - alpha(h_vals - gamma_c)   # scalar
-            return a, c
 
-        @jax.jit
-        def get_safe_action(action_raw, x_t, phi):
-            a, c = compute_a_c_known(x_t, phi)
-            aTa = jnp.dot(a, a) + 1e-12                      # numeric safety
-            aTu = jnp.dot(a, action_raw)
-            # Use ReLU on (c - a^T u_raw) to keep identity when constraint inactive
-            delta = jnp.maximum(0.0, c - aTu)
-            gain = delta / (aTa + (1.0 / lambda_s))
-            u_safe = action_raw + gain * a
-            # epsilon* as in the piecewise expression
-            eps_star = delta / (1.0 + lambda_s * aTa)
-            info = {
-                "a": a, "c": c,
-                "delta": delta,
-                "gain": gain,
-                "epsilon_star": eps_star,
-                "constraint_active": (delta > 0.0)
-            }
-            return u_safe, info
+    def a_and_c_from_linearization(obs_t: Array, u0: Array, contact: Array, phi: dict):
+        """
+        Compute:
+          a = d/du h_phi(x_{t+1}(u)) | u0
+          c = linearized RHS so constraint is a^T u >= c
+        Args:
+            obs_t: current observation (full observation matrix, need to get state from it)
+        """
 
-        return get_safe_action
-    else:
-        @jax.jit
-        def get_safe_action(action_raw: jnp.ndarray, x_t: jnp.ndarray):
-            # No safety layer implemented for learned dynamics yet
-            return action_raw, {}
-        return get_safe_action
+        def h_of_u(u):
+            x_next = system_forward_dynamics_function(x_t, u, contact)
+            obs_next = x_next[3:]
+            return ncbf_apply(phi, obs_next)  # scalar-ish
 
-    # TODO, decide how to handle Option B, learn overal funciton or control affine, and how to parse it
+        # a = ∂/∂u h(f(x,u)) at u0
+        a = jax.jacrev(h_of_u)(u0)  # (m,)
 
-    # # --------- Option B: Learned dynamics with linearization around action_raw ---------
-    # else:
-    #     # We will linearize h(x_{t+1}(u)) at u0 = action_raw:
-    #     #   h(x_{t+1}(u)) ≈ h(u0) + a^T (u - u0),
-    #     #   where a = d/du h(x_{t+1}(u))|_{u0} = (∇_x h)(x_{t+1}) @ (∂x_{t+1}/∂u).
-    #     def a_and_c_from_linearization(x_t: jnp.ndarray, u0: jnp.ndarray):
-    #         def h_of_u(u):
-    #             x_next = fhat(x_t, u)                       # (n,)
-    #             return ncbf(x_next)                         # scalar
-    #
-    #         # a = ∂/∂u h(fhat(x,u)) |_{u0}
-    #         a = jax.jacrev(h_of_u)(u0)                      # (m,)
-    #         h_u0 = h_of_u(u0)
-    #         h_x  = ncbf(x_t)
-    #         # From: h(u) - h(x_t) + alpha(h(x_t)-gamma_c) >= 0
-    #         # Linearized: a^T(u-u0) + h(u0) - h(x_t) + alpha(...) >= 0
-    #         # => a^T u >= [ -h(u0) + h(x_t) - alpha(...) + a^T u0 ] =: c_lin
-    #         c_lin = - h_u0 + h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0)
-    #         return a, c_lin
-    #
-    #     @jax.jit
-    #     def get_safe_action(action_raw: jnp.ndarray, x_t: jnp.ndarray):
-    #         a, c = a_and_c_from_linearization(x_t, action_raw)
-    #         aTa = jnp.dot(a, a) + 1e-12
-    #         aTu = jnp.dot(a, action_raw)
-    #         delta = jnp.maximum(0.0, c - aTu)
-    #         gain = delta / (aTa + (1.0 / lambda_s))
-    #         u_safe = action_raw + gain * a
-    #         eps_star = delta / (1.0 + lambda_s * aTa)
-    #         info = {
-    #             "a": a, "c": c,
-    #             "delta": delta,
-    #             "gain": gain,
-    #             "epsilon_star": eps_star,
-    #             "constraint_active": (delta > 0.0)
-    #         }
-    #         return u_safe, info
-    #
-    #     return get_safe_action
+        x_t = obs_t[state_from_obs_id][:-4]  # get dynamics state from observation
+        contact = obs_t[-4:]  # last 4 entries are contact info
+        h_u0 = h_of_u(u0)
+
+        obs_t = obs_from_state(x_t)
+        h_x  = ncbf_apply(phi, obs_t)
+
+        # Discrete-time CBF condition:
+        #   h(x_{t+1}) - h(x_t) + alpha(h(x_t)-gamma_c) >= 0
+        #
+        # Linearize h(x_{t+1}(u)):
+        #   h(x_{t+1}(u)) ≈ h_u0 + a^T (u-u0)
+        #
+        # => h_u0 + a^T(u-u0) - h_x + alpha(h_x-gamma_c) >= 0
+        # => a^T u >= -h_u0 + h_x - alpha(h_x-gamma_c) + a^T u0  =: c_lin
+        c_lin = -h_u0 + h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0)
+        return a, c_lin, h_x, h_u0
+
+    @jax.jit
+    def get_safe_action(
+        action_raw: Array,
+        x_t: Array,
+        t: Array,
+        contact: Array,
+        phi: dict
+    ) -> Tuple[Array, Dict]:
+        a, c, h_x, h_u0 = a_and_c_from_linearization(x_t, action_raw, t, contact, phi)
+
+        aTa = jnp.dot(a, a) + 1e-12
+        aTu = jnp.dot(a, action_raw)
+
+        # constraint violation amount
+        delta = jnp.maximum(0.0, c - aTu)
+
+        # closed-form QP solution (soft slack)
+        gain = delta / (aTa + (1.0 / lambda_s))
+        u_safe = action_raw + gain * a
+
+        eps_star = delta / (1.0 + lambda_s * aTa)
+
+        info = {
+            "a": a,
+            "c": c,
+            "delta": delta,
+            "gain": gain,
+            "epsilon_star": eps_star,
+            "constraint_active": (delta > 0.0),
+            "h_x": h_x,
+            "h_u0": h_u0,
+        }
+        return u_safe, info
+
+    return get_safe_action
 
 def get_dynamics_step_function(env):
     def quadruped_wb_dynamics(mjx_model, contact_id, body_id, n_joints, dt, x, u, contact):
@@ -220,4 +231,4 @@ def get_dynamics_step_function(env):
     n_joints = mjx_model.njnt
     dt = env.dt
 
-    return jax.jit(lambda x, u, t, contact: quadruped_wb_dynamics(model, mjx_model, contact_id, body_id, n_joints, dt, x, u, contact))
+    return jax.jit(lambda x, u, contact: quadruped_wb_dynamics(mjx_model, contact_id, body_id, n_joints, dt, x, u, contact))

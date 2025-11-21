@@ -344,7 +344,6 @@ class LocomotionEnv:
         )
         new_state.internal_state["env_curriculum_coeff"] =  jnp.clip(new_state.internal_state["env_curriculum_coeff"] + new_state.internal_state["env_curriculum_levels_in_a_row"] / self.env_curriculum_nr_levels, 0.0, 1.0)
         new_state.internal_state["env_curriculum_coeff"] = jnp.where(new_state.internal_state["in_eval_mode"], 1.0, new_state.internal_state["env_curriculum_coeff"])
-
         new_state.internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
         new_state.internal_state["imu_orientation_rotation_inverse"] = new_state.internal_state["imu_orientation_rotation"].inv()
         new_state.internal_state["imu_orientation_euler"] = new_state.internal_state["imu_orientation_rotation"].as_euler("xyz")
@@ -446,11 +445,14 @@ class LocomotionEnv:
 
 
     def get_observation(self, data, mjx_model, internal_state, key, action):
+        # feet ground contact appears twice in the observation, one normalized for critic, one originaly for forward dynamics model
+        feet_ground_contact = self.terrain_function.check_feet_floor_contact(data)
+
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
             data.qvel[self.actuator_joint_mask_qvel],
             action,
-            self.terrain_function.check_feet_floor_contact(data),
+            feet_ground_contact,
             internal_state["feet_time_on_ground"],
             internal_state["feet_time_in_air"],
             data.sensordata[self.imu_linear_velocity_sensor_adr:self.imu_linear_velocity_sensor_adr + self.imu_linear_velocity_sensor_dim],
@@ -459,6 +461,9 @@ class LocomotionEnv:
             internal_state["imu_orientation_rotation_inverse"].apply(jnp.array([0.0, 0.0, -1.0])),
             jnp.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             jnp.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
+            data.qpos[:3], # pos x,y,z
+            data.qpos[3:7], # orientation quaternion w,x,y,z
+            feet_ground_contact
         ])
 
         # Add noise
@@ -534,6 +539,14 @@ class LocomotionEnv:
         self.critic_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.critic_exteroceptive_observation_function.nr_exteroceptive_observations)])
         current_observation_idx += self.critic_exteroceptive_observation_function.nr_exteroceptive_observations
 
+        self.orientation_obs_idx = jnp.array([current_observation_idx + i for i in range(4)])
+        current_observation_idx += 4
+        self.position_obs_idx = jnp.array([current_observation_idx + i for i in range(3)])
+        current_observation_idx += 3
+
+        self.contact_obs_idx = jnp.array([current_observation_idx + i for i in range(4)])
+        current_observation_idx += 4
+
         self.policy_observation_indices = jnp.concatenate([
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
@@ -557,6 +570,25 @@ class LocomotionEnv:
             self.gravity_vector_obs_idx,
             self.critic_exteroception_obs_idx,
         ], dtype=int)
+
+        self.dynamics_observation_indices = jnp.concatenate([
+            self.position_obs_idx,
+            self.orientation_obs_idx,
+            self.joint_positions_obs_idx,
+            self.joint_velocities_obs_idx,
+            self.contact_obs_idx,
+        ])
+
+        # note that currently ncbf observation indices must be a subset of dynamics observation indices
+        # this can be later modified by
+        # a. learn the one step prediciton model
+        # b. fix the non-dynamic observation part in the ncbf loss computation
+        self.ncbf_observation_indices = jnp.concatenate([
+            self.orientation_obs_idx,
+            self.joint_positions_obs_idx,
+            self.joint_velocities_obs_idx,
+        ])
+
 
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
 
