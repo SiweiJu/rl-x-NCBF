@@ -1,11 +1,14 @@
 from copy import deepcopy
-from typing import Sequence, Callable, Optional
+from typing import Sequence, Callable, Optional, Tuple, Dict
 import numpy as np
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
+from mujoco import mjx
+
+Array = jnp.ndarray
 
 
 def get_ncbf(config, env):
@@ -97,7 +100,7 @@ def make_get_safe_action(
         contact = obs_t[-4:]  # last 4 entries are contact info
         h_u0 = h_of_u(u0)
 
-        obs_t = obs_from_state(x_t)
+        obs_t = x_t[3:]
         h_x  = ncbf_apply(phi, obs_t)
 
         # Discrete-time CBF condition:
