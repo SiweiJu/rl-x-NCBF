@@ -20,7 +20,7 @@ def get_ncbf(config, env):
 
     NCBF = NCBF_FFNN(config.algorithm.nr_hidden_units, ncbf_observation_indices)
     if use_safety_layer:
-        dynamics_step_function = get_dynamics_step_function(config)
+        dynamics_step_function = get_dynamics_step_function_mjx(config)
         safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices)
     else:
         # dummy safety layer that does nothing
@@ -235,3 +235,25 @@ def get_dynamics_step_function(env):
     dt = env.dt
 
     return jax.jit(lambda x, u, contact: quadruped_wb_dynamics(mjx_model, contact_id, body_id, n_joints, dt, x, u, contact))
+
+def get_dynamics_step_function_mjx(env):
+    def system_dynamics(mjx_model, x, u, n_joints, nr_substeps):
+        data = mjx.make_data(mjx_model)
+
+        qpos = x[:4+n_joints]
+        qvel = x[4+n_joints:]
+
+        data = data.replace(qpos=qpos, qvel=qvel, ctrl=u)
+        data, _ = jax.lax.scan(
+            f=lambda data, _: (mjx.step(mjx_model, data), None),
+            init=data,
+            xs=(),
+            length=nr_substeps
+        )
+        return jnp.concatenate([qpos, qvel], axis=0)
+
+    model = deepcopy(env.initial_mj_model)
+    mjx_model = mjx.put_model(model)
+    n_joints = mjx_model.njnts
+    n_substeps = env.nr_substeps
+    return(jax.jit(lambda x, u: system_dynamics(mjx_model, x, u, n_joints, n_substeps)))
