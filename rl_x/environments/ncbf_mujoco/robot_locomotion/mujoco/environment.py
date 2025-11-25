@@ -7,22 +7,22 @@ import pygame
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.viewer import MujocoViewer
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.control_functions.handler import get_control_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.command_functions.handler import get_command_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.initial_state_functions.handler import get_initial_state_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.sampling_functions.handler import get_sampling_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.reward_functions.handler import get_reward_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.termination_functions.handler import get_termination_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.action_delay_functions.handler import get_domain_randomization_action_delay_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.mujoco_model_functions.handler import get_domain_randomization_mujoco_model_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.seen_robot_functions.handler import get_domain_randomization_seen_robot_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.unseen_robot_functions.handler import get_domain_randomization_unseen_robot_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.perturbation_functions.handler import get_domain_randomization_perturbation_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.observation_noise_functions.handler import get_observation_noise_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.joint_dropout_functions.handler import get_joint_dropout_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.exteroceptive_observation_functions.handler import get_exteroceptive_observation_function
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.terrain_functions.handler import get_terrain_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.viewer import MujocoViewer
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.control_functions.handler import get_control_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.command_functions.handler import get_command_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.initial_state_functions.handler import get_initial_state_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.sampling_functions.handler import get_sampling_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.handler import get_reward_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.termination_functions.handler import get_termination_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.action_delay_functions.handler import get_domain_randomization_action_delay_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.mujoco_model_functions.handler import get_domain_randomization_mujoco_model_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.seen_robot_functions.handler import get_domain_randomization_seen_robot_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.unseen_robot_functions.handler import get_domain_randomization_unseen_robot_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.perturbation_functions.handler import get_domain_randomization_perturbation_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.observation_noise_functions.handler import get_observation_noise_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.joint_dropout_functions.handler import get_joint_dropout_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.exteroceptive_observation_functions.handler import get_exteroceptive_observation_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.terrain_functions.handler import get_terrain_function
 
 
 class LocomotionEnv(gym.Env):
@@ -438,6 +438,14 @@ class LocomotionEnv(gym.Env):
         self.critic_exteroception_obs_idx = np.array([current_observation_idx + i for i in range(self.critic_exteroceptive_observation_function.nr_exteroceptive_observations)], dtype=int)
         current_observation_idx += self.critic_exteroceptive_observation_function.nr_exteroceptive_observations
 
+        self.orientation_obs_idx = np.array([current_observation_idx + i for i in range(4)])
+        current_observation_idx += 4
+        self.position_obs_idx = np.array([current_observation_idx + i for i in range(3)])
+        current_observation_idx += 3
+
+        self.contact_obs_idx = np.array([current_observation_idx + i for i in range(4)])
+        current_observation_idx += 4
+
         self.policy_observation_indices = np.concatenate([
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
@@ -461,6 +469,14 @@ class LocomotionEnv(gym.Env):
             self.gravity_vector_obs_idx,
             self.critic_exteroception_obs_idx,
         ], dtype=int)
+
+        self.dynamics_observation_indices = np.concatenate([
+            self.position_obs_idx,
+            self.orientation_obs_idx,
+            self.joint_positions_obs_idx,
+            self.joint_velocities_obs_idx,
+            self.contact_obs_idx,
+        ])
 
         observation_space_low = -np.ones(current_observation_idx) * np.inf
         observation_space_high = np.ones(current_observation_idx) * np.inf

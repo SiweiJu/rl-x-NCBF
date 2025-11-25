@@ -1,5 +1,5 @@
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.initial_state_functions.default import DefaultDRInitialState
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.domain_randomization.initial_state_functions.random import RandomDRInitialState
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.initial_state_functions.default import DefaultDRInitialState
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.domain_randomization.initial_state_functions.random import RandomDRInitialState
 
 
 def get_initial_state_function(name, env, **kwargs):

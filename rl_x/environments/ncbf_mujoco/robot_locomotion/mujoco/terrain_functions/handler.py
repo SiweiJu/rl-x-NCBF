@@ -1,5 +1,5 @@
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.terrain_functions.plane import PlaneTerrainGeneration
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.terrain_functions.hfield_diverse import HFieldDiverseTerrainGeneration
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.terrain_functions.plane import PlaneTerrainGeneration
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.terrain_functions.hfield_diverse import HFieldDiverseTerrainGeneration
 
 
 def get_terrain_function(name, env, **kwargs):
