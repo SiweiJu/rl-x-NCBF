@@ -65,7 +65,7 @@ class PPO:
         self.ncbf_w_wd = config.algorithm.ncbf.w_wd
         self.ncbf_eta_cbf = config.algorithm.ncbf.eta_cbf
         self.ncbf_L_target = config.algorithm.ncbf.L_max
-        self.ncbf_minibatch_size = config.algorithm.ncbf.batch_size
+        self.ncbf_minibatch_size = config.algorithm.ncbf.minibatch_size
         self.ncbf_nr_minibatches = self.batch_size // self.ncbf_minibatch_size
 
         self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
@@ -87,7 +87,7 @@ class PPO:
         self.policy, self.get_processed_action = get_policy(config, env)
         self.ncbf, self.ncbf_safety_layer = get_ncbf(config, env)
         self.critic = get_critic(config, env)
-        self.replay_buffer = ReplayBuffer(capacity=config.algorithm.replay_buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=jax.random.PRNGKey(self.key))
+        self.replay_buffer = ReplayBuffer(capacity=config.algorithm.ncbf_buffer.buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=ncbf_key)
 
         self.policy.apply = jax.jit(self.policy.apply)
         self.critic.apply = jax.jit(self.critic.apply)
@@ -454,7 +454,9 @@ class PPO:
             advantages=np.zeros((self.nr_steps, self.nr_envs)),
             returns=np.zeros((self.nr_steps, self.nr_envs)),
             masks=np.zeros((self.nr_steps, self.nr_envs)),
-            y_targets=np.zeros((self.nr_steps, self.nr_envs))
+            y_targets=np.zeros((self.nr_steps, self.nr_envs)),
+            constraint_violated=np.zeros((self.nr_steps, self.nr_envs)),
+            safety_layer_active=np.zeros((self.nr_steps, self.nr_envs))
         )
 
         saving_return_buffer = deque(maxlen=100 * self.nr_envs)
@@ -503,6 +505,7 @@ class PPO:
             ncbf_batch.masks = masks
             ncbf_batch.y_targets = y
 
+
             # add batch to buffer
             self.replay_buffer.add(
                 states=ncbf_batch.states,
@@ -515,6 +518,9 @@ class PPO:
             )
             # pretrain ncbf
             self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key, self.ncbf_pretrain_n_minibatches)
+
+            mean_y = jnp.mean(ncbf_batch.y_targets)
+            ncbf_metrics['ncbf/mean_y'] = mean_y.item()
 
             # log ncbf pretrain metrics
             for key, value in ncbf_metrics.items():
@@ -534,7 +540,7 @@ class PPO:
             step_info_collection = {}
             for step in range(self.nr_steps):
                 raw_processed_action, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
-                processed_action = self.ncbf_safety_layer(raw_processed_action, state, self.ncbf_state.params)
+                processed_action, constraint_active, delta_u = self.ncbf_safety_layer(raw_processed_action, state, self.ncbf_state.params)
                 next_state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
                 actual_next_state = next_state.copy()
@@ -553,6 +559,9 @@ class PPO:
                 batch.values[step] = value
                 batch.terminations[step] = terminated
                 batch.log_probs[step] = log_prob
+                batch.constraint_violated[step] = constraint_active
+                batch.delta_u[step] = delta_u
+
                 state = next_state
                 global_step += self.nr_envs
 
@@ -561,6 +570,8 @@ class PPO:
             acting_end_time = time.time()
             time_metrics["time/acting_time"] = acting_end_time - start_time
 
+            batch_mean_constraint_violated = jnp.mean(batch.constraint_violated)
+            batch_mean_delta_u = jnp.mean(batch.delta_u)
 
             # Calculating advantages and returns
             batch.advantages, batch.returns = calculate_gae_advantages(self.critic_state, batch.next_states, batch.rewards, batch.terminations, batch.values)
@@ -585,8 +596,14 @@ class PPO:
                 y_targets=batch.y_targets
             )
 
-            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key, self.ncbf_nr_minibatches)
-
+            if self.ncbf_nr_minibatches > 0:
+                self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key, self.ncbf_nr_minibatches)
+            else:
+                ncbf_metrics = {}
+            mean_y = jnp.mean(batch.y_targets)
+            ncbf_metrics['ncbf/mean_y'] = mean_y.item()
+            ncbf_metrics['ncbf/mean_constraint_violated'] = batch_mean_constraint_violated.item()
+            ncbf_metrics['ncbf/mean_delta_u'] = batch_mean_delta_u.item()
 
             # Optimizing
             self.policy_state, self.critic_state, optimization_metrics, self.key = update(

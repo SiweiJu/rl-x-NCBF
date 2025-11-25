@@ -55,6 +55,26 @@ class PPO:
         self.batch_size = config.environment.nr_envs * config.algorithm.nr_steps
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
         self.nr_minibatches = self.batch_size // self.minibatch_size
+
+        self.ncbf_H = config.algorithm.ncbf.H
+        self.ncbf_gamma_c = config.algorithm.ncbf.gamma_c
+        self.ncbf_w_clf = config.algorithm.ncbf.w_clf
+        self.ncbf_w_cbf = config.algorithm.ncbf.w_cbf
+        self.ncbf_w_lip = config.algorithm.ncbf.w_lip
+        self.ncbf_w_wd = config.algorithm.ncbf.w_wd
+        self.ncbf_eta_cbf = config.algorithm.ncbf.eta_cbf
+        self.ncbf_L_target = config.algorithm.ncbf.L_max
+        self.ncbf_minibatch_size = config.algorithm.ncbf.batch_size
+        self.ncbf_nr_minibatches = self.batch_size // self.ncbf_minibatch_size
+
+        self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
+        self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps // self.nr_envs
+        self.ncbf_pretrain_n_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
+
+        # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
+        if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
+            raise ValueError("NCBF batch size must divide evenly into nr_steps * nr_envs.")
+
         if config.algorithm.evaluation_and_save_frequency == -1:
             self.evaluation_and_save_frequency = self.batch_size * (self.total_timesteps // self.batch_size)
         self.nr_multi_learning_and_eval_save_iterations = self.total_timesteps // self.evaluation_and_save_frequency

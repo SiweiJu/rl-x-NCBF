@@ -19,13 +19,18 @@ def get_ncbf(config, env):
     ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
 
     NCBF = NCBF_FFNN(config.algorithm.nr_hidden_units, ncbf_observation_indices)
-    if use_safety_layer:
-        dynamics_step_function = get_dynamics_step_function_mjx(config)
-        safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices)
-    else:
-        # dummy safety layer that does nothing
-        safety_layer_function = lambda x: x
-    return (NCBF, safety_layer_function)
+    dynamics_step_function = get_dynamics_step_function_mjx(env.envs[0])
+    safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices, use_safety_layer)
+
+    # Vectorize over env axis 0: (N_env, act_dim), (N_env, obs_dim), phi -> (N_env, act_dim), (N_env, info_struct)
+    batched_get_safe_action = jax.jit(
+        jax.vmap(
+            safety_layer_function,
+            in_axes=(0, 0, None),  # action_raw[env], obs_t[env], same phi for all
+            out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
+        )
+    )
+    return NCBF, batched_get_safe_action
 
 
 class NCBF_FFNN(nn.Module):
@@ -49,6 +54,7 @@ def make_get_safe_action(
     ncbf_apply: Callable[[dict, Array], Array],   # h_phi(obs)
     system_forward_dynamics_function: Callable[[Array, Array, Array], Array],
     state_from_obs_id: Array,
+    use_safety_layer: bool,
     *,
     gamma_c: float = 0.0,
     eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s
@@ -62,6 +68,7 @@ def make_get_safe_action(
       ncbf_apply: flax apply function h_phi(obs)
       system_forward_dynamics_function: x_next = f(x, u, t, contact) (your MJX WBD step)
       state_from_obs_id: indices to get dynamics state from observation [pos(3), quat(4), joint_pos, joint_vel, contact (4)]
+        use_safety_layer: whether to use safety layer (if False, returns raw action, but still calculates constraint violations)
       gamma_c: conservative margin
       eta_cbf: class-K gain
       lambda_s: slack penalty (large -> hard projection)
@@ -79,7 +86,7 @@ def make_get_safe_action(
         return eta_cbf * s
 
 
-    def a_and_c_from_linearization(obs_t: Array, u0: Array, contact: Array, phi: dict):
+    def a_and_c_from_linearization(obs_t: Array, u0: Array, phi: dict):
         """
         Compute:
           a = d/du h_phi(x_{t+1}(u)) | u0
@@ -89,7 +96,7 @@ def make_get_safe_action(
         """
 
         def h_of_u(u):
-            x_next = system_forward_dynamics_function(x_t, u, contact)
+            x_next = system_forward_dynamics_function(x_t, u)
             obs_next = x_next[3:]
             return ncbf_apply(phi, obs_next)  # scalar-ish
 
@@ -97,11 +104,10 @@ def make_get_safe_action(
         a = jax.jacrev(h_of_u)(u0)  # (m,)
 
         x_t = obs_t[state_from_obs_id][:-4]  # get dynamics state from observation
-        contact = obs_t[-4:]  # last 4 entries are contact info
         h_u0 = h_of_u(u0)
 
-        obs_t = x_t[3:]
-        h_x  = ncbf_apply(phi, obs_t)
+        ncbf_obs_t = x_t[3:]
+        h_x  = ncbf_apply(phi, ncbf_obs_t)
 
         # Discrete-time CBF condition:
         #   h(x_{t+1}) - h(x_t) + alpha(h(x_t)-gamma_c) >= 0
@@ -117,12 +123,10 @@ def make_get_safe_action(
     @jax.jit
     def get_safe_action(
         action_raw: Array,
-        x_t: Array,
-        t: Array,
-        contact: Array,
+        obs_t: Array,
         phi: dict
-    ) -> Tuple[Array, Dict]:
-        a, c, h_x, h_u0 = a_and_c_from_linearization(x_t, action_raw, t, contact, phi)
+    ) -> Tuple[Array, Array, Array]:
+        a, c, h_x, h_u0 = a_and_c_from_linearization(obs_t, action_raw, phi)
 
         aTa = jnp.dot(a, a) + 1e-12
         aTu = jnp.dot(a, action_raw)
@@ -134,19 +138,23 @@ def make_get_safe_action(
         gain = delta / (aTa + (1.0 / lambda_s))
         u_safe = action_raw + gain * a
 
-        eps_star = delta / (1.0 + lambda_s * aTa)
+        # eps_star = delta / (1.0 + lambda_s * aTa)
 
-        info = {
-            "a": a,
-            "c": c,
-            "delta": delta,
-            "gain": gain,
-            "epsilon_star": eps_star,
-            "constraint_active": (delta > 0.0),
-            "h_x": h_x,
-            "h_u0": h_u0,
-        }
-        return u_safe, info
+        # info = {
+        #     # "a": a,
+        #     # "c": c,
+        #     # "delta": delta,
+        #     # "gain": gain,
+        #     # "epsilon_star": eps_star,
+        #     "constraint_active": (delta > 0.0),
+        #     # "h_x": h_x,
+        #     # "h_u0": h_u0,
+        # }
+        constraint_active = jnp.array(delta > 0.0)
+
+        u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
+        delta_u = jnp.linalg.norm(u_processed - action_raw)
+        return u_processed, constraint_active, delta_u
 
     return get_safe_action
 
@@ -254,6 +262,6 @@ def get_dynamics_step_function_mjx(env):
 
     model = deepcopy(env.initial_mj_model)
     mjx_model = mjx.put_model(model)
-    n_joints = mjx_model.njnts
+    n_joints = mjx_model.njnt
     n_substeps = env.nr_substeps
     return(jax.jit(lambda x, u: system_dynamics(mjx_model, x, u, n_joints, n_substeps)))
