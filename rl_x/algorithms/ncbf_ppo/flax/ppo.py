@@ -326,7 +326,9 @@ class PPO:
 
             return policy_state, critic_state, mean_metrics, key
 
-        def train_ncbf(ncbf_state: TrainState, key: jax.random.PRNGKey, nr_minibatches: int):
+        @jax.jit
+        def train_ncbf(ncbf_state: TrainState, states: np.ndarray, next_states: np.ndarray, y_targets: np.ndarray, masks: np.ndarray,
+                       key: jax.random.PRNGKey):
             """
             ncbf_state: TrainState
             states: (T, E, D)
@@ -354,7 +356,7 @@ class PPO:
 
                 # (3) Lipschitz regularizer: fixed-size pair sampling from valid positions
                 @jax.jit
-                def grad_norm_penalty(apply_fn, params, x, max_norm):
+                def grad_norm_penalty(params, x, max_norm):
                     """
                     x: (batch, input_dim)
                     apply_fn: model.apply
@@ -365,25 +367,26 @@ class PPO:
 
                     def f_single(x_single):
                         # shape (output_dim,) -> reduce to scalar
-                        y = apply_fn({'params': params}, x_single)
+                        y = self.ncbf.apply(params, x_single)
                         return jnp.sum(y)
 
                     # Vectorize grad over batch
-                    grad_h = jax.vmap(jax.vmap(jax.grad(f_single)))(x)  # [B,T,D]
+                    grad_h = jax.vmap(jax.grad(f_single))(x)  # [B,T,D]
                     grad_norm = jnp.linalg.norm(grad_h, axis=-1)  # [B,T]
                     lip_violation = jnp.maximum(0.0, grad_norm - max_norm)
                     lip_loss = jnp.mean(lip_violation)
                     return lip_loss
 
-                lip_loss = grad_norm_penalty(self.ncbf.apply, ncbf_state.params, minib_obs, self.ncbf_L_target)
+                #
+                lip_loss = grad_norm_penalty(ncbf_state.params, minib_obs, self.ncbf_L_target)
 
                 # (4) weight decay
                 wd_loss = sum(jnp.sum(jnp.square(p)) for p in jax.tree.leaves(params))
 
                 total = (self.ncbf_w_clf * clf_loss +
-                         self.ncbf.w_cbf * cbf_loss +
-                         self.ncbf.w_lip * lip_loss +
-                         self.ncbf.w_wd * wd_loss)
+                         self.ncbf_w_cbf * cbf_loss +
+                         self.ncbf_w_lip * lip_loss +
+                         self.ncbf_w_wd * wd_loss)
 
                 metrics = dict(
                     loss_total=total,
@@ -396,24 +399,29 @@ class PPO:
                 return total, metrics
 
             vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, 0), out_axes=0)
-            grad_ncbf_loss_fn = jax.value_and_grad(vmap_loss_fn, argnums=0, has_aux=True)
+            safe_mean = lambda x: jnp.mean(x) if x is not None else x
+            mean_vmapped_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
+            grad_ncbf_loss_fn = jax.value_and_grad(mean_vmapped_loss_fn, argnums=0, has_aux=True)
 
             key, subkey = jax.random.split(key)
-            batch_indices = jnp.tile(jnp.arange(self.replay_buffer.size), (nr_minibatches, 1))
-            batch_indices = jax.random.permutation(subkey, batch_indices, axis=1, independent=True)
-            batch_indices = batch_indices.reshape((nr_minibatches, self.ncbf_minibatch_size))
+            # Create [nr_minibatches, buffer_size] by vmapping a permutation call
+            subkeys = jax.random.split(subkey, self.ncbf_nr_minibatches)
+            def perm_fn(k):
+                return jax.random.permutation(k, self.replay_buffer.size)
+            # Shape: [nr_minibatches, buffer_size]
+            all_perms = jax.vmap(perm_fn)(subkeys)
+            batch_indices = all_perms[:, :self.ncbf_minibatch_size]
 
             # ---------- one minibatch step ----------
-            @jax.jit
             def ncbf_minibatch_update(
                     carry,
                     minibatch_indices
             ):
                 ncbf_state = carry
-                minib_obs = self.replay_buffer.states[minibatch_indices]
-                minib_nxt = self.replay_buffer.next_states[minibatch_indices]
-                minib_y = self.replay_buffer.y_targets[minibatch_indices]
-                minib_mask = self.replay_buffer.masks[minibatch_indices]
+                minib_obs = states[minibatch_indices]
+                minib_nxt = next_states[minibatch_indices]
+                minib_y = y_targets[minibatch_indices]
+                minib_mask = masks[minibatch_indices]
 
 
                 (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
@@ -424,14 +432,14 @@ class PPO:
                     minib_mask
                 )
                 metrics["grad_norm"] = optax.global_norm(ncbf_grads)
-                new_state = state.apply_gradients(grads=ncbf_grads)
+                new_state = ncbf_state.apply_gradients(grads=ncbf_grads)
 
                 return new_state, metrics
 
             init_carry = ncbf_state
             ncbf_state, metrics = jax.lax.scan(ncbf_minibatch_update, init_carry, batch_indices)
 
-            mean_metrics = {'ncbf_' + key: jnp.mean(metrics[key]) for key in metrics}
+            mean_metrics = {'ncbf/' + key: jnp.mean(metrics[key]) for key in metrics}
             mean_metrics['ncbf/lr'] = ncbf_state.opt_state[1].hyperparams['learning_rate']
             return ncbf_state, mean_metrics, key
 
@@ -449,14 +457,14 @@ class PPO:
             rewards=np.zeros((self.nr_steps, self.nr_envs)),
             values=np.zeros((self.nr_steps, self.nr_envs)),
             terminations=np.zeros((self.nr_steps, self.nr_envs)),
-            dones=np.zeros((self.nr_steps, self.nr_envs)),
+            dones=np.zeros((self.nr_steps, self.nr_envs), dtype=bool),
             log_probs=np.zeros((self.nr_steps, self.nr_envs)),
             advantages=np.zeros((self.nr_steps, self.nr_envs)),
             returns=np.zeros((self.nr_steps, self.nr_envs)),
             masks=np.zeros((self.nr_steps, self.nr_envs)),
             y_targets=np.zeros((self.nr_steps, self.nr_envs)),
             constraint_violated=np.zeros((self.nr_steps, self.nr_envs)),
-            safety_layer_active=np.zeros((self.nr_steps, self.nr_envs))
+            delta_u=np.zeros((self.nr_steps, self.nr_envs))
         )
 
         saving_return_buffer = deque(maxlen=100 * self.nr_envs)
@@ -478,7 +486,7 @@ class PPO:
                 returns=np.zeros((self.nr_steps, self.nr_envs)),
                 masks=np.zeros((self.nr_steps, self.nr_envs)),
                 y_targets=np.zeros((self.nr_steps, self.nr_envs))
-            )
+            )   # TODO fix this!!
 
             for step in range(self.ncbf_pretrain_steps):
                 raw_processed_action, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
@@ -514,10 +522,14 @@ class PPO:
                 rewards=ncbf_batch.rewards,
                 terminations=ncbf_batch.terminations,
                 masks=ncbf_batch.masks,
-                y_targets=ncbf_batch.y_targets
+                y_targets=ncbf_batch.y_targets,
             )
             # pretrain ncbf
             self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key, self.ncbf_pretrain_n_minibatches)
+
+            # get scalar mean from ncbf_metrics
+            for key, value in ncbf_metrics.items():
+                ncbf_metrics[key] = value.item()
 
             mean_y = jnp.mean(ncbf_batch.y_targets)
             ncbf_metrics['ncbf/mean_y'] = mean_y.item()
@@ -561,6 +573,7 @@ class PPO:
                 batch.log_probs[step] = log_prob
                 batch.constraint_violated[step] = constraint_active
                 batch.delta_u[step] = delta_u
+                batch.dones[step] = done
 
                 state = next_state
                 global_step += self.nr_envs
@@ -586,7 +599,7 @@ class PPO:
             batch.y_targets = y
 
             # add batch to buffer
-            self.replay_buffer.add(
+            self.replay_buffer.add_batch(
                 states=batch.states,
                 next_states=batch.next_states,
                 actions=batch.actions,
@@ -597,9 +610,13 @@ class PPO:
             )
 
             if self.ncbf_nr_minibatches > 0:
-                self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key, self.ncbf_nr_minibatches)
+                self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key)
             else:
                 ncbf_metrics = {}
+            # get scalar mean from ncbf_metrics
+            for key, value in ncbf_metrics.items():
+                ncbf_metrics[key] = value.item()
+
             mean_y = jnp.mean(batch.y_targets)
             ncbf_metrics['ncbf/mean_y'] = mean_y.item()
             ncbf_metrics['ncbf/mean_constraint_violated'] = batch_mean_constraint_violated.item()

@@ -292,7 +292,7 @@ class LocomotionEnv(gym.Env):
         self.domain_randomization_action_delay_function.setup()
         self.handle_domain_randomization(is_episode_start=True)
 
-        next_observation = self.    get_observation(np.zeros(self.nr_actuator_joints))
+        next_observation = self.get_observation(np.zeros(self.nr_actuator_joints))
         self.internal_state["info_episode_store"] = {
             "episode_return": 0.0,
             "episode_step": 0,
@@ -352,6 +352,7 @@ class LocomotionEnv(gym.Env):
 
 
     def get_observation(self, action):
+        feet_ground_contact = self.terrain_function.check_feet_floor_contact()
         observation = np.concatenate([
             self.internal_state["data"].qpos[self.actuator_joint_mask_qpos],
             self.internal_state["data"].qvel[self.actuator_joint_mask_qvel],
@@ -365,6 +366,9 @@ class LocomotionEnv(gym.Env):
             self.internal_state["imu_orientation_rotation_inverse"].apply(np.array([0.0, 0.0, -1.0])),
             np.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation()]).reshape(-1),
             np.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation()]).reshape(-1),
+            self.internal_state["data"].qpos,    # qpos all
+            self.internal_state["data"].qvel,    # qvel all
+            feet_ground_contact,
         ])
 
         # Add noise
@@ -438,10 +442,11 @@ class LocomotionEnv(gym.Env):
         self.critic_exteroception_obs_idx = np.array([current_observation_idx + i for i in range(self.critic_exteroceptive_observation_function.nr_exteroceptive_observations)], dtype=int)
         current_observation_idx += self.critic_exteroceptive_observation_function.nr_exteroceptive_observations
 
-        self.orientation_obs_idx = np.array([current_observation_idx + i for i in range(4)])
-        current_observation_idx += 4
-        self.position_obs_idx = np.array([current_observation_idx + i for i in range(3)])
-        current_observation_idx += 3
+        self.qpos_observation_idx = np.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 7)])
+        current_observation_idx += self.nr_actuator_joints + 7
+
+        self.qvel_observation_idx = np.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 6)])
+        current_observation_idx += self.nr_actuator_joints + 6
 
         self.contact_obs_idx = np.array([current_observation_idx + i for i in range(4)])
         current_observation_idx += 4
@@ -471,12 +476,11 @@ class LocomotionEnv(gym.Env):
         ], dtype=int)
 
         self.dynamics_observation_indices = np.concatenate([
-            self.position_obs_idx,
-            self.orientation_obs_idx,
-            self.joint_positions_obs_idx,
-            self.joint_velocities_obs_idx,
+            self.qpos_observation_idx,
+            self.qvel_observation_idx,
             self.contact_obs_idx,
         ])
+        # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
 
         observation_space_low = -np.ones(current_observation_idx) * np.inf
         observation_space_high = np.ones(current_observation_idx) * np.inf

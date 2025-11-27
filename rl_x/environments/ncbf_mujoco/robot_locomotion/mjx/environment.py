@@ -461,8 +461,8 @@ class LocomotionEnv:
             internal_state["imu_orientation_rotation_inverse"].apply(jnp.array([0.0, 0.0, -1.0])),
             jnp.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             jnp.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
-            data.qpos[:3], # pos x,y,z
-            data.qpos[3:7], # orientation quaternion w,x,y,z
+            data.qpos, # qpos all not normalized, base pose can be dummy for deployment
+            data.qvel, # qvel all not normalized
             feet_ground_contact
         ])
 
@@ -541,8 +541,11 @@ class LocomotionEnv:
 
         self.orientation_obs_idx = jnp.array([current_observation_idx + i for i in range(4)])
         current_observation_idx += 4
-        self.position_obs_idx = jnp.array([current_observation_idx + i for i in range(3)])
-        current_observation_idx += 3
+
+        self.qpos_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 7)])
+        current_observation_idx += self.nr_actuator_joints + 7
+        self.qvel_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 7)])
+        current_observation_idx += self.nr_actuator_joints + 7
 
         self.contact_obs_idx = jnp.array([current_observation_idx + i for i in range(4)])
         current_observation_idx += 4
@@ -571,11 +574,11 @@ class LocomotionEnv:
             self.critic_exteroception_obs_idx,
         ], dtype=int)
 
+        # omit the base position from the dynamics observations
         self.dynamics_observation_indices = jnp.concatenate([
-            self.position_obs_idx,
             self.orientation_obs_idx,
             self.joint_positions_obs_idx,
-            self.joint_velocities_obs_idx,
+            self.qvel_observation_idx,
             self.contact_obs_idx,
         ])
 
@@ -583,6 +586,7 @@ class LocomotionEnv:
         # this can be later modified by
         # a. learn the one step prediciton model
         # b. fix the non-dynamic observation part in the ncbf loss computation
+        # note ncbf obs from the synamics states for the safety layer is currently hard coded in ncbf get_safety_layer_function
         self.ncbf_observation_indices = jnp.concatenate([
             self.orientation_obs_idx,
             self.joint_positions_obs_idx,

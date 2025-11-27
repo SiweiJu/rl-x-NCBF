@@ -33,7 +33,7 @@ class RLXInfo(gym.Wrapper):
     
 
     def __getattr__(self, name):
-        if name == "policy_observation_indices" or name == "critic_observation_indices":
+        if name in ["policy_observation_indices", "critic_observation_indices", "dynamics_observation_indices"]:
             return self.call(name)[0]
         
         return super().__getattr__(name)
