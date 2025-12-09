@@ -64,12 +64,12 @@ class PPO:
         self.ncbf_w_wd = config.algorithm.ncbf.w_wd
         self.ncbf_eta_cbf = config.algorithm.ncbf.eta_cbf
         self.ncbf_L_target = config.algorithm.ncbf.L_max
-        self.ncbf_minibatch_size = config.algorithm.ncbf.batch_size
-        self.ncbf_nr_minibatches = self.batch_size // self.ncbf_minibatch_size
+        self.ncbf_minibatch_size = config.algorithm.minibatch_size
+        self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
 
         self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
-        self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps // self.nr_envs
-        self.ncbf_pretrain_n_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
+        self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps
+        self.ncbf_pretrain_nr_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
 
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
         if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
@@ -100,7 +100,6 @@ class PPO:
 
         self.ncbf, self.ncbf_safety_layer = get_ncbf(config, env)
         self.ncbf.apply = jax.jit(self.ncbf.apply)
-
 
         def linear_schedule(count):
             fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates

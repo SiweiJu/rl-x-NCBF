@@ -357,7 +357,7 @@ class LocomotionEnv(gym.Env):
             self.internal_state["data"].qpos[self.actuator_joint_mask_qpos],
             self.internal_state["data"].qvel[self.actuator_joint_mask_qvel],
             action,
-            self.terrain_function.check_feet_floor_contact(),
+            feet_ground_contact,
             self.internal_state["feet_time_on_ground"],
             self.internal_state["feet_time_in_air"],
             self.internal_state["data"].sensordata[self.imu_linear_velocity_sensor_adr:self.imu_linear_velocity_sensor_adr + self.imu_linear_velocity_sensor_dim],

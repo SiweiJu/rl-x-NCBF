@@ -539,13 +539,11 @@ class LocomotionEnv:
         self.critic_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.critic_exteroceptive_observation_function.nr_exteroceptive_observations)])
         current_observation_idx += self.critic_exteroceptive_observation_function.nr_exteroceptive_observations
 
-        self.orientation_obs_idx = jnp.array([current_observation_idx + i for i in range(4)])
-        current_observation_idx += 4
-
         self.qpos_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 7)])
         current_observation_idx += self.nr_actuator_joints + 7
+
         self.qvel_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 7)])
-        current_observation_idx += self.nr_actuator_joints + 7
+        current_observation_idx += self.nr_actuator_joints + 6
 
         self.contact_obs_idx = jnp.array([current_observation_idx + i for i in range(4)])
         current_observation_idx += 4
@@ -576,23 +574,10 @@ class LocomotionEnv:
 
         # omit the base position from the dynamics observations
         self.dynamics_observation_indices = jnp.concatenate([
-            self.orientation_obs_idx,
-            self.joint_positions_obs_idx,
+            self.qpos_observation_idx,
             self.qvel_observation_idx,
             self.contact_obs_idx,
         ])
-
-        # note that currently ncbf observation indices must be a subset of dynamics observation indices
-        # this can be later modified by
-        # a. learn the one step prediciton model
-        # b. fix the non-dynamic observation part in the ncbf loss computation
-        # note ncbf obs from the synamics states for the safety layer is currently hard coded in ncbf get_safety_layer_function
-        self.ncbf_observation_indices = jnp.concatenate([
-            self.orientation_obs_idx,
-            self.joint_positions_obs_idx,
-            self.joint_velocities_obs_idx,
-        ])
-
 
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
 
