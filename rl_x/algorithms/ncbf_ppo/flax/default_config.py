@@ -29,8 +29,6 @@ def get_config(algorithm_name):
     config.ncbf = config_dict.ConfigDict()
     config.ncbf.type = 'FFNN'
     config.ncbf.H = 10  # prediction horizon
-    config.ncbf.nr_minibatches = 10         # set to zero to deactivate ncbf training
-    config.ncbf.minibatch_size = 512
     config.ncbf.lr = 1e-3
     config.ncbf.gamma_c = 0.0     # safety threshold
     config.ncbf.w_clf = 1.0    # weight for classification loss
@@ -40,10 +38,11 @@ def get_config(algorithm_name):
     config.ncbf.L_max = 0.0    # lipschitz target, set to 0.0 if just want small gradient
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
     config.ncbf.use_safety_layer = False
+    config.ncbf.nr_minibatches = 50
+    config.ncbf.minibatch_size = 512
 
     config.ncbf.pretrain = config_dict.ConfigDict()
-    config.ncbf.pretrain.nr_minibatches = 20
-    config.ncbf.pretrain.nr_steps = 16384
+    config.ncbf.pretrain.nr_steps = 32768    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
 
     config.ncbf_buffer = config_dict.ConfigDict()
     config.ncbf_buffer.buffer_size = int(1e6)

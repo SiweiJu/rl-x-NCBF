@@ -65,12 +65,11 @@ class PPO:
         self.ncbf_w_wd = config.algorithm.ncbf.w_wd
         self.ncbf_eta_cbf = config.algorithm.ncbf.eta_cbf
         self.ncbf_L_target = config.algorithm.ncbf.L_max
-        self.ncbf_minibatch_size = config.algorithm.ncbf.minibatch_size
-        self.ncbf_nr_minibatches = self.batch_size // self.ncbf_minibatch_size
+        self.ncbf_minibatch_size = config.algorithm.minibatch_size
+        self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
 
         self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
-        self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps // self.nr_envs
-        self.ncbf_pretrain_n_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
+        self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps
 
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
         if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
@@ -337,6 +336,7 @@ class PPO:
             terminates: (T, E)
             """
 
+            @jax.jit
             def loss_fn(params, minib_obs, minib_nxt, minib_y, minib_mask):
                 gamma_c = self.ncbf_gamma_c
                 h_x = ncbf_state.apply_fn(params, minib_obs)  # [B,T]
@@ -413,6 +413,7 @@ class PPO:
             batch_indices = all_perms[:, :self.ncbf_minibatch_size]
 
             # ---------- one minibatch step ----------
+            @jax.jit
             def ncbf_minibatch_update(
                     carry,
                     minibatch_indices
@@ -456,14 +457,14 @@ class PPO:
             actions=np.zeros((self.nr_steps, self.nr_envs) + self.as_shape),
             rewards=np.zeros((self.nr_steps, self.nr_envs)),
             values=np.zeros((self.nr_steps, self.nr_envs)),
-            terminations=np.zeros((self.nr_steps, self.nr_envs)),
+            terminations=np.zeros((self.nr_steps, self.nr_envs), dtype=bool),
             dones=np.zeros((self.nr_steps, self.nr_envs), dtype=bool),
             log_probs=np.zeros((self.nr_steps, self.nr_envs)),
             advantages=np.zeros((self.nr_steps, self.nr_envs)),
             returns=np.zeros((self.nr_steps, self.nr_envs)),
-            masks=np.zeros((self.nr_steps, self.nr_envs)),
+            masks=np.zeros((self.nr_steps, self.nr_envs), dtype=bool),
             y_targets=np.zeros((self.nr_steps, self.nr_envs)),
-            constraint_violated=np.zeros((self.nr_steps, self.nr_envs)),
+            constraint_violated=np.zeros((self.nr_steps, self.nr_envs), dtype=bool),
             delta_u=np.zeros((self.nr_steps, self.nr_envs))
         )
 
@@ -475,20 +476,22 @@ class PPO:
             # initialize a temporary buffer to collect ncbf pretrian data
             ncbf_batch = Batch(
                 states=np.zeros((self.ncbf_pretrain_steps, self.nr_envs) + self.os_shape),
-                next_states=np.zeros((self.nr_steps, self.nr_envs) + self.os_shape),
-                actions=np.zeros((self.nr_steps, self.nr_envs) + self.as_shape),
-                rewards=np.zeros((self.nr_steps, self.nr_envs)),
-                values=np.zeros((self.nr_steps, self.nr_envs)),
-                terminations=np.zeros((self.nr_steps, self.nr_envs)),
-                dones=np.zeros((self.nr_steps, self.nr_envs)),
-                log_probs=np.zeros((self.nr_steps, self.nr_envs)),
-                advantages=np.zeros((self.nr_steps, self.nr_envs)),
-                returns=np.zeros((self.nr_steps, self.nr_envs)),
-                masks=np.zeros((self.nr_steps, self.nr_envs)),
-                y_targets=np.zeros((self.nr_steps, self.nr_envs))
-            )   # TODO fix this!!
+                next_states=np.zeros((self.ncbf_pretrain_steps, self.nr_envs) + self.os_shape),
+                actions=np.zeros((self.ncbf_pretrain_steps, self.nr_envs) + self.as_shape),
+                rewards=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
+                values=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
+                terminations=np.zeros((self.ncbf_pretrain_steps, self.nr_envs), dtype=bool),
+                dones=np.zeros((self.ncbf_pretrain_steps, self.nr_envs), dtype=bool),
+                log_probs=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
+                advantages=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
+                returns=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
+                masks=np.zeros((self.ncbf_pretrain_steps, self.nr_envs), dtype=bool),
+                y_targets=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
+                constraint_violated=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
+                delta_u=np.zeros((self.ncbf_pretrain_steps, self.nr_envs))
+            )
 
-            for step in range(self.ncbf_pretrain_steps):
+            for step in range(self.nr_steps):
                 raw_processed_action, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
                 next_state, reward, terminated, truncated, info = self.env.step(action)
                 done = terminated | truncated
@@ -513,9 +516,8 @@ class PPO:
             ncbf_batch.masks = masks
             ncbf_batch.y_targets = y
 
-
             # add batch to buffer
-            self.replay_buffer.add(
+            self.replay_buffer.add_batch(
                 states=ncbf_batch.states,
                 next_states=ncbf_batch.next_states,
                 actions=ncbf_batch.actions,
@@ -525,7 +527,12 @@ class PPO:
                 y_targets=ncbf_batch.y_targets,
             )
             # pretrain ncbf
-            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.key, self.ncbf_pretrain_n_minibatches)
+            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state,
+                                                                 self.replay_buffer.states,
+                                                                 self.replay_buffer.next_states,
+                                                                 self.replay_buffer.y_targets,
+                                                                 self.replay_buffer.masks,
+                                                                 self.key)
 
             # get scalar mean from ncbf_metrics
             for key, value in ncbf_metrics.items():
@@ -537,6 +544,8 @@ class PPO:
             # log ncbf pretrain metrics
             for key, value in ncbf_metrics.items():
                 self.log(key, value, 0)
+
+            self.start_logging_ncbf_pretrain(self.ncbf_pretrain_steps)
 
         state, _ = self.env.reset()
         global_step = 0
@@ -720,6 +729,8 @@ class PPO:
         else:
             rlx_logger.info(f"Step: {step}")
 
+    def start_logging_ncbf_pretrain(self, steps):
+        rlx_logger.info(f"pretrained NCBF for {steps} steps")
 
     def end_logging(self):
         if self.track_console:
