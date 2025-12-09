@@ -4,6 +4,8 @@ import json
 import logging
 import time
 from collections import deque
+from functools import partial
+
 import tree
 import numpy as np
 import jax
@@ -70,6 +72,7 @@ class PPO:
 
         self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
         self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps
+        self.ncbf_pretrain_nr_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
 
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
         if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
@@ -325,7 +328,7 @@ class PPO:
 
             return policy_state, critic_state, mean_metrics, key
 
-        @jax.jit(static_argnums=(6))
+        @partial(jax.jit, static_argnums=(6,))
         def train_ncbf(ncbf_state: TrainState, states: np.ndarray, next_states: np.ndarray, y_targets: np.ndarray, masks: np.ndarray,
                        key: jax.random.PRNGKey, nr_minibatches: int):
             """
@@ -532,7 +535,8 @@ class PPO:
                                                                  self.replay_buffer.next_states,
                                                                  self.replay_buffer.y_targets,
                                                                  self.replay_buffer.masks,
-                                                                 self.key)
+                                                                 self.key,
+                                                                 self.ncbf_pretrain_nr_minibatches)
 
             # get scalar mean from ncbf_metrics
             for key, value in ncbf_metrics.items():

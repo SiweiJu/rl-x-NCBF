@@ -43,6 +43,7 @@ def get_config(algorithm_name):
 
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_steps = 32768    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
+    config.ncbf.pretrain.nr_minibatches = 100
 
     config.ncbf_buffer = config_dict.ConfigDict()
     config.ncbf_buffer.buffer_size = int(1e6)
