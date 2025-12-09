@@ -325,9 +325,9 @@ class PPO:
 
             return policy_state, critic_state, mean_metrics, key
 
-        @jax.jit
+        @jax.jit(static_argnums=(6))
         def train_ncbf(ncbf_state: TrainState, states: np.ndarray, next_states: np.ndarray, y_targets: np.ndarray, masks: np.ndarray,
-                       key: jax.random.PRNGKey):
+                       key: jax.random.PRNGKey, nr_minibatches: int):
             """
             ncbf_state: TrainState
             states: (T, E, D)
@@ -405,7 +405,7 @@ class PPO:
 
             key, subkey = jax.random.split(key)
             # Create [nr_minibatches, buffer_size] by vmapping a permutation call
-            subkeys = jax.random.split(subkey, self.ncbf_nr_minibatches)
+            subkeys = jax.random.split(subkey, nr_minibatches)
             def perm_fn(k):
                 return jax.random.permutation(k, self.replay_buffer.size)
             # Shape: [nr_minibatches, buffer_size]
@@ -619,7 +619,7 @@ class PPO:
             )
 
             if self.ncbf_nr_minibatches > 0:
-                self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key)
+                self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
             else:
                 ncbf_metrics = {}
             # get scalar mean from ncbf_metrics
