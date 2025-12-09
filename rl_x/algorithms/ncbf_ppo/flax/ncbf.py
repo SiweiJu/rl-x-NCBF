@@ -11,7 +11,7 @@ from mujoco import mjx
 Array = jnp.ndarray
 
 
-def get_ncbf(config, env):
+def get_ncbf(config, env, action_limit_function):
     # TODO: make different types of ncbf
     ncbf_type = config.algorithm.ncbf.type
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
@@ -21,20 +21,26 @@ def get_ncbf(config, env):
     NCBF = NCBF_FFNN(config.algorithm.nr_hidden_units, ncbf_observation_indices)
     dynamics_step_function = get_dynamics_step_function_mjx(env.envs[0])
 
-    if config.algorithm.ncbf.use_safety_layer:
-        safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices, use_safety_layer)
-    else:
-        safety_layer_function = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+    # this function is not batched and used for calculating the anticipation loss
+    safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function,
+                                                 env.dynamics_observation_indices, action_limit_function)
+    # function: (action_raw, obs_t, phi) -> (u_safe, constraint_active, delta_u)
 
-    # Vectorize over env axis 0: (N_env, act_dim), (N_env, obs_dim), phi -> (N_env, act_dim), (N_env, info_struct)
+    if use_safety_layer:
+        safety_layer_function_4_rollout = safety_layer_function
+    else:
+        safety_layer_function_4_rollout = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+
+
+    # Vectorize over axis 0: (N_env, act_dim), (N_env, obs_dim), phi -> (N_env, act_dim), (N_env, info_struct), this is used during rollouts
     batched_get_safe_action = jax.jit(
         jax.vmap(
-            safety_layer_function,
+            safety_layer_function_4_rollout,
             in_axes=(0, 0, None),  # action_raw[env], obs_t[env], same phi for items in the batch
             out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
         )
     )
-    return NCBF, batched_get_safe_action
+    return NCBF, batched_get_safe_action, safety_layer_function
 
 
 class NCBF_FFNN(nn.Module):
@@ -58,7 +64,7 @@ def make_get_safe_action(
     ncbf_apply: Callable[[dict, Array], Array],   # h_phi(obs)
     system_forward_dynamics_function: Callable[[Array, Array], Array],
     state_from_obs_id: Array,
-    use_safety_layer: bool,
+    action_limit_function: Callable[[Array], Array],
     *,
     gamma_c: float = 0.0,
     eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s
@@ -159,9 +165,11 @@ def make_get_safe_action(
         # }
         constraint_active = jnp.array(delta > 0.0)
 
-        u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
-        delta_u = jnp.linalg.norm(u_processed - action_raw)
-        return u_processed, constraint_active, delta_u
+        delta_u = jnp.linalg.norm(u_safe - action_raw)
+
+        # u_safe_processed = action_limit_function(u_safe)
+        u_safe_processed = u_safe
+        return u_safe_processed, constraint_active, delta_u
 
     return get_safe_action
 

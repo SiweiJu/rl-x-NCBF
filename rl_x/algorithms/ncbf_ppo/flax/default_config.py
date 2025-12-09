@@ -20,7 +20,7 @@ def get_config(algorithm_name):
     config.critic_coef = 0.5
     config.max_grad_norm = 0.5
     config.std_dev = 1.0
-    config.action_clipping_and_rescaling = True
+    config.action_clipping_and_rescaling = False
     config.nr_hidden_units = 256
     config.evaluation_frequency = 204800  # -1 to disable
     config.evaluation_episodes = 10
@@ -36,6 +36,7 @@ def get_config(algorithm_name):
     config.ncbf.w_lip = 0.0    # weight for lipschitz loss
     config.ncbf.w_wd = 0.0     # weight for weight decay loss
     config.ncbf.L_max = 0.0    # lipschitz target, set to 0.0 if just want small gradient
+    config.ncbf.policy_loss_coef = 0.01  # weight for policy loss when training ncbf
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
     config.ncbf.use_safety_layer = False
     config.ncbf.nr_minibatches = 50
