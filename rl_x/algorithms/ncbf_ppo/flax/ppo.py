@@ -184,22 +184,12 @@ class PPO:
                  training mask: ~dones  (valid only on non-done steps)
             """
             # squeeze last dim if present
-            if dones.ndim == 3:
-                dones_flat = jnp.squeeze(dones, axis=-1)  # [T, N]
-            else:
-                dones_flat = dones
-
-            if terminates.ndim == 3:
-                terms_flat = jnp.squeeze(terminates, axis=-1)  # [T, N]
-            else:
-                terms_flat = terminates
-
             # any terminate in (t, t+H] -> y[t] = False, else True
-            any_term_next_H = _future_event_within_H(terms_flat, H)  # [T, N]
-            y = ~any_term_next_H  # [T, N] bool
+            any_term_next_H = _future_event_within_H(terminates, H)  # [T, N]
+            y = any_term_next_H  # [T, N] bool
 
-            # mask is simply "not done at this step"
-            mask = ~dones_flat  # [T, N] bool
+            # mask is "no done in the next H steps"
+            mask = ~_future_event_within_H(dones, H) # [T, N] bool
 
             return y, mask
 

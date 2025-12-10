@@ -542,7 +542,7 @@ class LocomotionEnv:
         self.qpos_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 7)])
         current_observation_idx += self.nr_actuator_joints + 7
 
-        self.qvel_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 7)])
+        self.qvel_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 6)])
         current_observation_idx += self.nr_actuator_joints + 6
 
         self.contact_obs_idx = jnp.array([current_observation_idx + i for i in range(4)])

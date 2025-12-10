@@ -34,7 +34,7 @@ def get_ncbf(config, env):
             out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
         )
     )
-    return NCBF, batched_get_safe_action
+    return NCBF, batched_get_safe_action, safety_layer_function
 
 
 class NCBF_FFNN(nn.Module):
@@ -160,7 +160,7 @@ def make_get_safe_action(
         constraint_active = jnp.array(delta > 0.0)
 
         u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
-        delta_u = jnp.linalg.norm(u_processed - action_raw)
+        delta_u = jnp.linalg.norm(u_safe - action_raw)
         return u_processed, constraint_active, delta_u
 
     return get_safe_action
