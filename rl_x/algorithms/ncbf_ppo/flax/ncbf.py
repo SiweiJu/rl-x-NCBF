@@ -116,7 +116,7 @@ def make_get_safe_action(
         x_t = obs_t[state_from_obs_id][:-4]  # get dynamics state from observation, remove contact at end
 
         # a = ∂/∂u h(f(x,u)) at u0
-        a = jax.jacrev(h_of_u, argnums=1)(x_t, u0)  # (m,)
+        a = jax.jacfwd(h_of_u, argnums=1)(x_t, u0)  # (m,)
         h_u0 = h_of_u(x_t, u0)
 
         ncbf_obs_t = x_t[3:]
@@ -150,6 +150,8 @@ def make_get_safe_action(
         # closed-form QP solution (soft slack)
         gain = delta / (aTa + (1.0 / lambda_s))
         u_safe = action_raw + gain * a
+        # jax.debug.print("a:{x}", x=a)
+        # jax.debug.print("gain:{x}", x=gain)
 
         # eps_star = delta / (1.0 + lambda_s * aTa)
 
@@ -166,6 +168,7 @@ def make_get_safe_action(
         constraint_active = jnp.array(delta > 0.0)
 
         delta_u = jnp.linalg.norm(u_safe - action_raw)
+        # jax.debug.print("delta_u:{x}", x=delta_u)
 
         # u_safe_processed = action_limit_function(u_safe)
         u_safe_processed = u_safe
@@ -268,7 +271,7 @@ def get_dynamics_step_function_mjx(env):
         # qvel : vel(3), ang_vel(3), joint_vel(n_joints
         # pos(3) is not necessar
         qpos = data.qpos
-        qpos.at[3:7+n_joints].set(x[:4+n_joints])
+        qpos = qpos.at[3:7+n_joints].set(x[:4+n_joints])
         qvel = x[7+n_joints:]
 
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=u)
@@ -278,6 +281,8 @@ def get_dynamics_step_function_mjx(env):
             xs=(),
             length=nr_substeps
         )
+        qpos = data.qpos
+        qvel = data.qvel
         return jnp.concatenate([qpos, qvel], axis=0)
 
     model = deepcopy(env.initial_mj_model)
