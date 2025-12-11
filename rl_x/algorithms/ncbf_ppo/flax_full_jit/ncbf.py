@@ -1,4 +1,5 @@
 from copy import deepcopy
+from functools import partial
 from typing import Sequence, Callable, Optional, Tuple, Dict
 import numpy as np
 import jax
@@ -21,15 +22,19 @@ def get_ncbf(config, env):
     NCBF = NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices)
     dynamics_step_function = get_dynamics_step_function_mjx(env)
 
+    safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices,
+                                                 use_safety_layer)
+    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+
     if config.algorithm.ncbf.use_safety_layer:
-        safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices, use_safety_layer)
+        safety_layer_function_for_batch = safety_layer_function
     else:
-        safety_layer_function = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+        safety_layer_function_for_batch = dummy_safety_layer_function
 
     # Vectorize over env axis 0: (N_env, act_dim), (N_env, obs_dim), phi -> (N_env, act_dim), (N_env, info_struct)
     batched_get_safe_action = jax.jit(
         jax.vmap(
-            safety_layer_function,
+            safety_layer_function_for_batch,
             in_axes=(0, 0, None),  # action_raw[env], obs_t[env], same phi for items in the batch
             out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
         )
@@ -110,7 +115,7 @@ def make_get_safe_action(
         x_t = obs_t[state_from_obs_id][:-4]  # get dynamics state from observation, remove contact at end
 
         # a = ∂/∂u h(f(x,u)) at u0
-        a = jax.jacfwd(h_of_u, argnums=1)(x_t, u0)  # (m,)
+        a = jax.jacrev(h_of_u, argnums=1)(x_t, u0)  # (m,)
         h_u0 = h_of_u(x_t, u0)
 
         ncbf_obs_t = x_t[3:]
@@ -252,7 +257,13 @@ def get_dynamics_step_function(env):
     return jax.jit(lambda x, u, contact: quadruped_wb_dynamics(mjx_model, contact_id, body_id, n_joints, dt, x, u, contact))
 
 def get_dynamics_step_function_mjx(env):
-    def system_dynamics(mjx_model, x, u, n_joints, nr_substeps):
+    model = deepcopy(env.initial_mj_model)
+    mjx_model = mjx.put_model(model)
+    n_joints = env.nr_actuator_joints
+    nr_substeps = env.nr_substeps
+
+    @jax.jit
+    def system_dynamics(x, u):
         data = mjx.make_data(mjx_model)
 
         # harded coded indexing for now
@@ -260,8 +271,8 @@ def get_dynamics_step_function_mjx(env):
         # qvel : vel(3), ang_vel(3), joint_vel(n_joints
         # pos(3) is not necessar
         qpos = data.qpos
-        qpos = qpos.at[3:7+n_joints].set(x[:4+n_joints])
-        qvel = x[7+n_joints:]
+        qpos = qpos.at[3:7 + n_joints].set(x[:4 + n_joints])
+        qvel = x[7 + n_joints:]
 
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=u)
         data, _ = jax.lax.scan(
@@ -274,8 +285,4 @@ def get_dynamics_step_function_mjx(env):
         qvel = data.qvel
         return jnp.concatenate([qpos, qvel], axis=0)
 
-    model = deepcopy(env.initial_mj_model)
-    mjx_model = mjx.put_model(model)
-    n_joints = env.nr_actuator_joints
-    n_substeps = env.nr_substeps
-    return(jax.jit(lambda x, u: system_dynamics(mjx_model, x, u, n_joints, n_substeps)))
+    return system_dynamics
