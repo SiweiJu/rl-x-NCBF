@@ -21,6 +21,7 @@ python experiment.py \
     --algorithm.name="ppo.flax_full_jit" \
     --algorithm.total_timesteps=2000011264 \
     --environment.name="custom_mujoco.robot_locomotion.mjx" \
+    --environment.nr_envs=256 \
     --environment.seed=0 \
     --runner.mode="train" \
     --runner.track_console=False \

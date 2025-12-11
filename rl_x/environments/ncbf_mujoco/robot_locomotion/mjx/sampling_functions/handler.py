@@ -1,7 +1,7 @@
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.sampling_functions.step_probability import StepProbabilitySampling
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.sampling_functions.step_probability_and_reset import StepProbabilityAndResetSampling
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.sampling_functions.every_step import EveryStepSampling
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.sampling_functions.none import NoneSampling
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.sampling_functions.step_probability import StepProbabilitySampling
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.sampling_functions.step_probability_and_reset import StepProbabilityAndResetSampling
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.sampling_functions.every_step import EveryStepSampling
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.sampling_functions.none import NoneSampling
 
 
 def get_sampling_function(name, env, **kwargs):

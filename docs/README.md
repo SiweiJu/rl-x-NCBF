@@ -17,6 +17,7 @@ Most documentation is available in the ```README.md``` files in the respective d
 - [```/experiments/docker/```](https://github.com/nico-bohlinger/RL-X/blob/master/experiments/docker/README.md): Information on how to run experiments in a Docker container
 - [```/rl_x/algorithms/```](https://github.com/nico-bohlinger/RL-X/blob/master/algorithms/README.md): Information on the folder structure of algorithms, how to add new algorithms and how to mix and match them with environments
 - [```/rl_x/algorithms/aqe/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/aqe/README.md): Implementation details of the Aggressive Q-Learning with Ensembles (AQE) algorithm
+- [```/rl_x/algorithms/c51/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/c51/README.md): Implementation details of the Categorical Deep Q-Network (C51) algorithm
 - [```/rl_x/algorithms/crossq/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/crossq/README.md): Implementation details of the CrossQ algorithm
 - [```/rl_x/algorithms/ddpg/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/ddpg/README.md): Implementation details of the Deep Deterministic Policy Gradient (DDPG) algorithm
 - [```/rl_x/algorithms/dqn/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/dqn/README.md): Implementation details of the Deep Q-Network (DQN) algorithm
@@ -24,6 +25,7 @@ Most documentation is available in the ```README.md``` files in the respective d
 - [```/rl_x/algorithms/dqn_hl_gauss/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/dqn_hl_gauss/README.md): Implementation details of the Deep Q-Network with Histogram Loss using Gaussians (DQN HL-Gauss) algorithm
 - [```/rl_x/algorithms/droq/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/droq/README.md): Implementation details of the Dropout Q-Functions (DroQ) algorithm
 - [```/rl_x/algorithms/espo/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/espo/README.md): Implementation details of the Early Stopping Policy Optimization (ESPO) algorithm
+- [```/rl_x/algorithms/fasttd3/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/fasttd3/README.md): Implementation details of the Fast Twin Delayed Deep Deterministic Gradient (FastTD3) algorithm
 - [```/rl_x/algorithms/mpo/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/mpo/README.md): Implementation details of the Maximum a Posteriori Policy Optimization (MPO) algorithm
 - [```/rl_x/algorithms/ppo/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/ppo/README.md): Implementation details of the Proximal Policy Optimization (PPO) algorithm
 - [```/rl_x/algorithms/ppo_dtrl/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/ppo_dtrl/README.md): Implementation details of Differentiable Trust Region Layers in combination with the Proximal Policy Optimization (PPO+DTRL) algorithm
@@ -41,6 +43,7 @@ Most documentation is available in the ```README.md``` files in the respective d
 - [```/rl_x/environments/custom_mujoco/robot_locomotion/deployment/unitree_go2/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/environments/custom_mujoco/robot_locomotion/deployment/unitree_go2/README.md): Instructions on how to use a trained policy to deploy it on a real Unitree Go2 robot
 - [```/rl_x/environments/envpool/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/environments/gym/README.md): Details of the EnvPool environments
 - [```/rl_x/environments/gym/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/environments/gym/README.md): Details of the Gymnasium environments
+- [```/rl_x/environments/mujoco_playground/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/environments/mujoco_playground/README.md): Details of the MuJoCo Playground environments
 - [```/rl_x/runner/```](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/runner/README.md): Information on the folder structure of the runner class and how to use it to run experiments
 
 
@@ -89,7 +92,7 @@ pip install "torch>=2.7.0" --index-url https://download.pytorch.org/whl/cu118 --
 ### 5. JAX
 For Linux, JAX with GPU support can be installed with the following command:
 ```
-pip install -U "jax[cuda12]"
+pip install "jax[cuda12]"
 ```
 For MacOS and Windows, JAX with GPU support is not supported out-of-the-box. However, it can be done with some extra effort (see [here](https://github.com/google/jax) for more information).
 

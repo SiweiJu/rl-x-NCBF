@@ -7,6 +7,7 @@ def get_config(environment_name):
         "nr_envs": 1,
         "seed": 1,
         "render": False,
+        "async_skip_percentage": 0.0, # only used if nr_envs > 1
         "train_robot": "unitree_go2",
         "control_type": "pd",
         "command": {

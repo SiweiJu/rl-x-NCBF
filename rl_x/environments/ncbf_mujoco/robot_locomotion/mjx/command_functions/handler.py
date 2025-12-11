@@ -1,4 +1,4 @@
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.command_functions.random import RandomCommands
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.command_functions.random import RandomCommands
 
 
 def get_command_function(name, env, **kwargs):

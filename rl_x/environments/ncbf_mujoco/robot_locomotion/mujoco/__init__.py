@@ -1,7 +1,7 @@
 from rl_x.environments.environment_manager import extract_environment_name_from_file, register_environment
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.create_env import create_env
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.default_config import get_config
-from rl_x.environments.custom_mujoco.robot_locomotion.mujoco.general_properties import GeneralProperties
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.create_env import create_env
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.default_config import get_config
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.general_properties import GeneralProperties
 
 
 ROBOT_LOCOMOTION_MUJOCO_ENV = extract_environment_name_from_file(__file__)

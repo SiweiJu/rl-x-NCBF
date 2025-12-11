@@ -1,8 +1,8 @@
 import importlib
 from pathlib import Path
 
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.environment import LocomotionEnv
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.general_properties import GeneralProperties
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.environment import LocomotionEnv
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.general_properties import GeneralProperties
 
 
 def create_env(config):

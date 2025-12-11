@@ -1,5 +1,5 @@
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.domain_randomization.observation_noise_functions.default import DefaultDRObservationNoise
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.domain_randomization.observation_noise_functions.none import NoneDRObservationNoise
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.domain_randomization.observation_noise_functions.default import DefaultDRObservationNoise
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.domain_randomization.observation_noise_functions.none import NoneDRObservationNoise
 
 
 def get_observation_noise_function(name, env, **kwargs):

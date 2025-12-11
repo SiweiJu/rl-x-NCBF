@@ -1,5 +1,5 @@
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.domain_randomization.joint_dropout_functions.default import DefaultDRJointDropout
-from rl_x.environments.custom_mujoco.robot_locomotion.mjx.domain_randomization.joint_dropout_functions.none import NoneDRJointDropout
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.domain_randomization.joint_dropout_functions.default import DefaultDRJointDropout
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.domain_randomization.joint_dropout_functions.none import NoneDRJointDropout
 
 
 

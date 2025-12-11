@@ -30,6 +30,7 @@ A framework for Reinforcement Learning research.
 - [Early Stopping Policy Optimization (ESPO)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/espo) in PyTorch, Flax
 - [Deep Deterministic Policy Gradient (DDPG)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/ddpg) in Flax
 - [Twin Delayed Deep Deterministic Gradient (TD3)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/td3) in Flax
+- [Fast Twin Delayed Deep Deterministic Gradient (FastTD3)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/fasttd3) in Flax
 - [Soft Actor Critic (SAC)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/sac) in PyTorch, Flax
 - [Randomized Ensembled Double Q-Learning (REDQ)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/redq) in Flax
 - [Dropout Q-Functions (DroQ)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/droq) in Flax
@@ -40,6 +41,7 @@ A framework for Reinforcement Learning research.
 - [Deep Q-Network (DQN)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/dqn) in Flax
 - [Deep Q-Network with Histogram Loss using Gaussians (DQN HL-Gauss)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/dqn_hl_gauss) in Flax
 - [Double Deep Q-Network (DDQN)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/ddqn) in Flax
+- [Categorical Deep Q-Network (C51)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/c51) in Flax
 - [Parallelized Q-Network (PQN)](https://github.com/nico-bohlinger/RL-X/blob/master/rl_x/algorithms/pqn) in Flax
 
 
@@ -54,6 +56,8 @@ A framework for Reinforcement Learning research.
     - Atari
     - Classic control
     - DeepMind Control Suite
+- [MuJoCo Playground](https://github.com/google-deepmind/mujoco_playground)
+    - Locomotion
 - [Custom MuJoCo](https://github.com/nico-bohlinger/RL-X/tree/master/rl_x/environments/custom_mujoco)
     - Example of a custom MuJoCo environment
     - Example of a custom MuJoCo XLA (MJX) environment
@@ -82,7 +86,7 @@ cd RL-X
 pip install -e .[all] --config-settings editable_mode=compat
 pip uninstall $(pip freeze | grep -i '\-cu12' | cut -d '=' -f 1) -y
 pip install "torch>=2.7.0" --index-url https://download.pytorch.org/whl/cu118 --upgrade
-pip install -U "jax[cuda12]"
+pip install "jax[cuda12]"
 ```
 For other configurations, see the [detailed installation guide](https://nico-bohlinger.github.io/RL-X/#detailed-installation-guide) in the documentation.
 As Isaac Lab needs to be installed separately, instructions can also be found there.
