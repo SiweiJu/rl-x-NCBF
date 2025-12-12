@@ -57,7 +57,17 @@ class LocomotionEnv(gym.Env):
             dir_vec = xml_handle.find("body", "dir_arrow")
             dir_vec.add("site", name="dir_arrow_ball", type="sphere", size=".02", pos="-.1 0 0")
             dir_vec.add("site", name="dir_arrow", type="cylinder", size=".01", fromto="0 0 -.1 0 0 .1")
-        
+
+        if self.should_render:
+            # add the safety light
+            trunk = xml_handle.find("body", "trunk")
+            trunk.add("geom", name="safety_light", pos="0 0 0.2", type="sphere", dclass="visual", size="0.05", rgba="1 0 0 1")
+            # light_vec = xml_handle.find("body", "safety_light_body")
+            # light_vec.add("site", name="safety_light", type="sphere", size="0.2", pos="0 0 0.6", rgba="0 1 0 1")
+            #
+            # trunk = xml_handle.worldbody
+            # trunk.add("site", name="safety_light", type="sphere", size="0.5", pos="0 0 1.5", rgba="1 0 0 1")
+
         self.initial_mj_model = mujoco.MjModel.from_xml_string(xml=xml_handle.to_xml_string(), assets=xml_handle.get_assets())
         self.initial_mj_model.opt.timestep = env_config["timestep"]
         self.data = mujoco.MjData(self.initial_mj_model)
@@ -208,6 +218,13 @@ class LocomotionEnv(gym.Env):
             self.light_xdir = self.c_data.light_xdir
             self.light_xpos = self.c_data.light_xpos
 
+            # cache site id once
+            self.safety_light_site_id = mujoco.mj_name2id(
+                self.initial_mj_model,
+                mujoco.mjtObj.mjOBJ_GEOM,
+                "safety_light",
+            )
+
             pygame.init()
             pygame.joystick.init()
             self.joystick_present = False
@@ -257,7 +274,19 @@ class LocomotionEnv(gym.Env):
             arrow_offset = -(0.1 - (magnitude * 0.1))
             self.internal_state["data"].site("dir_arrow").xpos += [arrow_offset * np.sin(np.pi/2 + desired_angle), -arrow_offset * np.cos(np.pi/2 + desired_angle), 0]
             self.internal_state["data"].site("dir_arrow_ball").xpos = self.internal_state["data"].body("dir_arrow").xpos + [-0.1 * np.sin(np.pi/2 + desired_angle), 0.1 * np.cos(np.pi/2 + desired_angle), 0]
-        
+
+        # add safety light
+        safety = self.internal_state["safe_prediction"]
+        if safety < 0.3:
+            safety_color = np.array([1.0, 0.0, 0.0, 1.0])  # red
+        elif safety < 0.7:
+            safety_color = np.array([1.0, 1.0, 0.0, 1.0])  # yellow
+        else:
+            safety_color = np.array([0.0, 1.0, 0.0, 1.0])  # green
+
+        # write RGBA into the model array
+        self.initial_mj_model.geom_rgba[self.safety_light_site_id] = safety_color
+
         self.viewer.render(self.internal_state["data"])
 
 
@@ -300,6 +329,7 @@ class LocomotionEnv(gym.Env):
             "episode_step": 0,
             "episode_total_xy_velocity_diff_abs": 0.0,
         }
+        self.internal_state["safe_prediction"] = 1.0
 
         return next_observation, self.internal_state["info"]
 

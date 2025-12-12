@@ -804,10 +804,13 @@ class PPO:
             done = False
             episode_return = 0
             state, _ = self.env.reset()
+            self.env.envs[0].internal_state["safe_prediction"] = 1
+
             while not done:
                 processed_action = get_action(self.policy_state, state)
                 prediction = self.ncbf.apply(self.ncbf_state.params, state)
                 print(prediction)
+                self.env.envs[0].internal_state["safe_prediction"] = prediction
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
                 episode_return += reward
