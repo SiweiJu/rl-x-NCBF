@@ -89,7 +89,7 @@ class PPO:
         self.as_shape = env.single_action_space.shape
         
         self.policy, self.get_processed_action = get_policy(config, env)
-        self.ncbf, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env, self.get_processed_action)
+        self.ncbf, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env)
         self.critic = get_critic(config, env)
         self.replay_buffer = ReplayBuffer(capacity=config.algorithm.ncbf_buffer.buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=ncbf_key)
 
@@ -745,7 +745,8 @@ class PPO:
     def save(self):
         checkpoint = {
             "policy": self.policy_state,
-            "critic": self.critic_state
+            "critic": self.critic_state,
+            "ncbf": self.ncbf_state,
         }
         save_args = orbax_utils.save_args_from_target(checkpoint)
         self.best_model_checkpointer.save(f"{self.save_path}/tmp", checkpoint, save_args=save_args)
@@ -774,7 +775,8 @@ class PPO:
 
         target = {
             "policy": model.policy_state,
-            "critic": model.critic_state
+            "critic": model.critic_state,
+            "ncbf_state": model.ncbf_state,
         }
         restore_args = orbax_utils.restore_args_from_target(target)
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
@@ -782,6 +784,7 @@ class PPO:
 
         model.policy_state = checkpoint["policy"]
         model.critic_state = checkpoint["critic"]
+        model.ncbf_state = checkpoint["ncbf_state"]
 
         shutil.rmtree(checkpoint_dir)
 
@@ -793,7 +796,7 @@ class PPO:
         def get_action(policy_state: TrainState, state: np.ndarray):
             action_mean, action_logstd = self.policy.apply(policy_state.params, state)
             raw_processed_action = self.get_processed_action(action_mean)
-            safe_action, constraint_active, delta_u = self.ncbf_safety_layer(raw_processed_action, state, self.ncbf_state.params)
+            safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, state, self.ncbf_state.params)
             return safe_action, raw_processed_action, constraint_active, delta_u
         
         self.set_eval_mode()
@@ -803,6 +806,8 @@ class PPO:
             state, _ = self.env.reset()
             while not done:
                 processed_action = get_action(self.policy_state, state)
+                prediction = self.ncbf.apply(self.ncbf_state.params, state)
+                print(prediction)
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
                 episode_return += reward

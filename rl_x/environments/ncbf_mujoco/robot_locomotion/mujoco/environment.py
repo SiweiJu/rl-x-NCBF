@@ -134,6 +134,7 @@ class LocomotionEnv(gym.Env):
         self.dt = env_config["timestep"] * self.nr_substeps
         self.horizon = int(round(env_config["episode_length_in_seconds"] * self.control_frequency_hz))
         self.command_function = get_command_function(env_config["command"]["type"], self)
+        self.command_function_type = env_config["command"]["type"]
         self.command_sampling_function = get_sampling_function(env_config["command"]["sampling_type"], self)
         self.initial_state_function = get_initial_state_function(env_config["domain_randomization"]["initial_state"]["type"], self)
         self.reward_function = get_reward_function(env_config["reward"]["type"], self)
@@ -237,6 +238,7 @@ class LocomotionEnv(gym.Env):
                     goal_y_velocity = float(commands[1])
                     goal_yaw_velocity = float(commands[2])
                     explicit_velocity_commands = True
+
             if explicit_velocity_commands:
                 goal_velocities = np.array([goal_x_velocity, goal_y_velocity, goal_yaw_velocity])
                 goal_velocities = np.where(np.abs(goal_velocities) < (self.command_function.zero_clip_threshold_percentage * self.internal_state["max_command_velocity"]), 0.0, goal_velocities)
@@ -325,9 +327,9 @@ class LocomotionEnv(gym.Env):
         reward = self.reward_function.reward_and_info(chosen_action)
 
         should_sample_commands = self.command_sampling_function.step()
-        if should_sample_commands:
+        if should_sample_commands or self.command_function_type == "random_trajectory":
             self.command_function.get_next_command()
-        
+
         next_observation = self.get_observation(chosen_action)
         terminated = self.termination_function.should_terminate() | np.any(np.abs(self.internal_state["data"].qvel[:3]) == 100.0)
         truncated = self.internal_state["info_episode_store"]["episode_step"] >= (self.horizon - 1)
@@ -356,7 +358,7 @@ class LocomotionEnv(gym.Env):
         observation = np.concatenate([
             self.internal_state["data"].qpos[self.actuator_joint_mask_qpos],
             self.internal_state["data"].qvel[self.actuator_joint_mask_qvel],
-            action,
+            action.squeeze(),
             feet_ground_contact,
             self.internal_state["feet_time_on_ground"],
             self.internal_state["feet_time_in_air"],

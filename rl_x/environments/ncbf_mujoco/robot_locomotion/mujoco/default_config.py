@@ -17,6 +17,10 @@ def get_config(environment_name):
             "zero_clip_threshold_percentage": 0.1,
             "all_zero_chance": 0.04,
             "single_zero_chance": 0.005,
+
+            # configs for test mode with type "random_trajectory"
+            "trajectory_length_in_seconds": 10.0,
+
         },
         "env_curriculum_nr_levels": 100,
         "env_curriculum_level_success_episode_return": 8.0,

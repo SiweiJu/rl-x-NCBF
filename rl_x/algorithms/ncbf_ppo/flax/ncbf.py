@@ -20,7 +20,7 @@ def get_ncbf(config, env):
     ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
 
     NCBF = NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices)
-    dynamics_step_function = get_dynamics_step_function_mjx(env)
+    dynamics_step_function = get_dynamics_step_function_mjx(env.envs[0])
 
     safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices,
                                                  use_safety_layer)
@@ -56,6 +56,8 @@ class NCBF_FFNN(nn.Module):
         x = nn.tanh(x)
         # Scalar CBF output h(x)
         h = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+        h = nn.sigmoid(h)
+
         return jnp.squeeze(h, -1)  # shape ()
 
 
@@ -115,7 +117,7 @@ def make_get_safe_action(
         x_t = obs_t[state_from_obs_id][:-4]  # get dynamics state from observation, remove contact at end
 
         # a = ∂/∂u h(f(x,u)) at u0
-        a = jax.jacrev(h_of_u, argnums=1)(x_t, u0)  # (m,)
+        a = jax.jacfwd(h_of_u, argnums=1)(x_t, u0)  # (m,)
         h_u0 = h_of_u(x_t, u0)
 
         ncbf_obs_t = x_t[3:]
@@ -132,7 +134,6 @@ def make_get_safe_action(
         c_lin = -h_u0 + h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0)
         return a, c_lin, h_x, h_u0
 
-    @jax.jit
     def get_safe_action(
         action_raw: Array,
         obs_t: Array,
@@ -260,7 +261,7 @@ def get_dynamics_step_function_mjx(env):
     model = deepcopy(env.initial_mj_model)
     mjx_model = mjx.put_model(model)
     n_joints = env.nr_actuator_joints
-    nr_substeps = env.nr_substeps
+    nr_substeps = int(env.nr_substeps)
 
     @jax.jit
     def system_dynamics(x, u):
