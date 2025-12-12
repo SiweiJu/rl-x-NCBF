@@ -833,7 +833,7 @@ class PPO:
         checkpoint = {
             "policy": policy_state,
             "critic": critic_state,
-            "ncbf_state": ncbf_state,
+            "ncbf": ncbf_state,
         }
         save_args = orbax_utils.save_args_from_target(checkpoint)
         self.latest_model_checkpointer.save(f"{self.save_path}/tmp", checkpoint, save_args=save_args)
