@@ -40,7 +40,7 @@ def get_config(algorithm_name):
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
     config.ncbf.use_safety_layer = False
     config.ncbf.nr_minibatches = 50
-    config.ncbf.minibatch_size = 512
+    config.ncbf.minibatch_size = 64
     config.ncbf.nr_hidden_units = 512
 
     config.ncbf.pretrain = config_dict.ConfigDict()
