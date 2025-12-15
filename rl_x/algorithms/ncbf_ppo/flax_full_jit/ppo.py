@@ -519,11 +519,6 @@ class PPO:
                 y_bool, masks = window_any_done_next_H(dones, terminations, self.ncbf_H)
                 y_target = y_bool.astype(jnp.float32)
 
-                jax.debug.print("sum of dones: {x}", x=jnp.sum(dones))
-                jax.debug.print("sum of terminations: {x}", x=jnp.sum(terminations))
-                jax.debug.print("sum of y_target: {x}", x=jnp.sum(y_target))
-                jax.debug.print("sum of masks: {x}", x=jnp.sum(masks))
-
                 ncbf_replay_buffer["states"] = ncbf_replay_buffer["states"].at[:self.ncbf_pretrain_steps, : ].set(states)
                 ncbf_replay_buffer["next_states"] = ncbf_replay_buffer["next_states"].at[:self.ncbf_pretrain_steps, : ].set(next_states)
                 ncbf_replay_buffer["actions"] = ncbf_replay_buffer["actions"].at[:self.ncbf_pretrain_steps, : ].set(actions)
