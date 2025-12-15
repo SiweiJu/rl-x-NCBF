@@ -185,11 +185,14 @@ class PPO:
             """
             # squeeze last dim if present
             # any terminate in (t, t+H] -> y[t] = False, else True
-            any_term_next_H = _future_event_within_H(terminates, H)  # [T, N]
-            y = any_term_next_H  # [T, N] bool
+            # set last done to True to avoid counting beyond buffer end for each env
+            dones = dones.at[-1, :].set(True)
 
-            # mask is "no done in the next H steps"
-            mask = ~_future_event_within_H(dones, H) # [T, N] bool
+            any_term_next_H = _future_event_within_H(terminates, H)  # [T, N]
+            y = ~any_term_next_H  # [T, N] bool
+
+            # mask is "no timely truncation in the next H steps"
+            mask = ~_future_event_within_H(dones & ~terminates, H) # [T, N] bool
 
             return y, mask
 
@@ -509,6 +512,7 @@ class PPO:
                 ncbf_batch.rewards[step] = reward
                 ncbf_batch.values[step] = value
                 ncbf_batch.terminations[step] = terminated
+                ncbf_batch.dones[step] = done
                 ncbf_batch.log_probs[step] = log_prob
                 state = next_state
 
@@ -776,7 +780,7 @@ class PPO:
         target = {
             "policy": model.policy_state,
             "critic": model.critic_state,
-            "ncbf_state": model.ncbf_state,
+            "ncbf": model.ncbf_state,
         }
         restore_args = orbax_utils.restore_args_from_target(target)
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
@@ -784,7 +788,7 @@ class PPO:
 
         model.policy_state = checkpoint["policy"]
         model.critic_state = checkpoint["critic"]
-        model.ncbf_state = checkpoint["ncbf_state"]
+        model.ncbf_state = checkpoint["ncbf"]
 
         shutil.rmtree(checkpoint_dir)
 

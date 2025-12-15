@@ -224,11 +224,13 @@ class PPO:
                     any_next_H = jnp.logical_and(dists > 0, dists <= H)
                     return any_next_H
 
+                # set last step for each env to done=True to avoid looking beyond episode end
+                dones = dones.at[-1, :].set(True)
                 any_term_next_H = _future_event_within_H(terminates, H)  # [T, N]
                 y = ~any_term_next_H  # [T, N] bool
 
                 # mask is simply "not done for next H"
-                any_done_next_H = _future_event_within_H(dones, H)  # [T, N]
+                any_done_next_H = _future_event_within_H(dones & ~terminates, H)  # [T, N]
                 mask = ~any_done_next_H  # [T, N] bool
 
                 return y, mask
@@ -516,6 +518,11 @@ class PPO:
                 # process the batch data to get mask and y_target
                 y_bool, masks = window_any_done_next_H(dones, terminations, self.ncbf_H)
                 y_target = y_bool.astype(jnp.float32)
+
+                jax.debug.print("sum of dones: {x}", x=jnp.sum(dones))
+                jax.debug.print("sum of terminations: {x}", x=jnp.sum(terminations))
+                jax.debug.print("sum of y_target: {x}", x=jnp.sum(y_target))
+                jax.debug.print("sum of masks: {x}", x=jnp.sum(masks))
 
                 ncbf_replay_buffer["states"] = ncbf_replay_buffer["states"].at[:self.ncbf_pretrain_steps, : ].set(states)
                 ncbf_replay_buffer["next_states"] = ncbf_replay_buffer["next_states"].at[:self.ncbf_pretrain_steps, : ].set(next_states)

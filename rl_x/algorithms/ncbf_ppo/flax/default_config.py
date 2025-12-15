@@ -41,6 +41,7 @@ def get_config(algorithm_name):
     config.ncbf.use_safety_layer = False
     config.ncbf.nr_minibatches = 50
     config.ncbf.minibatch_size = 512
+    config.ncbf.nr_hidden_units = 512
 
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_steps = 32768    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
