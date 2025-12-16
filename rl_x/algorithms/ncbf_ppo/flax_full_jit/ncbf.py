@@ -58,7 +58,7 @@ class NCBF_FFNN(nn.Module):
         h = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
         # clip the output to be in [0, 1]
-        h = nn.sigmoid(h)
+        # h = nn.sigmoid(h)
         return jnp.squeeze(h, -1)  # shape ()
 
 
