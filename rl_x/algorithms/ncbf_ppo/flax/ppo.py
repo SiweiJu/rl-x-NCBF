@@ -773,6 +773,27 @@ class PPO:
 
         loaded_algorithm_config = json.load(open(f"{checkpoint_dir}/config_algorithm.json", "r"))
         for key, value in loaded_algorithm_config.items():
+
+            if isinstance(value, dict):
+                # apply nested keys unless explicitly set by the caller
+                if not (key in config.algorithm or hasattr(config.algorithm, key)):
+                    continue
+                for sub_key, sub_value in value.items():
+                    full_param = f"algorithm.{key}.{sub_key}"
+                    if full_param in explicitly_set_algorithm_params:
+                        continue
+                    try:
+                        parent = getattr(config.algorithm, key)
+                        if isinstance(parent, dict):
+                            parent[sub_key] = sub_value
+                        else:
+                            setattr(parent, sub_key, sub_value)
+                    except Exception:
+                        try:
+                            config.algorithm[key][sub_key] = sub_value
+                        except Exception:
+                            pass
+                continue
             if f"algorithm.{key}" not in explicitly_set_algorithm_params and key in config.algorithm:
                 config.algorithm[key] = value
         model = PPO(config, env, run_path, writer)
@@ -811,9 +832,13 @@ class PPO:
             self.env.envs[0].internal_state["safe_prediction"] = 1
 
             while not done:
-                processed_action = get_action(self.policy_state, state)
+                processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state)
                 prediction = self.ncbf.apply(self.ncbf_state.params, state)
-                print(prediction)
+                # processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(processed_action,
+                #                                                                               state,
+                #                                                                               self.ncbf_state.params)
+
+                print("prediction: ", prediction, "constraint_active: ", constraint_active, "delta_u: ", delta_u)
                 self.env.envs[0].internal_state["safe_prediction"] = prediction
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
