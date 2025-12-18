@@ -56,6 +56,8 @@ class NCBF_FFNN(nn.Module):
         x = nn.tanh(x)
         # Scalar CBF output h(x)
         h = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+
+        jax.debug.print("NCBF output before sigmoid: {h}", h=h)
         h = nn.sigmoid(h)
 
         return jnp.squeeze(h, -1)  # shape ()
@@ -106,19 +108,27 @@ def make_get_safe_action(
             obs_t: current observation (full observation matrix, need to get state from it)
         """
 
-        def h_of_u(x_t, u):
-            # derivtives needs to be take for u only, x_t fixed
-            def h(u):
-                x_next = system_forward_dynamics_function(x_t, u)
-                obs_next = x_next[3:]
-                return ncbf_apply(phi, obs_next)  # scalar-ish
-            return h(u)
-
         x_t = obs_t[state_from_obs_id][:-4]  # get dynamics state from observation, remove contact at end
 
+        def h_of_u(u):
+            x_next = system_forward_dynamics_function(x_t, u)
+            obs_next = x_next[3:]
+            return ncbf_apply(phi, obs_next)  # scalar-ish
+
+
         # a = ∂/∂u h(f(x,u)) at u0
-        a = jax.jacfwd(h_of_u, argnums=1)(x_t, u0)  # (m,)
-        h_u0 = h_of_u(x_t, u0)
+        a = jax.jacfwd(h_of_u)(u0)  # (m,)
+
+        # dx_du = jax.jacfwd(lambda u: system_forward_dynamics_function(x_t, u))(u0)  # (state_dim, act_dim)
+        # dh_dx = jax.jacfwd(lambda x: ncbf_apply(phi, x[3:]))(x_t)  # (state_dim,)
+        #
+        # grad_dx_du_norm = jnp.linalg.norm(dx_du)
+        # grad_a_norm = jnp.linalg.norm(a)
+        # grad_dh_dx_norm = jnp.linalg.norm(dh_dx)
+        #
+        # jax.debug.print("dx/du norm: {ndx}, dh/du norm: {na}, dh/dx norm: {ndh}", ndx=grad_dx_du_norm, na=grad_a_norm, ndh=grad_dh_dx_norm)
+
+        h_u0 = h_of_u(u0)
 
         ncbf_obs_t = x_t[3:]
         h_x  = ncbf_apply(phi, ncbf_obs_t)
@@ -134,6 +144,7 @@ def make_get_safe_action(
         c_lin = -h_u0 + h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0)
         return a, c_lin, h_x, h_u0
 
+    @jax.jit
     def get_safe_action(
         action_raw: Array,
         obs_t: Array,
@@ -146,6 +157,7 @@ def make_get_safe_action(
 
         # constraint violation amount
         delta = jnp.maximum(0.0, c - aTu)
+        jax.debug.print("delta: {delta}, h_x: {h_x}, h_u0: {h_u0}, a: {a}", delta=delta, h_x=h_x, h_u0=h_u0, a=a)
 
         # closed-form QP solution (soft slack)
         gain = delta / (aTa + (1.0 / lambda_s))
@@ -270,7 +282,7 @@ def get_dynamics_step_function_mjx(env):
         # harded coded indexing for now
         # qpos : pos(3), quat(4), joint_pos(n_joints)
         # qvel : vel(3), ang_vel(3), joint_vel(n_joints
-        # pos(3) is not necessar
+        # pos(3) is not necessary
         qpos = data.qpos
         qpos = qpos.at[3:7 + n_joints].set(x[:4 + n_joints])
         qvel = x[7 + n_joints:]
