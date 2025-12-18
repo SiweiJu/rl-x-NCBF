@@ -605,6 +605,18 @@ class PPO:
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_bool)
 
+                    # calc mean y in buffer
+                    y = ncbf_replay_buffer["y_target"]  # shape: (capacity, nr_envs)
+                    size = ncbf_replay_buffer["size"]  # tracer scalar
+
+                    # mask first `size` rows; shape (capacity, 1)
+                    mask = (jnp.arange(y.shape[0]) < size).astype(jnp.float32)[:, None]
+
+                    # sum masked entries and compute safe mean
+                    sum_y = jnp.sum(y * mask)
+                    denom = jnp.maximum(size * y.shape[1], 1)  # avoid division by zero
+                    ncbf_metrics["ncbf/mean_y_in_buffer"] = sum_y / denom
+
                     # Calculating advantages and returns
                     def calculate_gae_advantages(critic_state, next_states, rewards, values, terminations):
                         def compute_advantages(carry, t):
