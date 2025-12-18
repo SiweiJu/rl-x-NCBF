@@ -60,6 +60,7 @@ class PPO:
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
         self.nr_minibatches = self.batch_size // self.minibatch_size
 
+        self.ncbf_n_ensemble = config.algorithm.ncbf.n_enssemble
         self.ncbf_H = config.algorithm.ncbf.H
         self.ncbf_gamma_c = config.algorithm.ncbf.gamma_c
         self.ncbf_w_clf = config.algorithm.ncbf.w_clf
@@ -89,13 +90,12 @@ class PPO:
         self.as_shape = env.single_action_space.shape
         
         self.policy, self.get_processed_action = get_policy(config, env)
-        self.ncbf, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env)
+        self.ncbf, self.ncbf_apply, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env)
         self.critic = get_critic(config, env)
         self.replay_buffer = ReplayBuffer(capacity=config.algorithm.ncbf_buffer.buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=ncbf_key)
 
         self.policy.apply = jax.jit(self.policy.apply)
         self.critic.apply = jax.jit(self.critic.apply)
-        self.ncbf.apply = jax.jit(self.ncbf.apply)
 
         def linear_schedule(count):
             fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates
@@ -123,14 +123,18 @@ class PPO:
             )
         )
 
-        self.ncbf_state = TrainState.create(
-            apply_fn=self.ncbf.apply,
-            params=self.ncbf.init(ncbf_key, state),
-            tx=optax.chain(
-                optax.clip_by_global_norm(self.max_grad_norm),
-                optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
+        ncbf_keys = jax.random.split(ncbf_key, self.ncbf_n_ensemble)
+        self.ncbf_state = [
+            TrainState.create(
+                apply_fn=self.ncbf[i].apply,
+                params=self.ncbf[i].init(ncbf_keys[i], state),
+                tx=optax.chain(
+                    optax.clip_by_global_norm(self.max_grad_norm),
+                    optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
+                )
             )
-        )
+            for i in range(self.ncbf_n_ensemble)
+        ]
 
         if self.save_model:
             os.makedirs(self.save_path)
@@ -206,11 +210,6 @@ class PPO:
             value = self.critic.apply(critic_state.params, state)
             processed_action = self.get_processed_action(action)
             return processed_action, action, value.reshape(-1), log_prob.sum(1), key
-
-        @jax.jit
-        def get_ncbf_prediction(ncbf_state: TrainState, state: np.ndarray, key: jax.random.PRNGKey):
-            ncbf_output = self.ncbf.apply(ncbf_state.params, state)
-            return ncbf_output
 
         @jax.jit
         def calculate_gae_advantages(critic_state: TrainState, next_states: np.ndarray, rewards: np.ndarray, terminations: np.ndarray, values: np.ndarray):
@@ -301,7 +300,7 @@ class PPO:
                 (loss, (metrics)), (policy_gradients, critic_gradients) = grad_loss_fn(
                     policy_state.params,
                     critic_state.params,
-                    ncbf_state.params,
+                    ncbf_state.params,                                    # TODO : currently use only first ncbf in ensemble for ppo update
                     batch_states[minibatch_indices],
                     batch_actions[minibatch_indices],
                     batch_log_probs[minibatch_indices],
@@ -372,7 +371,7 @@ class PPO:
 
                     def f_single(x_single):
                         # shape (output_dim,) -> reduce to scalar
-                        y = self.ncbf.apply(params, x_single)
+                        y = self.ncbf[0].apply(params, x_single)
                         return jnp.sum(y)
 
                     # Vectorize grad over batch
@@ -533,12 +532,23 @@ class PPO:
                 y_targets=ncbf_batch.y_targets,
             )
             # pretrain ncbf
-            self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state,
+            keys = jax.random.split(self.key, 2 + 1)
+            self.key = keys[0]
+
+            self.ncbf_state[0], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[0],
                                                                  self.replay_buffer.states,
                                                                  self.replay_buffer.next_states,
                                                                  self.replay_buffer.y_targets,
                                                                  self.replay_buffer.masks,
-                                                                 self.key,
+                                                                 keys[1],
+                                                                 self.ncbf_pretrain_nr_minibatches)
+
+            self.ncbf_state[1], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[1],
+                                                                 self.replay_buffer.states,
+                                                                 self.replay_buffer.next_states,
+                                                                 self.replay_buffer.y_targets,
+                                                                 self.replay_buffer.masks,
+                                                                 keys[2],
                                                                  self.ncbf_pretrain_nr_minibatches)
 
             # get scalar mean from ncbf_metrics
@@ -568,7 +578,7 @@ class PPO:
             step_info_collection = {}
             for step in range(self.nr_steps):
                 _, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
-                safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(action, state, self.ncbf_state.params)
+                safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(action, state, self.ncbf_state[0].params)
                 processed_action = safe_action
                 next_state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
@@ -627,7 +637,8 @@ class PPO:
             )
 
             if self.ncbf_nr_minibatches > 0:
-                self.ncbf_state, ncbf_metrics, self.key = train_ncbf(self.ncbf_state, self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
+                self.ncbf_state[0], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[0], self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
+                self.ncbf_state[1], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[1], self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
             else:
                 ncbf_metrics = {}
             # get scalar mean from ncbf_metrics
@@ -641,7 +652,7 @@ class PPO:
 
             # Optimizing
             self.policy_state, self.critic_state, optimization_metrics, self.key = update(
-                self.policy_state, self.critic_state, self.ncbf_state,
+                self.policy_state, self.critic_state, self.ncbf_state[0],
                 batch.states, batch.actions, batch.advantages, batch.returns, batch.values, batch.log_probs,
                 self.key
             )
@@ -661,7 +672,7 @@ class PPO:
                 evaluation_metrics = {"eval/episode_return": [], "eval/episode_length": []}
                 while True:
                     raw_processed_action = get_deterministic_action(self.policy_state, state)
-                    safe_action, constraint_active, delta_u = self.ncbf_safety_layer(raw_processed_action, state, self.ncbf_state.params)
+                    safe_action, constraint_active, delta_u = self.ncbf_safety_layer(raw_processed_action, state, self.ncbf_state[0].params)
                     processed_action = safe_action
                     state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                     done = terminated | truncated
@@ -821,7 +832,7 @@ class PPO:
         def get_action(policy_state: TrainState, state: np.ndarray):
             action_mean, action_logstd = self.policy.apply(policy_state.params, state)
             raw_processed_action = self.get_processed_action(action_mean)
-            safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, state, self.ncbf_state.params)
+            safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, state, self.ncbf_state[0].params)
             return safe_action, raw_processed_action, constraint_active, delta_u
         
         self.set_eval_mode()
@@ -833,13 +844,14 @@ class PPO:
 
             while not done:
                 processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state)
-                prediction = self.ncbf.apply(self.ncbf_state.params, state)
+                prediction_mean, prediction_std = self.ncbf_apply(self.ncbf_state, state)
                 # processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(processed_action,
                 #                                                                               state,
                 #                                                                               self.ncbf_state.params)
 
-                print("prediction: ", prediction, "constraint_active: ", constraint_active, "delta_u: ", delta_u)
-                self.env.envs[0].internal_state["safe_prediction"] = prediction
+                # print("prediction: ", prediction, "constraint_active: ", constraint_active, "delta_u: ", delta_u)
+                print("prediction mean: ", prediction_mean, "prediction std: ", prediction_std)
+                self.env.envs[0].internal_state["safe_prediction"] = prediction_mean
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
                 episode_return += reward
