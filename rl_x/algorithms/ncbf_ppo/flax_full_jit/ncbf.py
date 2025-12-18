@@ -15,14 +15,15 @@ Array = jnp.ndarray
 def get_ncbf(config, env):
     # TODO: make different types of ncbf
     ncbf_type = config.algorithm.ncbf.type
+    n_ncbf_ensemble = config.algorithm.ncbf.n_ensemble
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
-
     ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
 
-    NCBF = NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices)
+    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices) for _ in range(n_ncbf_ensemble)]
+
     dynamics_step_function = get_dynamics_step_function_mjx(env)
 
-    safety_layer_function = make_get_safe_action(NCBF.apply, dynamics_step_function, env.dynamics_observation_indices,
+    safety_layer_function = make_get_safe_action(NCBF[0].apply, dynamics_step_function, env.dynamics_observation_indices,
                                                  use_safety_layer)
     dummy_safety_layer_function = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0))
 
@@ -39,7 +40,30 @@ def get_ncbf(config, env):
             out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
         )
     )
-    return NCBF, batched_get_safe_action, safety_layer_function
+    return NCBF, ensemble_forward_pass, batched_get_safe_action, safety_layer_function
+
+
+@jax.jit
+def ensemble_forward_pass(train_states, input):
+    """
+    one step forward pass through an ensemble of networks, 1 input
+    """
+
+    apply_fn = train_states[0].apply_fn
+
+    params_ensemble = jax.tree_util.tree_map(
+        lambda *leaves: jnp.stack(leaves, axis=0),
+        *[ts.params for ts in train_states],
+    )
+
+    @jax.jit
+    def forward(params, x):
+        outputs = jax.vmap(apply_fn, in_axes=(0, None))(params, x)
+        mean = jnp.mean(outputs, axis=0)
+        std = jnp.std(outputs, axis=0)
+        return mean, std
+
+    return forward(params_ensemble, input)
 
 
 class NCBF_FFNN(nn.Module):
@@ -55,11 +79,12 @@ class NCBF_FFNN(nn.Module):
         x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.tanh(x)
         # Scalar CBF output h(x)
-        h = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+        h1 = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
         # clip the output to be in [0, 1]
-        h = nn.sigmoid(h)
-        return jnp.squeeze(h, -1)  # shape ()
+        h1 = nn.sigmoid(h1)
+        h1 = jnp.squeeze(h1, -1)  # shape ()
+        return h1
 
 
 def make_get_safe_action(

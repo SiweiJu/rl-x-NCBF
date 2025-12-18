@@ -61,6 +61,7 @@ class PPO:
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
         self.nr_minibatches = self.batch_size // self.minibatch_size
 
+        self.ncbf_n_ensemble = config.algorithm.ncbf.n_ensemble
         self.ncbf_H = config.algorithm.ncbf.H
         self.ncbf_gamma_c = config.algorithm.ncbf.gamma_c
         self.ncbf_w_clf = config.algorithm.ncbf.w_clf
@@ -106,8 +107,8 @@ class PPO:
         self.policy, self.get_processed_action = get_policy(self.config, self.env)
         self.critic = get_critic(self.config, self.env)
 
-        self.ncbf, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env)
-        self.ncbf.apply = jax.jit(self.ncbf.apply)
+        self.ncbf, self.ncbf_forward, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env)
+        self.ncbf_apply = self.ncbf[0].apply # TODO: fix this
 
         def linear_schedule(count):
             fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates
@@ -135,14 +136,18 @@ class PPO:
             )
         )
 
-        self.ncbf_state = TrainState.create(
-            apply_fn=self.ncbf.apply,
-            params=self.ncbf.init(ncbf_key, env_state.next_observation),
-            tx=optax.chain(
-                optax.clip_by_global_norm(self.max_grad_norm),
-                optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
+        ncbf_keys = jax.random.split(ncbf_key, self.ncbf_n_ensemble)
+        self.ncbf_state = [
+            TrainState.create(
+                apply_fn=self.ncbf[i].apply,
+                params=self.ncbf[i].init(ncbf_keys[i], env_state.next_observation),
+                tx=optax.chain(
+                    optax.clip_by_global_norm(self.max_grad_norm),
+                    optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
+                )
             )
-        )
+            for i in range(self.ncbf_n_ensemble)
+        ]
 
         if self.save_model:
             os.makedirs(self.save_path)
@@ -167,7 +172,7 @@ class PPO:
                 raw_processed_action = self.get_processed_action(action)
 
                 processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, observation,
-                                                                                      ncbf_state.params)
+                                                                                      ncbf_state[0].params)
                 value = self.critic.apply(critic_state.params, observation).squeeze(-1)
 
                 env_state = self.env.step(env_state, processed_action)
@@ -235,108 +240,6 @@ class PPO:
 
                 return y, mask
 
-            # @jax.jit
-            # def add_to_ncbf_replay_buffer(ncbf_replay_buffer, new_data):
-            #     """
-            #     ncbf_replay_buffer: dict with
-            #       - 'states'       : [C, N_env, ...]
-            #       - 'next_states'  : [C, N_env, ...]
-            #       - 'actions'      : [C, N_env, ...]
-            #       - 'dones'        : [C, N_env]
-            #       - 'terminations' : [C, N_env]
-            #       - 'y_target'     : [C, N_env]
-            #       - 'masks'        : [C, N_env]
-            #       - 'pos'          : scalar int32
-            #       - 'size'         : scalar int32
-            #
-            #     new_data: dict with
-            #       - 'states'       : [T, N_env, ...]
-            #       - 'next_states'  : [T, N_env, ...]
-            #       - 'actions'      : [T, N_env, ...]
-            #       - 'dones'        : [T, N_env]
-            #       - 'terminations' : [T, N_env]
-            #       - 'y_target'     : [T, N_env]
-            #       - 'masks'        : [T, N_env]
-            #     """
-            #     capacity = ncbf_replay_buffer["states"].shape[0]
-            #     pos = ncbf_replay_buffer["pos"]
-            #     size = ncbf_replay_buffer["size"]
-            #
-            #     batch_size = new_data["states"].shape[0]
-            #
-            #     first_chunk = jnp.minimum(batch_size, capacity - pos)
-            #     second_chunk = batch_size - first_chunk
-            #
-            #     def write_chunk(buf, src, start, length):
-            #         # length is traced, but slice on src is fine if leading dim is static
-            #         src_part = src.at[:length]
-            #         # pad start indices for all dims: (start, 0, 0, ...)
-            #         start_indices = (start,) + (0,) * (buf.ndim - 1)
-            #         return lax.dynamic_update_slice(buf, src_part, start_indices)
-            #
-            #
-            #     def write_chunk_wrap(buf, src, start, first_len, second_len):
-            #         # tail part
-            #         buf = write_chunk(buf, src, start, first_len)
-            #         # head part
-            #         src_head = src[first_len:first_len + second_len]
-            #         start_indices = (0,) + (0,) * (buf.ndim - 1)
-            #         return lax.dynamic_update_slice(buf, src_head, start_indices)
-            #
-            #     def write_all_fields(rb, nd, pos, first_chunk, second_chunk):
-            #         wrap = second_chunk > 0
-            #
-            #         def write_no_wrap(rb_inner):
-            #             rb_inner["states"] = write_chunk(rb_inner["states"], nd["states"], pos, first_chunk)
-            #             rb_inner["next_states"] = write_chunk(rb_inner["next_states"], nd["next_states"], pos,
-            #                                                   first_chunk)
-            #             rb_inner["actions"] = write_chunk(rb_inner["actions"], nd["actions"], pos, first_chunk)
-            #             rb_inner["dones"] = write_chunk(rb_inner["dones"], nd["dones"], pos, first_chunk)
-            #             rb_inner["terminations"] = write_chunk(rb_inner["terminations"], nd["terminations"], pos,
-            #                                                    first_chunk)
-            #             rb_inner["y_target"] = write_chunk(rb_inner["y_target"], nd["y_target"], pos, first_chunk)
-            #             rb_inner["masks"] = write_chunk(rb_inner["masks"], nd["masks"], pos, first_chunk)
-            #             return rb_inner
-            #
-            #         def write_with_wrap(rb_inner):
-            #             rb_inner["states"] = write_chunk_wrap(
-            #                 rb_inner["states"], nd["states"], pos, first_chunk, second_chunk
-            #             )
-            #             rb_inner["next_states"] = write_chunk_wrap(
-            #                 rb_inner["next_states"], nd["next_states"], pos, first_chunk, second_chunk
-            #             )
-            #             rb_inner["actions"] = write_chunk_wrap(
-            #                 rb_inner["actions"], nd["actions"], pos, first_chunk, second_chunk
-            #             )
-            #             rb_inner["dones"] = write_chunk_wrap(
-            #                 rb_inner["dones"], nd["dones"], pos, first_chunk, second_chunk
-            #             )
-            #             rb_inner["terminations"] = write_chunk_wrap(
-            #                 rb_inner["terminations"], nd["terminations"], pos, first_chunk, second_chunk
-            #             )
-            #             rb_inner["y_target"] = write_chunk_wrap(
-            #                 rb_inner["y_target"], nd["y_target"], pos, first_chunk, second_chunk
-            #             )
-            #             rb_inner["masks"] = write_chunk_wrap(
-            #                 rb_inner["masks"], nd["masks"], pos, first_chunk, second_chunk
-            #             )
-            #             return rb_inner
-            #
-            #         rb = jax.lax.cond(wrap, write_with_wrap, write_no_wrap, rb)
-            #         return rb
-            #
-            #     ncbf_replay_buffer = write_all_fields(
-            #         ncbf_replay_buffer, new_data, pos, first_chunk, second_chunk
-            #     )
-            #
-            #     new_pos = (pos + batch_size) % capacity
-            #     new_size = jnp.minimum(capacity, size + batch_size)
-            #
-            #     ncbf_replay_buffer["pos"] = new_pos
-            #     ncbf_replay_buffer["size"] = new_size
-            #
-            #     return ncbf_replay_buffer
-
             @partial(jax.jit, static_argnums=(3,))
             def train_ncbf(ncbf_state: TrainState, replay_buffer: dict,
                            key: jax.random.PRNGKey, nr_minibatches: int):
@@ -380,7 +283,7 @@ class PPO:
                         def f_single(x_single):
                             # shape (output_dim,) -> reduce to scalar
                             x_single = x_single[None, ...]  # [1, D]
-                            y = self.ncbf.apply(params, x_single)
+                            y = self.ncbf_apply(params, x_single)
                             return jnp.sum(y)
 
                         # Vectorize grad over batch
@@ -529,7 +432,12 @@ class PPO:
                 ncbf_replay_buffer["pos"] = jnp.array(self.ncbf_pretrain_steps)
                 ncbf_replay_buffer["size"] = jnp.array(self.ncbf_pretrain_steps)
 
-                ncbf_state, ncbf_metrics, key = train_ncbf(ncbf_state, ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
+
+                ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[1], ncbf_metrics, key = train_ncbf(ncbf_state[1], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[2], ncbf_metrics, key = train_ncbf(ncbf_state[2], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[3], ncbf_metrics, key = train_ncbf(ncbf_state[3], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
 
                 ncbf_metrics = tree.map_structure(lambda x: jnp.mean(x), ncbf_metrics)
                 mean_y = jnp.mean(y_bool)
@@ -599,8 +507,17 @@ class PPO:
                     ncbf_replay_buffer["size"] = jnp.minimum(capacity, ncbf_replay_buffer["size"] + self.nr_steps)
 
                     # train ncbf
-                    ncbf_state, ncbf_metrics, key = train_ncbf(ncbf_state, ncbf_replay_buffer, key,
+                    ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_replay_buffer, key,
                                                                          self.ncbf_nr_minibatches)
+                    ncbf_state[1], ncbf_metrics, key = train_ncbf(ncbf_state[1], ncbf_replay_buffer, key,
+                                                                         self.ncbf_nr_minibatches)
+                    ncbf_state[2], ncbf_metrics, key = train_ncbf(ncbf_state[2], ncbf_replay_buffer, key,
+                                                                         self.ncbf_nr_minibatches)
+                    ncbf_state[3], ncbf_metrics, key = train_ncbf(ncbf_state[3], ncbf_replay_buffer, key,
+                                                                         self.ncbf_nr_minibatches)
+                    ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_replay_buffer, key,
+                                                                         self.ncbf_nr_minibatches)
+
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_bool)
@@ -705,7 +622,7 @@ class PPO:
                         (loss, metrics), (policy_gradients, critic_gradients) = grad_loss_fn(
                             policy_state.params,
                             critic_state.params,
-                            ncbf_state.params,
+                            ncbf_state[0].params,
                             batch_states[minibatch_indices],
                             batch_actions[minibatch_indices],
                             batch_log_probs[minibatch_indices],

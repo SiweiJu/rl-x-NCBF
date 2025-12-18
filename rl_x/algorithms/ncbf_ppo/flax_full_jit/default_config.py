@@ -27,6 +27,7 @@ def get_config(algorithm_name):
 
     # ncbf config
     config.ncbf = config_dict.ConfigDict()
+    config.ncbf.n_ensemble = 5  # number of networks to assemble for ncbf prediction
     config.ncbf.type = 'FFNN'
     config.ncbf.H = 10  # prediction horizon
     config.ncbf.lr = 1e-3
