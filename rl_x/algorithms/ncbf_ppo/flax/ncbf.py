@@ -44,6 +44,7 @@ def get_ncbf(config, env):
     return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function
 
 
+@jax.jit
 def ensemble_forward_pass(train_states, input):
     """
     one step forward pass through an ensemble of networks, 1 input
@@ -51,19 +52,29 @@ def ensemble_forward_pass(train_states, input):
 
     apply_fn = train_states[0].apply_fn
 
-    params_ensemble = jax.tree_util.tree_map(
-        lambda *leaves: jnp.stack(leaves, axis=0),
-        *[ts.params for ts in train_states],
-    )
+    params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in train_states])
+    # Vectorized apply over ensemble, then take mean
+    predictions = jax.vmap(lambda p: apply_fn(p, input))(params_stack)
 
-    @jax.jit
-    def forward(params, x):
-        outputs = jax.vmap(apply_fn, in_axes=(0, None))(params, x)
-        mean = jnp.mean(outputs, axis=0)
-        std = jnp.std(outputs, axis=0)
-        return mean, std
+    def aggregate_predictions(preds):
+        # return jnp.mean(preds, axis=0), jnp.std(preds, axis=0)
+        def cvar_soft(losses, alpha=0.90):
+            eta = jax.lax.stop_gradient(jnp.quantile(losses, alpha))
+            tail = jnp.maximum(losses - eta, 0.0)
+            return eta + jnp.mean(tail) / (1 - alpha)
 
-    return forward(params_ensemble, input)
+        def cvar_topk(losses, alpha=0.80):
+            # losses: (E,) or (E, ...) , larger = worse
+            E = losses.shape[0]
+            k = jnp.maximum(1, jnp.int32(jnp.ceil((1.0 - alpha) * E)))
+            tail = jnp.sort(losses, axis=0)[-k:, ...]
+            return jnp.mean(tail, axis=0)
+
+        risks = 1 - preds
+        cvar = 1 - cvar_topk(risks)
+        return cvar, jnp.std(preds), preds
+
+    return aggregate_predictions(predictions.squeeze())
 
 class NCBF_FFNN(nn.Module):
     nr_hidden_units: int
@@ -80,7 +91,7 @@ class NCBF_FFNN(nn.Module):
         # Scalar CBF output h(x)
         h = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
-        jax.debug.print("NCBF output before sigmoid: {h}", h=h)
+        # jax.debug.print("NCBF output before sigmoid: {h}", h=h)
         h = nn.sigmoid(h)
 
         return jnp.squeeze(h, -1)  # shape ()

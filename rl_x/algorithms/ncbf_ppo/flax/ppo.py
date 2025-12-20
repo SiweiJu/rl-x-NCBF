@@ -532,7 +532,7 @@ class PPO:
                 y_targets=ncbf_batch.y_targets,
             )
             # pretrain ncbf
-            keys = jax.random.split(self.key, 2 + 1)
+            keys = jax.random.split(self.key, 5 + 1)
             self.key = keys[0]
 
             self.ncbf_state[0], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[0],
@@ -549,6 +549,30 @@ class PPO:
                                                                  self.replay_buffer.y_targets,
                                                                  self.replay_buffer.masks,
                                                                  keys[2],
+                                                                 self.ncbf_pretrain_nr_minibatches)
+
+            self.ncbf_state[2], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[2],
+                                                                 self.replay_buffer.states,
+                                                                 self.replay_buffer.next_states,
+                                                                 self.replay_buffer.y_targets,
+                                                                 self.replay_buffer.masks,
+                                                                 keys[2],
+                                                                 self.ncbf_pretrain_nr_minibatches)
+
+            self.ncbf_state[3], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[3],
+                                                                 self.replay_buffer.states,
+                                                                 self.replay_buffer.next_states,
+                                                                 self.replay_buffer.y_targets,
+                                                                 self.replay_buffer.masks,
+                                                                 keys[3],
+                                                                 self.ncbf_pretrain_nr_minibatches)
+
+            self.ncbf_state[4], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[4],
+                                                                 self.replay_buffer.states,
+                                                                 self.replay_buffer.next_states,
+                                                                 self.replay_buffer.y_targets,
+                                                                 self.replay_buffer.masks,
+                                                                 keys[4],
                                                                  self.ncbf_pretrain_nr_minibatches)
 
             # get scalar mean from ncbf_metrics
@@ -639,6 +663,9 @@ class PPO:
             if self.ncbf_nr_minibatches > 0:
                 self.ncbf_state[0], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[0], self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
                 self.ncbf_state[1], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[1], self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
+                self.ncbf_state[2], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[2], self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
+                self.ncbf_state[3], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[3], self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
+                self.ncbf_state[4], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[4], self.replay_buffer.states, self.replay_buffer.next_states, self.replay_buffer.y_targets, self.replay_buffer.masks, self.key, self.ncbf_nr_minibatches)
             else:
                 ncbf_metrics = {}
             # get scalar mean from ncbf_metrics
@@ -844,13 +871,25 @@ class PPO:
 
             while not done:
                 processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state)
-                prediction_mean, prediction_std = self.ncbf_apply(self.ncbf_state, state)
+                # predictions = self.ncbf_apply(self.ncbf_state, state)
                 # processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(processed_action,
                 #                                                                               state,
                 #                                                                               self.ncbf_state.params)
 
                 # print("prediction: ", prediction, "constraint_active: ", constraint_active, "delta_u: ", delta_u)
-                print("prediction mean: ", prediction_mean, "prediction std: ", prediction_std)
+
+                # Stack ensemble params into a pytree with leading axis = ensemble
+                # params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+                # Vectorized apply over ensemble, then take mean
+                # predictions = jax.vmap(lambda p: self.ncbf[0].apply(p, state))(params_stack)
+
+                prediction_mean, prediction_std, predictions = self.ncbf_apply(self.ncbf_state, state)
+                # predictions = [self.ncbf[i].apply(self.ncbf_state[i].params, state) for i in range(5)]
+                # prediction_mean = np.mean(predictions)
+                # prediction_std = np.std(predictions)
+                print("prediction mean: ", prediction_mean, "prediction std: ", prediction_std, "predictions: ", predictions.squeeze())
+                # print("prediction mean: ", prediction_mean, "prediction std: ", prediction_std)
+
                 self.env.envs[0].internal_state["safe_prediction"] = prediction_mean
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
