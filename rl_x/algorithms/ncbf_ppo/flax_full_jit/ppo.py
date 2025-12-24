@@ -239,15 +239,15 @@ class PPO:
                 any_term_next_H = _future_event_within_H(terminates, H)  # [T, N]
                 y = ~any_term_next_H  # [T, N] bool
 
-                # mask is simply "not done for next H"
                 any_done_next_H = _future_event_within_H(dones & ~terminates, H)  # [T, N]
                 mask = ~any_done_next_H  # [T, N] bool
+                # mask is simply "not done for next H"
 
                 return y, mask
 
             # def add_to_buffer(positive_buffer, negative_buffer)
             @partial(jax.jit, static_argnums=(3,))
-            def train_ncbf(ncbf_state: TrainState, replay_buffer: dict,
+            def train_ncbf(ncbf_state: TrainState, pos_buffer: dict, neg_buffer: dict,
                            key: jax.random.PRNGKey, nr_minibatches: int):
                 """
                 ncbf_state: TrainState
@@ -335,13 +335,41 @@ class PPO:
 
                         key, replay_buffer_key  = jax.random.split(key, 2)
 
-                        idx1 = jax.random.randint(replay_buffer_key, (self.minibatch_size,), 0, replay_buffer["size"])
-                        idx2 = jax.random.randint(replay_buffer_key, (self.minibatch_size,), 0, self.nr_envs)
+                        @jax.jit
+                        def sample_and_merge(pos_buffer, neg_buffer, batch_size, key):
+                            minibatch_size = self.ncbf_minibatch_size
+                            nr_neg_samples = int(batch_size * self.ncbf_neg_sampling_ratio)
+                            nr_pos_samples = batch_size - nr_neg_samples
 
-                        states = replay_buffer["states"][idx1, idx2]
-                        next_states = replay_buffer["next_states"][idx1, idx2]
-                        y_targets = replay_buffer["y_target"][idx1, idx2]
-                        masks = replay_buffer["masks"][idx1, idx2]
+                            key, subkey1, subkey2 = jax.random.split(key, 3)
+                            pos_indices = jax.random.randint(subkey1, (nr_pos_samples,), 0, pos_buffer["size"])
+                            neg_indices = jax.random.randint(subkey2, (nr_neg_samples,), 0, neg_buffer["size"])
+
+                            states_pos = pos_buffer["states"][pos_indices]
+                            next_states_pos = pos_buffer["next_states"][pos_indices]
+                            y_target_pos = pos_buffer["y_target"][pos_indices]
+                            masks_pos = pos_buffer["masks"][pos_indices]
+
+                            states_neg = neg_buffer["states"][neg_indices]
+                            next_states_neg = neg_buffer["next_states"][neg_indices]
+                            y_target_neg = neg_buffer["y_target"][neg_indices]
+                            masks_neg = neg_buffer["masks"][neg_indices]
+
+                            states = jnp.concatenate([states_pos, states_neg], axis=0)
+                            next_states = jnp.concatenate([next_states_pos, next_states_neg], axis=0)
+                            y_target = jnp.concatenate([y_target_pos, y_target_neg], axis=0)
+                            masks = jnp.concatenate([masks_pos, masks_neg], axis=0)
+
+                            # shuffle
+                            perm_key, _ = jax.random.split(key)
+                            perm = jax.random.permutation(perm_key, states.shape[0])
+                            states = states[perm]
+                            next_states = next_states[perm]
+                            y_target = y_target[perm]
+                            masks = masks[perm]
+                            return states, next_states, y_target, masks
+
+                        states, next_states, y_targets, masks = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
 
                         (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
                             ncbf_state.params,
@@ -400,19 +428,91 @@ class PPO:
             critic_state = self.critic_state
             ncbf_state = self.ncbf_state
 
-            # initialize two ncbf replay buffer
-            capacity = int(self.ncbf_buffer_size // self.nr_envs)
-            ncbf_replay_buffer = {
-                "states": jnp.zeros((capacity, self.nr_envs) + (self.os_shape[0],), dtype=jnp.float32),
-                "next_states": jnp.zeros((capacity, self.nr_envs) + (self.os_shape[0],), dtype=jnp.float32),
-                "actions": jnp.zeros((capacity, self.nr_envs) + (self.as_shape[0],), dtype=jnp.float32),
-                "dones": jnp.zeros((capacity, self.nr_envs), dtype=jnp.bool),
-                "terminations": jnp.zeros((capacity, self.nr_envs), dtype=jnp.bool),
-                "y_target": jnp.zeros((capacity, self.nr_envs), dtype=jnp.float32),
-                "masks": jnp.zeros((capacity, self.nr_envs), dtype=jnp.bool),
-                "pos": jnp.zeros((), dtype=jnp.int32),
-                "size": jnp.zeros((), dtype=jnp.int32)
-            }
+            @jax.jit
+            def update_buffer(pos_buffer, neg_buffer, states, next_states, actions, dones, terminations, y_target, masks):
+                """
+                states: (T, E, D)
+                next_states: (T, E, D)
+                actions: (T, E, A)
+                dones: (T, E)
+                terminations: (T, E)
+                y_target: (T, E)
+                masks: (T, E)
+                """
+                def update_buffer(buffer, states, next_states, actions, dones, terminations, y_target, masks):
+                    capacity = buffer["states"].shape[0]
+                    size = buffer["size"]
+                    pos = buffer["pos"]
+
+                    def body_fun(i, buf):
+                        idx = (pos + i) % capacity
+                        buf["states"] = buf["states"].at[idx, :].set(states[i])
+                        buf["next_states"] = buf["next_states"].at[idx, :].set(next_states[i])
+                        buf["actions"] = buf["actions"].at[idx, :].set(actions[i])
+                        buf["dones"] = buf["dones"].at[idx].set(dones[i])
+                        buf["terminations"] = buf["terminations"].at[idx].set(terminations[i])
+                        buf["y_target"] = buf["y_target"].at[idx].set(y_target[i])
+                        buf["masks"] = buf["masks"].at[idx].set(masks[i])
+                        return buf
+
+                    num_new = states.shape[0]
+                    new_buffer = jax.lax.fori_loop(0, num_new, body_fun, buffer)
+                    new_buffer["pos"] = (pos + num_new) % capacity
+                    new_buffer["size"] = jnp.minimum(capacity, size + num_new)
+                    return new_buffer
+
+                # flatten the first two dimensions before adding to buffer
+                states = states.reshape(-1, states.shape[-1])
+                next_states = next_states.reshape(-1, next_states.shape[-1])
+                actions = actions.reshape(-1, actions.shape[-1])
+                dones = dones.reshape(-1)
+                terminations = terminations.reshape(-1)
+                y_target = y_target.reshape(-1)
+                masks = masks.reshape(-1)
+
+                # Split into positive and negative samples based on y_target
+                pos_indices = jnp.where(y_target == 1.0)
+                neg_indices = jnp.where(y_target == 0.0)
+
+                pos_states = states[pos_indices]
+                pos_next_states = next_states[pos_indices]
+                pos_actions = actions[pos_indices]
+                pos_dones = dones[pos_indices]
+                pos_terminations = terminations[pos_indices]
+                pos_y_target = y_target[pos_indices]
+                pos_masks = masks[pos_indices]
+
+                neg_states = states[neg_indices]
+                neg_next_states = next_states[neg_indices]
+                neg_actions = actions[neg_indices]
+                neg_dones = dones[neg_indices]
+                neg_terminations = terminations[neg_indices]
+                neg_y_target = y_target[neg_indices]
+                neg_masks = masks[neg_indices]
+
+                new_pos_buffer = update_buffer(pos_buffer, pos_states, pos_next_states, pos_actions,
+                                                  pos_dones, pos_terminations, pos_y_target, pos_masks)
+                new_neg_buffer = update_buffer(neg_buffer, neg_states, neg_next_states, neg_actions,
+                                                  neg_dones, neg_terminations, neg_y_target, neg_masks)
+                return new_pos_buffer, new_neg_buffer
+
+            def _init_buffer(capacity):
+                buffer = {
+                    "states": jnp.zeros((capacity, ) + (self.os_shape[0], ), dtype=jnp.float32),
+                    "next_states": jnp.zeros((capacity, ) + (self.os_shape[0], ), dtype=jnp.float32),
+                    "actions": jnp.zeros((capacity, ) + (self.as_shape[0], ), dtype=jnp.float32),
+                    "dones": jnp.zeros((capacity, ), dtype=jnp.bool),
+                    "terminations": jnp.zeros((capacity, ), dtype=jnp.bool),
+                    "y_target": jnp.zeros((capacity, ), dtype=jnp.float32),
+                    "masks": jnp.zeros((capacity, ), dtype=jnp.bool),
+                    "pos": jnp.zeros((), dtype=jnp.int32),
+                    "size": jnp.zeros((), dtype=jnp.int32)
+                }
+                return buffer
+
+            # initialize two ncbf replay buffers
+            ncbf_pos_buffer = _init_buffer(self.ncbf_pos_buffer_size)
+            ncbf_neg_buffer = _init_buffer(self.ncbf_neg_buffer_size)
 
             # prefill ncbf buffer
             if self.ncbf_pretrain_steps > 0:
@@ -428,22 +528,16 @@ class PPO:
                 y_bool, masks = window_any_done_next_H(dones, terminations, self.ncbf_H)
                 y_target = y_bool.astype(jnp.float32)
 
-                ncbf_replay_buffer["states"] = ncbf_replay_buffer["states"].at[:self.ncbf_pretrain_steps, : ].set(states)
-                ncbf_replay_buffer["next_states"] = ncbf_replay_buffer["next_states"].at[:self.ncbf_pretrain_steps, : ].set(next_states)
-                ncbf_replay_buffer["actions"] = ncbf_replay_buffer["actions"].at[:self.ncbf_pretrain_steps, : ].set(actions)
-                ncbf_replay_buffer["dones"] = ncbf_replay_buffer["dones"].at[:self.ncbf_pretrain_steps, : ].set(dones)
-                ncbf_replay_buffer["terminations"] = ncbf_replay_buffer["terminations"].at[:self.ncbf_pretrain_steps, : ].set(terminations)
-                ncbf_replay_buffer["y_target"] = ncbf_replay_buffer["y_target"].at[:self.ncbf_pretrain_steps, : ].set(y_target)
-                ncbf_replay_buffer["masks"] = ncbf_replay_buffer["masks"].at[:self.ncbf_pretrain_steps, : ].set(masks)
-                ncbf_replay_buffer["pos"] = jnp.array(self.ncbf_pretrain_steps)
-                ncbf_replay_buffer["size"] = jnp.array(self.ncbf_pretrain_steps)
+                ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
+                    ncbf_pos_buffer, ncbf_neg_buffer,
+                    states, next_states, actions, dones, terminations, y_target, masks
+                )
 
-
-                ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
-                ncbf_state[1], ncbf_metrics, key = train_ncbf(ncbf_state[1], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
-                ncbf_state[2], ncbf_metrics, key = train_ncbf(ncbf_state[2], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
-                ncbf_state[3], ncbf_metrics, key = train_ncbf(ncbf_state[3], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
-                ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_replay_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_pos_buffer, ncbf_neg_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[1], ncbf_metrics, key = train_ncbf(ncbf_state[1], ncbf_pos_buffer, ncbf_neg_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[2], ncbf_metrics, key = train_ncbf(ncbf_state[2], ncbf_pos_buffer, ncbf_neg_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[3], ncbf_metrics, key = train_ncbf(ncbf_state[3], ncbf_pos_buffer, ncbf_neg_buffer, key, self.ncbf_pretrain_nr_minibatches)
+                ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_pos_buffer, ncbf_neg_buffer, key, self.ncbf_pretrain_nr_minibatches)
 
                 ncbf_metrics = tree.map_structure(lambda x: jnp.mean(x), ncbf_metrics)
                 mean_y = jnp.mean(y_bool)
@@ -461,16 +555,14 @@ class PPO:
 
                 jax.debug.callback(pretrain_callback, ncbf_metrics)
 
-            # pregenerate index slices for the replay buffer in advance
-            update_indices = jnp.arange(self.nr_updates_per_multi_learning_iteration * self.nr_multi_learning_and_eval_save_iterations)
-            ncbf_write_start_pos_array = (self.ncbf_pretrain_steps + update_indices * self.nr_steps) % capacity
-            ncbf_write_start_pos_array = ncbf_write_start_pos_array.reshape(self.nr_multi_learning_and_eval_save_iterations, self.nr_updates_per_multi_learning_iteration)
+                ncbf_replay_buffer = (ncbf_pos_buffer, ncbf_neg_buffer)
 
             def multi_learning_and_eval_save_iteration(multi_learning_and_eval_save_iteration_carry, multi_learning_iteration_step):
                 policy_state, critic_state, ncbf_state, env_state, ncbf_replay_buffer, key = multi_learning_and_eval_save_iteration_carry
 
                 def learning_iteration(learning_iteration_carry, learning_iteration_step):
                     policy_state, critic_state, ncbf_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
+                    ncbf_pos_buffer, ncbf_neg_buffer = ncbf_replay_buffer
                     rollout_carry = (policy_state, critic_state, ncbf_state, env_state, key)
                     single_rollout_carry, batch = jax.lax.scan(single_rollout, rollout_carry, None, self.nr_steps)
                     policy_state, critic_state, ncbf_state, env_state, key = single_rollout_carry
@@ -480,65 +572,29 @@ class PPO:
                     y_bool, masks = window_any_done_next_H(dones, terminations, self.ncbf_H)
                     y_target = y_bool.astype(jnp.float32)
 
-                    buffer_start_pos = ncbf_write_start_pos_array[multi_learning_iteration_step, learning_iteration_step]
-                    # add to ncbf replay buffer
-
-                    def update_replay_buffer(states_buffer, states, buffer_start_pos, nr_steps):
-                        # states_buffer: [T, ...]
-                        # states: [nr_steps, ...]
-                        # buffer_start_pos: scalar int32 tracer
-
-                        # Build the full start indices vector: first dim is dynamic, others are 0
-                        start_indices = jnp.concatenate([
-                            jnp.array([buffer_start_pos], dtype=jnp.int32),
-                            jnp.zeros(states_buffer.ndim - 1, dtype=jnp.int32),
-                        ])
-
-                        # Do the dynamic update
-                        new_states_buffer = lax.dynamic_update_slice(
-                            states_buffer,  # operand
-                            states,  # update (shape [nr_steps, ...])
-                            start_indices,  # start indices for each axis
-                        )
-                        return new_states_buffer
-
-                    ncbf_replay_buffer["states"] = update_replay_buffer(ncbf_replay_buffer["states"], states, buffer_start_pos, self.nr_steps)
-                    ncbf_replay_buffer["next_states"] = update_replay_buffer(ncbf_replay_buffer["next_states"], next_states, buffer_start_pos, self.nr_steps)
-                    ncbf_replay_buffer["actions"] = update_replay_buffer(ncbf_replay_buffer["actions"], actions, buffer_start_pos, self.nr_steps)
-                    ncbf_replay_buffer["dones"] = update_replay_buffer(ncbf_replay_buffer["dones"], dones, buffer_start_pos, self.nr_steps)
-                    ncbf_replay_buffer["terminations"] = update_replay_buffer(ncbf_replay_buffer["terminations"], terminations, buffer_start_pos, self.nr_steps)
-                    ncbf_replay_buffer["y_target"] = update_replay_buffer(ncbf_replay_buffer["y_target"], y_target, buffer_start_pos, self.nr_steps)
-                    ncbf_replay_buffer["masks"] = update_replay_buffer(ncbf_replay_buffer["masks"], masks, buffer_start_pos, self.nr_steps)
-                    ncbf_replay_buffer["pos"] = (buffer_start_pos + self.nr_steps) % capacity
-                    ncbf_replay_buffer["size"] = jnp.minimum(capacity, ncbf_replay_buffer["size"] + self.nr_steps)
+                    ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
+                        ncbf_pos_buffer, ncbf_neg_buffer,
+                        states, next_states, actions, dones, terminations, y_target, masks)
 
                     # train ncbf
-                    ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_replay_buffer, key,
+                    ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_pos_buffer, ncbf_neg_buffer, key,
                                                                          self.ncbf_nr_minibatches)
-                    ncbf_state[1], ncbf_metrics, key = train_ncbf(ncbf_state[1], ncbf_replay_buffer, key,
+                    ncbf_state[1], ncbf_metrics, key = train_ncbf(ncbf_state[1], ncbf_pos_buffer, ncbf_neg_buffer, key,
                                                                          self.ncbf_nr_minibatches)
-                    ncbf_state[2], ncbf_metrics, key = train_ncbf(ncbf_state[2], ncbf_replay_buffer, key,
+                    ncbf_state[2], ncbf_metrics, key = train_ncbf(ncbf_state[2], ncbf_pos_buffer, ncbf_neg_buffer, key,
                                                                          self.ncbf_nr_minibatches)
-                    ncbf_state[3], ncbf_metrics, key = train_ncbf(ncbf_state[3], ncbf_replay_buffer, key,
+                    ncbf_state[3], ncbf_metrics, key = train_ncbf(ncbf_state[3], ncbf_pos_buffer, ncbf_neg_buffer, key,
                                                                          self.ncbf_nr_minibatches)
-                    ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_replay_buffer, key,
+                    ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_pos_buffer, ncbf_neg_buffer, key,
                                                                          self.ncbf_nr_minibatches)
 
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_bool)
 
-                    # calc mean y in buffer
-                    y = ncbf_replay_buffer["y_target"]  # shape: (capacity, nr_envs)
-                    size = ncbf_replay_buffer["size"]  # tracer scalar
-
-                    # mask first `size` rows; shape (capacity, 1)
-                    mask = (jnp.arange(y.shape[0]) < size).astype(jnp.float32)[:, None]
-
-                    # sum masked entries and compute safe mean
-                    sum_y = jnp.sum(y * mask)
-                    denom = jnp.maximum(size * y.shape[1], 1)  # avoid division by zero
-                    ncbf_metrics["ncbf/mean_y_in_buffer"] = sum_y / denom
+                    # log number of pos and neg samples
+                    ncbf_metrics["ncbf/pos_buffer_size"] = ncbf_pos_buffer["size"]
+                    ncbf_metrics["ncbf/neg_buffer_size"] = ncbf_neg_buffer["size"]
 
                     # Calculating advantages and returns
                     def calculate_gae_advantages(critic_state, next_states, rewards, values, terminations):
@@ -677,7 +733,8 @@ class PPO:
                         self.end_logging()
 
                     jax.debug.callback(callback, (combined_metrics, parallel_seed_id))
-                    
+
+                    ncbf_replay_buffer = (ncbf_pos_buffer, ncbf_neg_buffer)
                     return (policy_state, critic_state, ncbf_state, env_state, ncbf_replay_buffer, key), None
                     
                 key, subkey = jax.random.split(key)
