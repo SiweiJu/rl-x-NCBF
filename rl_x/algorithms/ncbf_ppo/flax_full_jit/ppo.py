@@ -73,10 +73,15 @@ class PPO:
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
 
-        self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size * self.nr_steps * self.nr_envs
+        self.ncbf_pos_buffer_size = config.algorithm.ncbf_buffer.pos_buffer_size * self.nr_steps * self.nr_envs
+        self.ncbf_neg_buffer_size = config.algorithm.ncbf_buffer.neg_buffer_size * self.nr_steps * self.nr_envs
+        self.ncbf_neg_sampling_ratio = config.algorithm.ncbf_buffer.neg_sampling_ratio
+
         self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps * self.nr_steps
         rlx_logger.info(f"NCBF pretrain steps:{self.ncbf_pretrain_steps * self.nr_envs}")
-        rlx_logger.info(f"INFO - NCBF buffer size:{self.ncbf_buffer_size}")
+        rlx_logger.info(f"INFO - NCBF pos buffer size:{self.ncbf_pos_buffer_size}")
+        rlx_logger.info(f"INFO - NCBF neg buffer size:{self.ncbf_neg_buffer_size}")
+
 
         self.ncbf_pretrain_nr_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
 
@@ -240,6 +245,7 @@ class PPO:
 
                 return y, mask
 
+            # def add_to_buffer(positive_buffer, negative_buffer)
             @partial(jax.jit, static_argnums=(3,))
             def train_ncbf(ncbf_state: TrainState, replay_buffer: dict,
                            key: jax.random.PRNGKey, nr_minibatches: int):
@@ -394,7 +400,7 @@ class PPO:
             critic_state = self.critic_state
             ncbf_state = self.ncbf_state
 
-            # initialize ncbf replay buffer
+            # initialize two ncbf replay buffer
             capacity = int(self.ncbf_buffer_size // self.nr_envs)
             ncbf_replay_buffer = {
                 "states": jnp.zeros((capacity, self.nr_envs) + (self.os_shape[0],), dtype=jnp.float32),
