@@ -42,6 +42,7 @@ def get_config(algorithm_name):
     config.ncbf.nr_minibatches = 50
     config.ncbf.minibatch_size = 64
     config.ncbf.nr_hidden_units = 512
+    config.ncbf.n_enssemble = 5  # number of networks to assemble for ncbf prediction
 
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_steps = 32768    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
@@ -49,5 +50,7 @@ def get_config(algorithm_name):
 
     config.ncbf_buffer = config_dict.ConfigDict()
     config.ncbf_buffer.buffer_size = int(1e6)
+    config.ncbf_buffer.negative_buffer_size = int(1e6)
+    config.ncbf_buffer.neg_sampling_ratio = 0.5 # ratio of sampling from negative buffer
 
     return config
