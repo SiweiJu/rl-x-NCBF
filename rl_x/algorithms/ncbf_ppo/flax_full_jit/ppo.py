@@ -245,8 +245,7 @@ class PPO:
 
                 return y, mask
 
-            # def add_to_buffer(positive_buffer, negative_buffer)
-            @partial(jax.jit, static_argnums=(3,))
+            @partial(jax.jit, static_argnums=(4,))
             def train_ncbf(ncbf_state: TrainState, pos_buffer: dict, neg_buffer: dict,
                            key: jax.random.PRNGKey, nr_minibatches: int):
                 """
@@ -336,8 +335,8 @@ class PPO:
                         key, replay_buffer_key  = jax.random.split(key, 2)
 
                         @jax.jit
-                        def sample_and_merge(pos_buffer, neg_buffer, batch_size, key):
-                            minibatch_size = self.ncbf_minibatch_size
+                        def sample_and_merge(pos_buffer, neg_buffer, key):
+                            batch_size = self.ncbf_minibatch_size
                             nr_neg_samples = int(batch_size * self.ncbf_neg_sampling_ratio)
                             nr_pos_samples = batch_size - nr_neg_samples
 
@@ -439,28 +438,6 @@ class PPO:
                 y_target: (T, E)
                 masks: (T, E)
                 """
-                def update_buffer(buffer, states, next_states, actions, dones, terminations, y_target, masks):
-                    capacity = buffer["states"].shape[0]
-                    size = buffer["size"]
-                    pos = buffer["pos"]
-
-                    def body_fun(i, buf):
-                        idx = (pos + i) % capacity
-                        buf["states"] = buf["states"].at[idx, :].set(states[i])
-                        buf["next_states"] = buf["next_states"].at[idx, :].set(next_states[i])
-                        buf["actions"] = buf["actions"].at[idx, :].set(actions[i])
-                        buf["dones"] = buf["dones"].at[idx].set(dones[i])
-                        buf["terminations"] = buf["terminations"].at[idx].set(terminations[i])
-                        buf["y_target"] = buf["y_target"].at[idx].set(y_target[i])
-                        buf["masks"] = buf["masks"].at[idx].set(masks[i])
-                        return buf
-
-                    num_new = states.shape[0]
-                    new_buffer = jax.lax.fori_loop(0, num_new, body_fun, buffer)
-                    new_buffer["pos"] = (pos + num_new) % capacity
-                    new_buffer["size"] = jnp.minimum(capacity, size + num_new)
-                    return new_buffer
-
                 # flatten the first two dimensions before adding to buffer
                 states = states.reshape(-1, states.shape[-1])
                 next_states = next_states.reshape(-1, next_states.shape[-1])
@@ -470,30 +447,33 @@ class PPO:
                 y_target = y_target.reshape(-1)
                 masks = masks.reshape(-1)
 
-                # Split into positive and negative samples based on y_target
-                pos_indices = jnp.where(y_target == 1.0)
-                neg_indices = jnp.where(y_target == 0.0)
+                def write_to_buffer(buffer, sample_mask):
+                    capacity = buffer["states"].shape[0]
 
-                pos_states = states[pos_indices]
-                pos_next_states = next_states[pos_indices]
-                pos_actions = actions[pos_indices]
-                pos_dones = dones[pos_indices]
-                pos_terminations = terminations[pos_indices]
-                pos_y_target = y_target[pos_indices]
-                pos_masks = masks[pos_indices]
+                    def body_fun(i, buf):
+                        def write_entry(b):
+                            idx = b["pos"]
+                            b = dict(b)
+                            b["states"] = b["states"].at[idx].set(states[i])
+                            b["next_states"] = b["next_states"].at[idx].set(next_states[i])
+                            b["actions"] = b["actions"].at[idx].set(actions[i])
+                            b["dones"] = b["dones"].at[idx].set(dones[i])
+                            b["terminations"] = b["terminations"].at[idx].set(terminations[i])
+                            b["y_target"] = b["y_target"].at[idx].set(y_target[i])
+                            b["masks"] = b["masks"].at[idx].set(masks[i])
+                            new_idx = (idx + 1) % capacity
+                            b["pos"] = new_idx
+                            b["size"] = jnp.minimum(capacity, b["size"] + 1)
+                            return b
+                        return jax.lax.cond(sample_mask[i], write_entry, lambda b: b, buf)
 
-                neg_states = states[neg_indices]
-                neg_next_states = next_states[neg_indices]
-                neg_actions = actions[neg_indices]
-                neg_dones = dones[neg_indices]
-                neg_terminations = terminations[neg_indices]
-                neg_y_target = y_target[neg_indices]
-                neg_masks = masks[neg_indices]
+                    return jax.lax.fori_loop(0, states.shape[0], body_fun, buffer)
 
-                new_pos_buffer = update_buffer(pos_buffer, pos_states, pos_next_states, pos_actions,
-                                                  pos_dones, pos_terminations, pos_y_target, pos_masks)
-                new_neg_buffer = update_buffer(neg_buffer, neg_states, neg_next_states, neg_actions,
-                                                  neg_dones, neg_terminations, neg_y_target, neg_masks)
+                pos_mask = y_target == 1.0
+                neg_mask = ~pos_mask
+
+                new_pos_buffer = write_to_buffer(pos_buffer, pos_mask)
+                new_neg_buffer = write_to_buffer(neg_buffer, neg_mask)
                 return new_pos_buffer, new_neg_buffer
 
             def _init_buffer(capacity):
