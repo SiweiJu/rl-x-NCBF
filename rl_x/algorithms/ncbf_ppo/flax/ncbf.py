@@ -44,7 +44,6 @@ def get_ncbf(config, env):
     return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function
 
 
-@jax.jit
 def ensemble_forward_pass(train_states, input):
     """
     one step forward pass through an ensemble of networks, 1 input
