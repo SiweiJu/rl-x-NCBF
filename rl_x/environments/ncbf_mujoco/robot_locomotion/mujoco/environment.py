@@ -52,11 +52,12 @@ class LocomotionEnv(gym.Env):
             floor.hfield = "empty_hfield"
         
         if self.should_render and self.add_goal_arrow:
+            dir_vec = xml_handle.find("body", "trunk")
             trunk = xml_handle.find("body", "trunk")
-            trunk.add("body", name="dir_arrow", pos="0 0 0.15")
-            dir_vec = xml_handle.find("body", "dir_arrow")
-            dir_vec.add("site", name="dir_arrow_ball", type="sphere", size=".02", pos="-.1 0 0")
-            dir_vec.add("site", name="dir_arrow", type="cylinder", size=".01", fromto="0 0 -.1 0 0 .1")
+            # create a small child body at the desired base position on the trunk
+            dir_base = trunk.add("body", name="dir_arrow_base", pos="0 0 0.2")
+            dir_base.add("geom", name="dir_arrow_ball", type="sphere", size=".05", pos="0 0 0")
+            dir_base.add("geom", name="dir_arrow", type="cylinder", size=".01", fromto="0 0 -0.1 0 0 0.1")
 
         if self.should_render:
             # add the safety light
@@ -171,7 +172,7 @@ class LocomotionEnv(gym.Env):
 
         self.observation_noise_function.init_attributes()
 
-        eval_mode = False
+        eval_mode = True
         self.internal_state = {
             "mj_model": deepcopy(self.initial_mj_model),
             "data": mujoco.MjData(self.initial_mj_model),
@@ -268,18 +269,38 @@ class LocomotionEnv(gym.Env):
             trunk_rotation = self.internal_state["imu_orientation_euler"][2]
             desired_angle = trunk_rotation + np.arctan2(goal_velocities[1], goal_velocities[0])
             rot_mat = Rotation.from_euler('xyz', (np.array([np.pi/2, 0, np.pi/2 + desired_angle]))).as_matrix()
-            self.internal_state["data"].site("dir_arrow").xmat = rot_mat.reshape((9,))
-            magnitude = np.sqrt(np.sum(np.square([goal_velocities[0], goal_velocities[1]])))
-            self.internal_state["mj_model"].site_size[self.dir_arrow_id, 1] = magnitude * 0.1
-            arrow_offset = -(0.1 - (magnitude * 0.1))
-            self.internal_state["data"].site("dir_arrow").xpos += [arrow_offset * np.sin(np.pi/2 + desired_angle), -arrow_offset * np.cos(np.pi/2 + desired_angle), 0]
-            self.internal_state["data"].site("dir_arrow_ball").xpos = self.internal_state["data"].body("dir_arrow").xpos + [-0.1 * np.sin(np.pi/2 + desired_angle), 0.1 * np.cos(np.pi/2 + desired_angle), 0]
+            dir_xy = np.array([np.cos(desired_angle), np.sin(desired_angle), 0.0], dtype=np.float64)
 
-        # add safety light
+            # handle geoms instead of sites
+            dir_arrow_geom_id = mujoco.mj_name2id(self.internal_state["mj_model"], mujoco.mjtObj.mjOBJ_GEOM, "dir_arrow")
+            dir_arrow_ball_geom_id = mujoco.mj_name2id(self.internal_state["mj_model"], mujoco.mjtObj.mjOBJ_GEOM, "dir_arrow_ball")
+
+            # try to set the geom orientation matrix; fall back to rotating trunk body if not available
+            self.internal_state["data"].geom_xmat[dir_arrow_geom_id] = rot_mat.reshape((9,))
+
+            magnitude = np.sqrt(goal_velocities[0] ** 2 + goal_velocities[1] ** 2)
+            arrow_len = magnitude * 0.1
+            self.internal_state["mj_model"].geom_size[dir_arrow_geom_id, 1] = arrow_len
+            arrow_offset = -(0.1 - (magnitude * 0.1))
+
+            # update world positions for geoms
+            # offset_vec = np.array([arrow_offset * np.sin(np.pi/2 + desired_angle), -arrow_offset * np.cos(np.pi/2 + desired_angle), 0.0])
+            # self.internal_state["data"].geom_xpos[dir_arrow_geom_id] = self.internal_state["data"].geom_xpos[dir_arrow_geom_id] + offset_vec
+
+            trunk_pos = self.internal_state["data"].body("trunk").xpos
+            # self.internal_state["data"].geom_xpos[dir_arrow_ball_geom_id] = trunk_pos + [0, 0, 0.5] # + np.array([-0.1 * np.sin(np.pi/2 + desired_angle), 0.1 * np.cos(np.pi/2 + desired_angle), 0.0])
+
+            ball_pos = trunk_pos + np.array([0, 0, 0.5])
+            self.internal_state["data"].geom_xpos[dir_arrow_ball_geom_id] = ball_pos
+
+            self.internal_state["data"].geom_xpos[dir_arrow_geom_id] = ball_pos + dir_xy * 0.5 * arrow_len
+
+
+            # add safety light
         safety = self.internal_state["safe_prediction"]
-        if safety < 0.3:
+        if safety < 0.5:
             safety_color = np.array([1.0, 0.0, 0.0, 1.0])  # red
-        elif safety < 0.7:
+        elif safety < 0.8:
             safety_color = np.array([1.0, 1.0, 0.0, 1.0])  # yellow
         else:
             safety_color = np.array([0.0, 1.0, 0.0, 1.0])  # green

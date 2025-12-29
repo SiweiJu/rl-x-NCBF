@@ -15,7 +15,7 @@ class RandomTrajectoryCommands:
         self.default_actuator_joint_keep_nominal = np.array(self.default_actuator_joint_keep_nominal)
 
         self.trajectory_length = int(self.env.env_config["command"].get("trajectory_length_in_seconds", 10) / self.env.dt)
-        self.min_steps_each_command = self.env.env_config["command"].get("min_steps_each_command", 10)
+        self.min_steps_each_command = self.env.env_config["command"].get("min_steps_each_command", 50)
 
     def init(self):
         self.env.internal_state["actuator_joint_keep_nominal"] = self.default_actuator_joint_keep_nominal

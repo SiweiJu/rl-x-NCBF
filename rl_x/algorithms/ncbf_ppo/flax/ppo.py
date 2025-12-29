@@ -1,4 +1,6 @@
+import datetime
 import os
+import pickle
 import shutil
 import json
 import logging
@@ -861,13 +863,16 @@ class PPO:
             raw_processed_action = self.get_processed_action(action_mean)
             safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, state, self.ncbf_state[0].params)
             return safe_action, raw_processed_action, constraint_active, delta_u
-        
+
+        rollouts = []
         self.set_eval_mode()
         for i in range(episodes):
             done = False
             episode_return = 0
             state, _ = self.env.reset()
             self.env.envs[0].internal_state["safe_prediction"] = 1
+
+            rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[])
 
             while not done:
                 processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state)
@@ -894,7 +899,21 @@ class PPO:
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
                 episode_return += reward
+
+                rollout_dict["predictions"].append(predictions)
+                rollout_dict["dones"].append(done)
+                rollout_dict["safe_prediction"].append(prediction_mean)
+            rollouts.append(rollout_dict)
+
             rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
+
+        # save rollouts with policy load path name and timestamp
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        rollout_file = f"rollouts_{timestamp}.pkl"
+        with open(rollout_file, "wb") as f:
+            pickle.dump(rollouts, f)
+
+
     
             
     def set_train_mode(self):
