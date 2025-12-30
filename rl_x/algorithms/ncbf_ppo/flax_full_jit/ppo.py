@@ -313,6 +313,18 @@ class PPO:
                              self.ncbf_w_lip * lip_loss +
                              self.ncbf_w_wd * wd_loss)
 
+                    # calculate mse of ncbf prediction for logging, also calculate mse for y is true or false separately
+                    valid = minib_mask.astype(jnp.float32)
+                    sq_err = jnp.square(h_x - y_target)
+                    mse_all = jnp.sum(valid * sq_err) / (jnp.sum(valid) + 1e-8)
+
+                    pos_mask = valid * (y_target > 0.5)
+                    mse_pos = jnp.sum(pos_mask * sq_err) / (jnp.sum(pos_mask) + 1e-8)
+
+                    neg_mask = valid * (y_target <= 0.5)
+                    mse_neg = jnp.sum(neg_mask * sq_err) / (jnp.sum(neg_mask) + 1e-8)
+
+
                     metrics = dict(
                         total_loss=total,
                         clf_loss=clf_loss,
@@ -320,6 +332,9 @@ class PPO:
                         lip_loss=lip_loss,
                         wd_loss=wd_loss,
                         grad_norm=grad_norm,
+                        mse_all=mse_all,
+                        mse_pos=mse_pos,
+                        mse_neg=mse_neg,
                     )
                     return total, metrics
 
