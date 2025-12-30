@@ -10,6 +10,7 @@ import tree
 import numpy as np
 import jax
 import jax.numpy as jnp
+import jax.nn as nn
 from flax.training.train_state import TrainState
 from flax.training import orbax_utils
 import orbax.checkpoint
@@ -261,6 +262,9 @@ class PPO:
                     gamma_c = self.ncbf_gamma_c
                     h_x = ncbf_state.apply_fn(params, minib_obs)  # [B,T]
                     h_xn = ncbf_state.apply_fn(params, minib_nxt)
+
+                    h_x = nn.sigmoid(h_x)
+                    h_xn = nn.sigmoid(h_xn)
 
                     # (1) BCE classification: logits = h(x) - gamma_c
                     logits = h_x - gamma_c

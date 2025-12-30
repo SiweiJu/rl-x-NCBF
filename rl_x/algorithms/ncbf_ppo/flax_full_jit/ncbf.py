@@ -92,7 +92,9 @@ class NCBF_FFNN(nn.Module):
         h1 = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
         # clip the output to be in [0, 1]
-        h1 = nn.sigmoid(h1)
+        # h1 = nn.sigmoid(h1)
+        # to get the gradient without the sigmoid, we do not use sigmoid here, add a sigmoid function when preedicting
+
         h1 = jnp.squeeze(h1, -1)  # shape ()
         return h1
 

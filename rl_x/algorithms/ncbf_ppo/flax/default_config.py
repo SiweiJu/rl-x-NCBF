@@ -30,7 +30,7 @@ def get_config(algorithm_name):
     config.ncbf.type = 'FFNN'
     config.ncbf.H = 10  # prediction horizon
     config.ncbf.lr = 1e-3
-    config.ncbf.gamma_c = 0.0     # safety threshold
+    config.ncbf.gamma_c = 1.0     # safety threshold (>=1 is safe, <=0 is unsafe)
     config.ncbf.w_clf = 1.0    # weight for classification loss
     config.ncbf.w_cbf = 1.0    # weight for CBF loss
     config.ncbf.w_lip = 0.0    # weight for lipschitz loss
