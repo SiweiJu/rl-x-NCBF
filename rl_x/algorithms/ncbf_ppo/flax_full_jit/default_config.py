@@ -43,6 +43,7 @@ def get_config(algorithm_name):
     config.ncbf.minibatch_size = 512
     config.ncbf.nr_hidden_units = 512
     config.ncbf.policy_loss_coef = 0.01  # weight for policy loss when training ncbf
+    config.ncbf.coef_decay_lambda = 0.95  # decay lambda for ncbf loss coefficients < 1
 
 
     config.ncbf.pretrain = config_dict.ConfigDict()
