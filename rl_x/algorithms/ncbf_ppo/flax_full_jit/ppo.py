@@ -207,23 +207,13 @@ class PPO:
                 H = self.ncbf_H  # must be a Python int for good jit behavior
                 cap = jnp.int32(H + 1)
 
-                # Ensure last step is a boundary so we don't look past the recorded rollout
                 dones = dones.at[-1, :].set(True)
 
-                @jax.jit
                 def _future_event_within_H(events: jnp.ndarray, dones_boundary: jnp.ndarray):
-                    """
-                    events: [T, N] bool
-                    dones_boundary: [T, N] bool  (episode boundary at t)
-                    Returns:
-                      any_next_H: [T, N] bool, event occurs in (t, t+H] within same episode
-                      dists: [T, N] int32, distance to next event at/after t within same episode (0 if at t)
-                    """
-
                     def body(dist_prev, inp):
-                        ev_t, done_t = inp  # each [N]
+                        ev_t, done_t = inp
 
-                        # IMPORTANT: if done at t, earlier steps must not see events beyond this boundary
+                        # Reset distance when crossing episode boundary
                         dist_prev = jnp.where(done_t, cap, dist_prev)
 
                         dist_t = jnp.where(ev_t, jnp.int32(0), jnp.minimum(dist_prev + 1, cap))
@@ -231,11 +221,22 @@ class PPO:
 
                     init = jnp.full((events.shape[1],), cap, dtype=jnp.int32)
 
+                    # Scan BACKWARD then reverse output
                     _, dists_rev = jax.lax.scan(body, init, (events[::-1], dones_boundary[::-1]))
                     dists = dists_rev[::-1]
 
-                    any_next_H = jnp.logical_and(dists > 0, dists <= H)
+                    any_next_H = jnp.logical_and(dists >= 0, dists <= H)
                     return any_next_H, dists
+
+                any_term_next_H, dists_to_next_term = _future_event_within_H(terminates, dones)
+                y = ~any_term_next_H
+
+                trunc_done = dones & (~terminates)
+                any_done_next_H, _ = _future_event_within_H(trunc_done, dones)
+                mask = ~any_done_next_H
+                mask = mask.at[-4:, :].set(False)
+
+                return y, mask, dists_to_next_term
 
                 # (1) y: terminate in (t, t+H] => y=False
                 any_term_next_H, dists_to_next_term = _future_event_within_H(terminates, dones)
@@ -430,6 +431,9 @@ class PPO:
                         "ncbf/wd_loss": jnp.array(0.0),
                         "ncbf/total_loss": jnp.array(0.0),
                         "ncbf/grad_norm": jnp.array(0.0),
+                        "ncbf/mse_all": jnp.array(0.0),
+                        "ncbf/mse_pos": jnp.array(0.0),
+                        "ncbf/mse_neg": jnp.array(0.0),
                         "ncbf/lr": ncbf_state.opt_state[1].hyperparams["learning_rate"],
                     }
                     return (ncbf_state, key), zero_metrics
@@ -528,7 +532,7 @@ class PPO:
                 states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u = batch
 
                 # process the batch data to get mask and y_target
-                y_bool, masks = window_any_done_next_H(dones, terminations)
+                y_bool, masks, indicies = window_any_done_next_H(dones, terminations)
                 y_target = y_bool.astype(jnp.float32)
 
                 ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
@@ -572,7 +576,7 @@ class PPO:
                     states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u = batch
 
                     # process the batch data to get mask and y_target
-                    y_bool, masks = window_any_done_next_H(dones, terminations)
+                    y_bool, masks, indicies = window_any_done_next_H(dones, terminations)
                     y_target = y_bool.astype(jnp.float32)
 
                     ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
