@@ -339,13 +339,13 @@ class PPO:
 
                     # calculate mse of ncbf prediction for logging, also calculate mse for y is true or false separately
                     valid = minib_mask.astype(jnp.float32)
-                    sq_err = jnp.square(h_x - y_target)
+                    sq_err = jnp.square(h_x - minib_y)
                     mse_all = jnp.sum(valid * sq_err) / (jnp.sum(valid) + 1e-8)
 
-                    pos_mask = valid * (y_target > 0.5)
+                    pos_mask = valid * (minib_y > 0.5)
                     mse_pos = jnp.sum(pos_mask * sq_err) / (jnp.sum(pos_mask) + 1e-8)
 
-                    neg_mask = valid * (y_target <= 0.5)
+                    neg_mask = valid * (minib_y <= 0.5)
                     mse_neg = jnp.sum(neg_mask * sq_err) / (jnp.sum(neg_mask) + 1e-8)
 
                     metrics = dict(
