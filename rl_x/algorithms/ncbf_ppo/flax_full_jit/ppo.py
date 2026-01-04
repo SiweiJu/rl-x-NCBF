@@ -216,12 +216,12 @@ class PPO:
                         ev_t, done_t = inp
 
                         # Reset distance when crossing episode boundary
-                        dist_prev = jnp.where(done_t, 0, dist_prev)
+                        dist_prev = jnp.where(done_t, cap, dist_prev)
 
                         dist_t = jnp.where(ev_t, 0, jnp.minimum(dist_prev + 1, cap))
                         return dist_t, dist_t
 
-                    init = jnp.full((events.shape[1],), 0, dtype=jnp.int32)
+                    init = jnp.full((events.shape[1],), cap, dtype=jnp.int32)
                     # Scan BACKWARD then reverse output
                     _, dists_rev = jax.lax.scan(body, init, (events[::-1], dones_boundary[::-1]))
                     dists = dists_rev[::-1]
@@ -238,7 +238,7 @@ class PPO:
                         term_t, trunc_t = inp
 
                         # Reset distance when crossing episode boundary
-                        dist_prev = jnp.where(trunc_t, 0, dist_prev)
+                        dist_prev = jnp.where(trunc_t, cap, dist_prev)
 
                         # if term, set to cap t maintain
                         dist_prev = jnp.where(term_t, cap, dist_prev)
@@ -246,7 +246,7 @@ class PPO:
                         dist_t = jnp.where(trunc_t, 0, jnp.minimum(dist_prev + 1, cap))
                         return dist_t, dist_t
 
-                    init = jnp.full((truncs.shape[1],), 0, dtype=jnp.int32)
+                    init = jnp.full((truncs.shape[1],), cap, dtype=jnp.int32)
                     # Scan BACKWARD then reverse output
                     _, dists_rev = jax.lax.scan(body, init, (terms[::-1], truncs[::-1]))
                     dists = dists_rev[::-1]
@@ -273,7 +273,7 @@ class PPO:
                 """
 
                 @jax.jit
-                def loss_fn(params, minib_obs, minib_nxt, minib_y, minib_mask, minib_indicies_to_term):
+                def loss_fn(params, minib_obs, minib_nxt, minib_y, minib_mask, minib_indices_to_term):
                     gamma_c = self.ncbf_gamma_c
                     h_x = ncbf_state.apply_fn(params, minib_obs)  # [B,T]
                     h_xn = ncbf_state.apply_fn(params, minib_nxt)
@@ -284,7 +284,7 @@ class PPO:
                     # (1) BCE classification: logits = h(x) - gamma_c
                     logits = h_x - gamma_c
 
-                    k = jnp.clip(minib_indicies_to_term, 0, self.ncbf_H)
+                    k = jnp.clip(minib_indices_to_term, 0, self.ncbf_H)
                     coef = self.ncbf_coef_decay_lambda ** k
 
                     # use the decaying coef only for negtive samples
@@ -348,6 +348,15 @@ class PPO:
                     neg_mask = valid * (minib_y <= 0.5)
                     mse_neg = jnp.sum(neg_mask * sq_err) / (jnp.sum(neg_mask) + 1e-8)
 
+                    # weighted mse neg
+                    mse_neg_weighted = jnp.sum(neg_mask * sq_err * coef) / (jnp.sum(neg_mask) + 1e-8)
+
+                    # for debug purposes
+                    coef_neg = jnp.where(minib_y <= 0.5, coef, 0.0)
+                    mean_coef_neg = jnp.sum(coef_neg) / (jnp.sum(neg_mask) + 1e-8)
+                    max_coef_neg = jnp.max(coef_neg)
+                    min_coef_neg = jnp.min(coef_neg)
+
                     metrics = dict(
                         total_loss=total,
                         clf_loss=clf_loss,
@@ -358,13 +367,18 @@ class PPO:
                         mse_all=mse_all,
                         mse_pos=mse_pos,
                         mse_neg=mse_neg,
+                        mse_neg_weighted=mse_neg_weighted,
+                        neg_coef=mean_coef_neg,
+                        max_neg_coef=max_coef_neg,
+                        min_neg_coef=min_coef_neg,
+                        n_neg_samples=jnp.sum(minib_y),
                     )
                     return total, metrics
 
-                vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, 0, 0), out_axes=0)
-                safe_mean = lambda x: jnp.mean(x) if x is not None else x
-                mean_vmapped_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
-                grad_ncbf_loss_fn = jax.value_and_grad(mean_vmapped_loss_fn, argnums=0, has_aux=True)
+                # vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, 0, 0), out_axes=0)
+                # safe_mean = lambda x: jnp.mean(x) if x is not None else x
+                # mean_vmapped_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
+                grad_ncbf_loss_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
 
                 def do_train(carry):
                     ncbf_state, key = carry
@@ -414,7 +428,7 @@ class PPO:
                             indices_to_term = indices_to_term[perm]
                             return states, next_states, y_target, masks, indices_to_term
 
-                        states, next_states, y_targets, masks, indicies_to_term = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
+                        states, next_states, y_targets, masks, indices_to_term = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
 
                         (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
                             ncbf_state.params,
@@ -422,7 +436,7 @@ class PPO:
                             next_states,
                             y_targets,
                             masks,
-                            indicies_to_term
+                            indices_to_term
                         )
                         metrics["grad_norm"] = optax.global_norm(ncbf_grads)
                         new_state = ncbf_state.apply_gradients(grads=ncbf_grads)
@@ -433,23 +447,15 @@ class PPO:
                     init_carry = (ncbf_state, key)
                     (ncbf_state, key), metrics = jax.lax.scan(ncbf_minibatch_update, init_carry, jnp.arange(nr_minibatches))
 
-                    mean_metrics = {  # fixed structure
-                        "ncbf/clf_loss": jnp.mean(metrics["clf_loss"]),
-                        "ncbf/cbf_loss": jnp.mean(metrics["cbf_loss"]),
-                        "ncbf/lip_loss": jnp.mean(metrics["lip_loss"]),
-                        "ncbf/wd_loss": jnp.mean(metrics["wd_loss"]),
-                        "ncbf/total_loss": jnp.mean(metrics["total_loss"]),
-                        "ncbf/grad_norm": jnp.mean(metrics["grad_norm"]),
-                        "ncbf/mse_all": jnp.mean(metrics["mse_all"]),
-                        "ncbf/mse_pos": jnp.mean(metrics["mse_pos"]),
-                        "ncbf/mse_neg": jnp.mean(metrics["mse_neg"]),
-                        "ncbf/lr": ncbf_state.opt_state[1].hyperparams["learning_rate"],
-                    }
+                    safe_mean = lambda x: jnp.mean(x) if x is not None else x
+                    mean_metrics = {f"ncbf/{k}": safe_mean(v) for k, v in metrics.items()}
+                    mean_metrics["ncbf/lr"] = ncbf_state.opt_state[1].hyperparams["learning_rate"]
 
                     return (ncbf_state, key), mean_metrics
 
                 def skip_train(carry):
                     ncbf_state, key = carry
+                    # filling dummy metrics with zeros for logging consistency
                     zero_metrics = {
                         "ncbf/clf_loss": jnp.array(0.0),
                         "ncbf/cbf_loss": jnp.array(0.0),
@@ -460,6 +466,11 @@ class PPO:
                         "ncbf/mse_all": jnp.array(0.0),
                         "ncbf/mse_pos": jnp.array(0.0),
                         "ncbf/mse_neg": jnp.array(0.0),
+                        "ncbf/mse_neg_weighted": jnp.array(0.0),
+                        "ncbf/neg_coef": jnp.array(0.0),
+                        "ncbf/max_neg_coef": jnp.array(0.0),
+                        "ncbf/min_neg_coef": jnp.array(0.0),
+                        "ncbf/n_neg_samples": jnp.array(0.0),
                         "ncbf/lr": ncbf_state.opt_state[1].hyperparams["learning_rate"],
                     }
                     return (ncbf_state, key), zero_metrics
@@ -525,10 +536,11 @@ class PPO:
                     return jax.lax.fori_loop(0, states.shape[0], body_fun, buffer)
 
                 pos_mask = y_target == 1.0
+
                 neg_mask = ~pos_mask
 
-                new_pos_buffer = write_to_buffer(pos_buffer, pos_mask)
-                new_neg_buffer = write_to_buffer(neg_buffer, neg_mask)
+                new_pos_buffer = write_to_buffer(pos_buffer, pos_mask & masks)
+                new_neg_buffer = write_to_buffer(neg_buffer, neg_mask & masks)
                 return new_pos_buffer, new_neg_buffer
 
             def _init_buffer(capacity):
@@ -538,7 +550,7 @@ class PPO:
                     "actions": jnp.zeros((capacity, ) + (self.as_shape[0], ), dtype=jnp.float32),
                     "dones": jnp.zeros((capacity, ), dtype=jnp.bool),
                     "terminations": jnp.zeros((capacity, ), dtype=jnp.bool),
-                    "y_target": jnp.zeros((capacity, ), dtype=jnp.float32),
+                    "y_target": jnp.zeros((capacity, ), dtype=jnp.bool),
                     "masks": jnp.zeros((capacity, ), dtype=jnp.bool),
                     "indices_to_term": jnp.zeros((capacity, ), dtype=jnp.int32),
                     "pos": jnp.zeros((), dtype=jnp.int32),
@@ -560,13 +572,44 @@ class PPO:
                 policy_state, critic_state, ncbf_state, env_state, key = single_rollout_carry
                 states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u = batch
 
+                # # for debugging
+                # def _save_pretrain_batch(states, next_states, actions, rewards, values,
+                #                          terminations, dones, log_probs, constraints_active, delta_u, indices):
+                #     def _to_disk(*arrs):
+                #         (s, ns, a, r, v, term, dn, lp, ca, du, ind) = arrs
+                #         np.savez(
+                #             "cbf_pretrain_batch.npz",
+                #             states=s,
+                #             next_states=ns,
+                #             actions=a,
+                #             rewards=r,
+                #             values=v,
+                #             terminations=term,
+                #             dones=dn,
+                #             log_probs=lp,
+                #             constraints_active=ca,
+                #             delta_u=du,
+                #             indices=ind
+                #         )
+                #
+                #     jax.debug.callback(_to_disk, states, next_states, actions, rewards, values,
+                #                        terminations, dones, log_probs, constraints_active, delta_u, indices)
+
                 # process the batch data to get mask and y_target
-                y_bool, masks, indicies_to_term = window_any_done_next_H(dones, terminations)
-                y_target = y_bool.astype(jnp.float32)
+                y_target, masks, indices_to_term = window_any_done_next_H(dones, terminations)
+
+                # # Replace the original np.savez block with:
+                # _save_pretrain_batch(states, next_states, actions, rewards, values,
+                #                      terminations, dones, log_probs, constraints_active, delta_u, indices_to_term)
+
+
+                # # log masked mean_indices_to_term for neg and pos samples separately, for debugging
+                # mean_indices_to_term_pos = jnp.sum(indices_to_term * masks * (y_target==1.0)) / (jnp.sum(masks * (y_target==1.0)) + 1e-8)
+                # mean_indices_to_term_neg = jnp.sum(indices_to_term * masks * (y_target==0.0)) / (jnp.sum(masks * (y_target==0.0)) + 1e-8)
 
                 ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
                     ncbf_pos_buffer, ncbf_neg_buffer,
-                    states, next_states, actions, dones, terminations, y_target, masks, indicies_to_term
+                    states, next_states, actions, dones, terminations, y_target, masks, indices_to_term
                 )
 
                 ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_pos_buffer, ncbf_neg_buffer, key, self.ncbf_pretrain_nr_minibatches)
@@ -576,10 +619,15 @@ class PPO:
                 ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_pos_buffer, ncbf_neg_buffer, key, self.ncbf_pretrain_nr_minibatches)
 
                 ncbf_metrics = tree.map_structure(lambda x: jnp.mean(x), ncbf_metrics)
-                mean_y = jnp.mean(y_bool)
+                mean_y = jnp.mean(y_target)
+
                 ncbf_metrics['ncbf/mean_y'] = mean_y
                 ncbf_metrics['ncbf/constraints_active_rate'] = jnp.mean(constraints_active)
                 ncbf_metrics['ncbf/mean_delta_u'] = jnp.mean(jnp.abs(delta_u))
+
+                # # for debugging
+                # ncbf_metrics['ncbf/mean_indices_pos_rollout'] = mean_indices_to_term_pos
+                # ncbf_metrics['ncbf/mean_indices_neg_rollout'] = mean_indices_to_term_neg
 
                 def pretrain_callback(carry):
                     # step set to zero for pretrian logging
@@ -605,12 +653,14 @@ class PPO:
                     states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u = batch
 
                     # process the batch data to get mask and y_target
-                    y_bool, masks, indicies_to_term = window_any_done_next_H(dones, terminations)
-                    y_target = y_bool.astype(jnp.float32)
+                    y_target, masks, indices_to_term = window_any_done_next_H(dones, terminations)
 
                     ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
                         ncbf_pos_buffer, ncbf_neg_buffer,
-                        states, next_states, actions, dones, terminations, y_target, masks, indicies_to_term)
+                        states, next_states, actions, dones, terminations, y_target, masks, indices_to_term)
+
+                    mean_indices_to_term_pos_rollout = jnp.sum(indices_to_term * masks * (y_target==1.0)) / (jnp.sum(masks * (y_target==1.0)) + 1e-8)
+                    mean_indices_to_term_neg_rollout = jnp.sum(indices_to_term * masks * (y_target==0.0)) / (jnp.sum(masks * (y_target==0.0)) + 1e-8)
 
                     # train ncbf
                     ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_pos_buffer, ncbf_neg_buffer, key,
@@ -626,11 +676,35 @@ class PPO:
 
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
-                    ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_bool)
+                    ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_target)
 
                     # log number of pos and neg samples
                     ncbf_metrics["ncbf/pos_buffer_size"] = ncbf_pos_buffer["size"]
                     ncbf_metrics["ncbf/neg_buffer_size"] = ncbf_neg_buffer["size"]
+
+                    ncbf_metrics["ncbf/mean_indices_pos_rollout"] = mean_indices_to_term_pos_rollout
+                    ncbf_metrics["ncbf/mean_indices_neg_rollout"] = mean_indices_to_term_neg_rollout
+
+                    # # for debug
+                    # def masked_mean(y, size):
+                    #     size_mask = jnp.arange(y.shape[0]) < size
+                    #     return jnp.where(size > 0, jnp.sum(y * size_mask) / size, 0.0)
+                    #
+                    # ncbf_metrics["ncbf/mean_pos_buffer"] = masked_mean(
+                    #     ncbf_pos_buffer["y_target"], ncbf_pos_buffer["size"]
+                    # )
+                    # ncbf_metrics["ncbf/mean_neg_buffer"] = masked_mean(
+                    #     ncbf_neg_buffer["y_target"], ncbf_neg_buffer["size"]
+                    # )
+
+                    # # for debugging log indices to term for pos and neg buffer
+                    # ncbf_metrics["ncbf/mean_indices_to_term_pos_buffer"] = masked_mean(
+                    #     ncbf_pos_buffer["indices_to_term"], ncbf_pos_buffer["size"])
+                    # ncbf_metrics["ncbf/mean_indices_to_term_neg_buffer"] = masked_mean(
+                    #     ncbf_neg_buffer["indices_to_term"], ncbf_neg_buffer["size"])
+                    #
+                    # ncbf_metrics["ncbf/mean_mask_pos_buffer"] = masked_mean(ncbf_pos_buffer["masks"], ncbf_pos_buffer["size"])
+                    # ncbf_metrics["ncbf/mean_mask_neg_buffer"] = masked_mean(ncbf_neg_buffer["masks"], ncbf_neg_buffer["size"])
 
                     # Calculating advantages and returns
                     def calculate_gae_advantages(critic_state, next_states, rewards, values, terminations):
@@ -676,6 +750,9 @@ class PPO:
 
                         # anticipation loss
                         safe_action_b, _, _ = self.ncbf_safety_layer(action_b, state_b, ncbf_params)
+
+                        # for debugging:
+                        # anticipation_loss = 0.0
                         anticipation_loss = 0.5 * (action_mean - safe_action_b) ** 2
 
                         # Combine losses
@@ -703,8 +780,8 @@ class PPO:
 
                     vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, 0, 0, 0, 0, 0), out_axes=0)
                     safe_mean = lambda x: jnp.mean(x) if x is not None else x
-                    mean_vmapped_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
-                    grad_loss_fn = jax.value_and_grad(mean_vmapped_loss_fn, argnums=(0, 1), has_aux=True)
+                    mean_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
+                    grad_loss_fn = jax.value_and_grad(mean_loss_fn, argnums=(0, 1), has_aux=True)
 
                     key, subkey = jax.random.split(key)
                     batch_indices = jnp.tile(jnp.arange(self.batch_size), (self.nr_epochs, 1))
