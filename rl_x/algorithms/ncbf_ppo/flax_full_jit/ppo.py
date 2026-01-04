@@ -281,18 +281,20 @@ class PPO:
                     h_x = nn.sigmoid(h_x)
                     h_xn = nn.sigmoid(h_xn)
 
-                    # (1) BCE classification: logits = h(x) - gamma_c
-                    logits = h_x - gamma_c
-
+                    # (1) BCE classification
                     k = jnp.clip(minib_indices_to_term, 0, self.ncbf_H)
                     coef = self.ncbf_coef_decay_lambda ** k
 
                     # use the decaying coef only for negtive samples
-                    minib_y = minib_y.astype(jnp.bool)
                     coef = jnp.where(~minib_y, coef, 1.0)
 
+                    minib_y = minib_y.astype(jnp.int32)
+
                     # BCE with logits: softplus(z) - y*z
-                    num = jnp.sum(minib_mask * coef * (jax.nn.softplus(logits) - minib_y * logits))
+                    # probability form of BCE loss:
+                    p_safe = jnp.clip(h_x, 1e-6, 1 - 1e-6)
+                    bce =  -(minib_y * jnp.log(p_safe) + (1.0 - minib_y) * jnp.log(1.0 - p_safe))
+                    num = jnp.sum(minib_mask * coef * bce)
                     den = jnp.sum(minib_mask) + 1e-8
 
                     clf_loss = num / den
