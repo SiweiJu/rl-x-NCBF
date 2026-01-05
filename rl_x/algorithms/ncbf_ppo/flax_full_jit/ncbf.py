@@ -19,13 +19,19 @@ def get_ncbf(config, env):
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
     ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
 
+    act_low = jnp.array(env.single_action_space.low)
+    act_high = jnp.array(env.single_action_space.high)
+
+
     NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices) for _ in range(n_ncbf_ensemble)]
 
     dynamics_step_function = get_dynamics_step_function_mjx(env)
 
     safety_layer_function = make_get_safe_action(NCBF[0].apply, dynamics_step_function, env.dynamics_observation_indices,
-                                                 use_safety_layer)
-    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+                                                 use_safety_layer, act_low, act_high)
+
+    # dummy onnly clipping
+    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -104,6 +110,8 @@ def make_get_safe_action(
     system_forward_dynamics_function: Callable[[Array, Array], Array],
     state_from_obs_id: Array,
     use_safety_layer: bool,
+    act_low: Array,
+    act_high: Array,
     *,
     gamma_c: float = 0.0,
     eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s
@@ -205,8 +213,11 @@ def make_get_safe_action(
         constraint_active = jnp.array(delta > 0.0)
 
         u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
-        delta_u = jnp.linalg.norm(u_safe - action_raw)
-        return u_processed, constraint_active, delta_u
+
+        u_clipped = jnp.clip(u_processed, act_low, act_high)
+        delta_u = jnp.linalg.norm(u_clipped - action_raw)
+
+        return u_clipped, constraint_active, delta_u
 
     return get_safe_action
 
