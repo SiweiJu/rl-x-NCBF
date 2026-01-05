@@ -25,6 +25,25 @@ from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.exteroceptive_observa
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.terrain_functions.handler import get_terrain_function
 
 
+#  for go2 only
+JOINT_LIMITS = np.array(
+    [
+        [-1.0472, 1.0472],
+        [-1.5708, 3.4907],
+        [-2.7227, -0.83776],
+        [-1.0472, 1.0472],
+        [-1.5708, 3.4907],
+        [-2.7227, -0.83776],
+        [-1.0472, 1.0472],
+        [-0.5236, 4.5379],
+        [-2.7227, -0.83776],
+        [-1.0472, 1.0472],
+        [-0.5236, 4.5379],
+        [-2.7227, -0.83776],
+    ],
+    dtype=np.float32,
+)
+
 class LocomotionEnv(gym.Env):
     def __init__(self, robot_config, runner_mode, seed, render, env_config, nr_envs):
         
@@ -164,8 +183,11 @@ class LocomotionEnv(gym.Env):
         self.joint_dropout_function = get_joint_dropout_function(env_config["domain_randomization"]["joint_dropout"]["type"], self)
         
         action_space_size = self.nr_actuator_joints
-        action_space_low = -np.ones(action_space_size) * np.inf
-        action_space_high = np.ones(action_space_size) * np.inf
+        # action_space_low = -np.ones(action_space_size) * np.inf
+        # action_space_high = np.ones(action_space_size) * np.inf
+        action_space_low = JOINT_LIMITS[:, 0]
+        action_space_high = JOINT_LIMITS[:, 1]
+
         self.action_space = gym.spaces.Box(low=action_space_low, high=action_space_high, shape=(action_space_size,), dtype=np.float32)
 
         self.observation_space = self.get_observation_space()

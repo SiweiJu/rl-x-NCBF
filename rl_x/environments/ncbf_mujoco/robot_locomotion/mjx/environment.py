@@ -11,6 +11,7 @@ from jax.scipy.spatial.transform import Rotation
 import jax
 import jax.numpy as jnp
 
+
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.state import State
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.box_space import BoxSpace
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.viewer import MujocoViewer
@@ -29,6 +30,26 @@ from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.domain_randomization.obs
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.domain_randomization.joint_dropout_functions.handler import get_joint_dropout_function
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.exteroceptive_observation_functions.handler import get_exteroceptive_observation_function
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.terrain_functions.handler import get_terrain_function
+
+
+#  for go2 only
+JOINT_LIMITS = np.array(
+    [
+        [-1.0472, 1.0472],
+        [-1.5708, 3.4907],
+        [-2.7227, -0.83776],
+        [-1.0472, 1.0472],
+        [-1.5708, 3.4907],
+        [-2.7227, -0.83776],
+        [-1.0472, 1.0472],
+        [-0.5236, 4.5379],
+        [-2.7227, -0.83776],
+        [-1.0472, 1.0472],
+        [-0.5236, 4.5379],
+        [-2.7227, -0.83776],
+    ],
+    dtype=np.float32,
+)
 
 
 class LocomotionEnv:
@@ -169,7 +190,9 @@ class LocomotionEnv:
         self.joint_dropout_function = get_joint_dropout_function(env_config["domain_randomization"]["joint_dropout"]["type"], self)
         
         action_space_size = self.nr_actuator_joints
-        self.single_action_space = BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(action_space_size,), dtype=jnp.float32)
+        action_space_low = jnp.array(JOINT_LIMITS[:, 0])
+        action_space_high = jnp.array(JOINT_LIMITS[:, 1])
+        self.single_action_space = BoxSpace(low=action_space_low, high=action_space_high, shape=(action_space_size,), dtype=jnp.float32)
 
         self.single_observation_space = self.get_observation_space()
 
