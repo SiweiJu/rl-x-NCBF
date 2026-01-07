@@ -18,6 +18,7 @@ def get_ncbf(config, env):
     n_ncbf_ensemble = config.algorithm.ncbf.n_ensemble
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
     ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
+    gamma_c = config.algorithm.ncbf.gamma_c
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
@@ -28,7 +29,7 @@ def get_ncbf(config, env):
     dynamics_step_function = get_dynamics_step_function_mjx(env)
 
     safety_layer_function = make_get_safe_action(NCBF[0].apply, dynamics_step_function, env.dynamics_observation_indices,
-                                                 use_safety_layer, act_low, act_high)
+                                                 use_safety_layer, act_low, act_high, gamma_c=gamma_c)
 
     # dummy onnly clipping
     dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
@@ -215,7 +216,8 @@ def make_get_safe_action(
         u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
 
         u_clipped = jnp.clip(u_processed, act_low, act_high)
-        delta_u = jnp.linalg.norm(u_clipped - action_raw)
+        action_raw_clipped = jnp.clip(action_raw, act_low, act_high)
+        delta_u = jnp.linalg.norm(u_clipped - action_raw_clipped)
 
         return u_clipped, constraint_active, delta_u
 
