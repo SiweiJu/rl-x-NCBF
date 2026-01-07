@@ -18,15 +18,21 @@ def get_ncbf(config, env):
     ncbf_type = config.algorithm.ncbf.type
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
     ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
+    gamma_c = config.algorithm.ncbf.gamma_c
 
     NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices) for _ in range(n_ncbf_ensemble)]
     NCBF_apply = ensemble_forward_pass
 
     dynamics_step_function = get_dynamics_step_function_mjx(env.envs[0])
 
+    act_low = jnp.array(env.single_action_space.low)
+    act_high = jnp.array(env.single_action_space.high)
+
     safety_layer_function = make_get_safe_action(NCBF[0].apply, dynamics_step_function, env.dynamics_observation_indices,
-                                                 use_safety_layer)
-    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+                                                 use_safety_layer, act_low, act_high, gamma_c=gamma_c)
+
+    # dummy only clipping
+    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -90,10 +96,13 @@ class NCBF_FFNN(nn.Module):
         # Scalar CBF output h(x)
         h = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
-        # jax.debug.print("NCBF output before sigmoid: {h}", h=h)
-        h = nn.sigmoid(h)
-
+        # h = nn.sigmoid(h)
+        # This output is used in the safety layer to calculate the gradient only, for prediction, use self.predict_with_sigmoid
         return jnp.squeeze(h, -1)  # shape ()
+
+    def predict_with_sigmoid(self,x):
+        h = self.__call__(x)
+        return nn.sigmoid(h)
 
 
 def make_get_safe_action(
@@ -101,6 +110,8 @@ def make_get_safe_action(
     system_forward_dynamics_function: Callable[[Array, Array], Array],
     state_from_obs_id: Array,
     use_safety_layer: bool,
+    act_low: Optional[Array],
+    act_high: Optional[Array],
     *,
     gamma_c: float = 0.0,
     eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s
@@ -131,7 +142,7 @@ def make_get_safe_action(
     def alpha(s: Array) -> Array:
         return eta_cbf * s
 
-
+    @jax.jit
     def a_and_c_from_linearization(obs_t: Array, u0: Array, phi: dict):
         """
         Compute:
@@ -148,9 +159,14 @@ def make_get_safe_action(
             obs_next = x_next[3:]
             return ncbf_apply(phi, obs_next)  # scalar-ish
 
+        # h_u0, a = jax.value_and_grad(h_of_u)(u0)  # a has shape (act_dim,)
 
-        # a = ∂/∂u h(f(x,u)) at u0
-        a = jax.jacfwd(h_of_u)(u0)  # (m,)
+        h_u0, lin = jax.linearize(h_of_u, u0)  # forward-mode, works with dynamic loops
+        I = jnp.eye(u0.shape[0], dtype=u0.dtype)
+        a = jax.vmap(lin)(I)  # (act_dim,) because output is scalar
+        a = jnp.reshape(a, (-1,))
+
+        # jax.debug.print("a norm: {na}, a: {a}", na=jnp.linalg.norm(a), a=a)
 
         # dx_du = jax.jacfwd(lambda u: system_forward_dynamics_function(x_t, u))(u0)  # (state_dim, act_dim)
         # dh_dx = jax.jacfwd(lambda x: ncbf_apply(phi, x[3:]))(x_t)  # (state_dim,)
@@ -161,7 +177,7 @@ def make_get_safe_action(
         #
         # jax.debug.print("dx/du norm: {ndx}, dh/du norm: {na}, dh/dx norm: {ndh}", ndx=grad_dx_du_norm, na=grad_a_norm, ndh=grad_dh_dx_norm)
 
-        h_u0 = h_of_u(u0)
+        # h_u0 = h_of_u(u0)
 
         ncbf_obs_t = x_t[3:]
         h_x  = ncbf_apply(phi, ncbf_obs_t)
@@ -183,6 +199,10 @@ def make_get_safe_action(
         obs_t: Array,
         phi: dict
     ) -> Tuple[Array, Array, Array]:
+
+        # clip action raw first
+        # action_raw = jnp.clip(action_raw, act_low, act_high)
+
         a, c, h_x, h_u0 = a_and_c_from_linearization(obs_t, action_raw, phi)
 
         aTa = jnp.dot(a, a) + 1e-12
@@ -190,7 +210,7 @@ def make_get_safe_action(
 
         # constraint violation amount
         delta = jnp.maximum(0.0, c - aTu)
-        jax.debug.print("delta: {delta}, h_x: {h_x}, h_u0: {h_u0}, a: {a}", delta=delta, h_x=h_x, h_u0=h_u0, a=a)
+        # jax.debug.print("delta: {delta}, h_x: {h_x}, h_u0: {h_u0}, a: {a}", delta=delta, h_x=h_x, h_u0=h_u0, a=a)
 
         # closed-form QP solution (soft slack)
         gain = delta / (aTa + (1.0 / lambda_s))
@@ -211,8 +231,12 @@ def make_get_safe_action(
         constraint_active = jnp.array(delta > 0.0)
 
         u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
-        delta_u = jnp.linalg.norm(u_safe - action_raw)
-        return u_processed, constraint_active, delta_u
+        u_processed_clipped = jnp.clip(u_processed, act_low, act_high) if (act_low is not None and act_high is not None) else u_processed
+
+        action_raw_clipped = jnp.clip(action_raw, act_low, act_high)
+
+        delta_u = jnp.linalg.norm(u_processed_clipped - action_raw_clipped)
+        return u_processed_clipped, constraint_active, delta_u
 
     return get_safe_action
 
@@ -306,21 +330,20 @@ def get_dynamics_step_function_mjx(env):
     model = deepcopy(env.initial_mj_model)
     mjx_model = mjx.put_model(model)
     n_joints = env.nr_actuator_joints
-    nr_substeps = int(env.nr_substeps)
+    nr_substeps = 1 # int(env.nr_substeps)
+    template_data = mjx.make_data(mjx_model)
 
     @jax.jit
     def system_dynamics(x, u):
-        data = mjx.make_data(mjx_model)
-
         # harded coded indexing for now
         # qpos : pos(3), quat(4), joint_pos(n_joints)
         # qvel : vel(3), ang_vel(3), joint_vel(n_joints
         # pos(3) is not necessary
-        qpos = data.qpos
+        qpos = template_data.qpos
         qpos = qpos.at[3:7 + n_joints].set(x[:4 + n_joints])
         qvel = x[7 + n_joints:]
 
-        data = data.replace(qpos=qpos, qvel=qvel, ctrl=u)
+        data = template_data.replace(qpos=qpos, qvel=qvel, ctrl=u)
         data, _ = jax.lax.scan(
             f=lambda data, _: (mjx.step(mjx_model, data), None),
             init=data,
