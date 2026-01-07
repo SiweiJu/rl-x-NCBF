@@ -32,26 +32,6 @@ from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.exteroceptive_observatio
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.terrain_functions.handler import get_terrain_function
 
 
-#  for go2 only
-JOINT_LIMITS = np.array(
-    [
-        [-1.0472, 1.0472],
-        [-1.5708, 3.4907],
-        [-2.7227, -0.83776],
-        [-1.0472, 1.0472],
-        [-1.5708, 3.4907],
-        [-2.7227, -0.83776],
-        [-1.0472, 1.0472],
-        [-0.5236, 4.5379],
-        [-2.7227, -0.83776],
-        [-1.0472, 1.0472],
-        [-0.5236, 4.5379],
-        [-2.7227, -0.83776],
-    ],
-    dtype=np.float32,
-)
-
-
 class LocomotionEnv:
     def __init__(self, robot_config, runner_mode, render, env_config, nr_envs):
         
@@ -190,9 +170,12 @@ class LocomotionEnv:
         self.joint_dropout_function = get_joint_dropout_function(env_config["domain_randomization"]["joint_dropout"]["type"], self)
         
         action_space_size = self.nr_actuator_joints
-        action_space_low = jnp.array(JOINT_LIMITS[:, 0])
-        action_space_high = jnp.array(JOINT_LIMITS[:, 1])
-        self.single_action_space = BoxSpace(low=action_space_low, high=action_space_high, shape=(action_space_size,), dtype=jnp.float32)
+        actuator_joint_limit_positions = self.initial_mjx_model.jnt_range[self.actuator_joint_mask_joints]
+        actuator_joint_nominal_positions = self.initial_qpos[self.actuator_joint_mask_qpos]
+        scaling_factor = robot_config["scaling_factor"]
+        actuator_joint_limit_positions_normalized = (actuator_joint_limit_positions - actuator_joint_nominal_positions[:, None]) / scaling_factor
+
+        self.single_action_space = BoxSpace(low=actuator_joint_limit_positions_normalized[:, 0], high=actuator_joint_limit_positions_normalized[:, 1], shape=(action_space_size,), dtype=jnp.float32)
 
         self.single_observation_space = self.get_observation_space()
 
