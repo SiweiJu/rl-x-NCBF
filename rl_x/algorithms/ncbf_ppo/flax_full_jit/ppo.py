@@ -299,10 +299,12 @@ class PPO:
 
                     clf_loss = num / den
 
-                    # (2) DT-CBF penalty: ReLU( -(h_{t+1}-h_t + eta*(h_t-gamma_c)) )
-                    alpha = self.ncbf_eta_cbf * (h_x - gamma_c)
-                    cbf_ineq = h_xn - h_x + alpha
-                    cbf_loss = jnp.sum(minib_mask * jnp.maximum(0.0, -cbf_ineq)) / (jnp.sum(minib_mask) + 1e-8)
+                    # (2) DT-CBF penalty: if not safe, h(x_next) should further decrease
+                    cbf_decrease = h_xn - h_x
+                    neg_mask = (1.0 - minib_y) * minib_mask  # only apply to unsafe samples
+
+                    violation = jnp.maximum(0.0, cbf_decrease)  # ReLU(h_xn - h_x)
+                    cbf_loss = jnp.sum(neg_mask * violation) / (jnp.sum(neg_mask) + 1e-8)
 
                     # (3) Lipschitz regularizer: fixed-size pair sampling from valid positions
                     @jax.jit
