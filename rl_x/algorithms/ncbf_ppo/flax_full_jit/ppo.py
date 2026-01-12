@@ -148,7 +148,7 @@ class PPO:
         self.ncbf_state = [
             TrainState.create(
                 apply_fn=self.ncbf[i].apply,
-                params=self.ncbf[i].init(ncbf_keys[i], env_state.next_observation),
+                params=self.ncbf[i].init(ncbf_keys[i], env_state.next_observation[self.env.ncbf_observation_indices]),
                 tx=optax.chain(
                     optax.clip_by_global_norm(self.max_grad_norm),
                     optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),

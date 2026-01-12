@@ -13,23 +13,29 @@ Array = jnp.ndarray
 
 
 def get_ncbf(config, env):
-    # TODO: make different types of ncbf
-    ncbf_type = config.algorithm.ncbf.type
     n_ncbf_ensemble = config.algorithm.ncbf.n_ensemble
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
-    ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
+    ncbf_observation_indices = env.ncbf_observation_indices
     gamma_c = config.algorithm.ncbf.gamma_c
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 
-
     NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices) for _ in range(n_ncbf_ensemble)]
 
     dynamics_step_function = get_dynamics_step_function_mjx(env)
 
-    safety_layer_function = make_get_safe_action(NCBF[0].apply, dynamics_step_function, env.dynamics_observation_indices,
-                                                 use_safety_layer, act_low, act_high, gamma_c=gamma_c)
+    safety_layer_function = make_get_safe_action(
+        ncbf_apply=NCBF[0].predict_with_full_obs,
+        ncbf_predict_from_dynamics_state=NCBF[0].apply,
+        system_forward_dynamics_function=dynamics_step_function,
+        state_from_obs_id=env.dynamics_observation_indices,
+        ncbf_obs_in_dynamics_state_id=env.ncbf_obs_in_dynamics_state_idx,
+        use_safety_layer=use_safety_layer,
+        act_low=act_low,
+        act_high=act_high,
+        gamma_c=gamma_c
+    )
 
     # dummy onnly clipping
     dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
@@ -89,7 +95,6 @@ class NCBF_FFNN(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        x = x[..., self.observation_indices]
         # Two hidden layers
         x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.tanh(x)
@@ -105,15 +110,21 @@ class NCBF_FFNN(nn.Module):
         h1 = jnp.squeeze(h1, -1)  # shape ()
         return h1
 
+    def predict_with_full_obs(self, params, obs):
+        x = obs[..., self.observation_indices]
+        h1 = self.apply(params, x)
+        return h1
+
 
 def make_get_safe_action(
     ncbf_apply: Callable[[dict, Array], Array],   # h_phi(obs)
+    ncbf_predict_from_dynamics_state: Callable[[dict, Array], Array],
     system_forward_dynamics_function: Callable[[Array, Array], Array],
     state_from_obs_id: Array,
+    ncbf_obs_in_dynamics_state_id:Array,
     use_safety_layer: bool,
     act_low: Array,
     act_high: Array,
-    *,
     gamma_c: float = 0.0,
     eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s
     lambda_s: float = 1e3,     # slack penalty
@@ -157,18 +168,17 @@ def make_get_safe_action(
             # derivtives needs to be take for u only, x_t fixed
             def h(u):
                 x_next = system_forward_dynamics_function(x_t, u)
-                obs_next = x_next[3:]
-                return ncbf_apply(phi, obs_next)  # scalar-ish
+                h_input_next = x_next[ncbf_obs_in_dynamics_state_id]
+                return ncbf_predict_from_dynamics_state(phi, h_input_next)  # scalar-ish
             return h(u)
 
-        x_t = obs_t[state_from_obs_id][:-4]  # get dynamics state from observation, remove contact at end
+        x_t = obs_t[state_from_obs_id] # get dynamics state from observation, remove contact at end
 
         # a = ∂/∂u h(f(x,u)) at u0
         a = jax.jacrev(h_of_u, argnums=1)(x_t, u0)  # (m,)
         h_u0 = h_of_u(x_t, u0)
 
-        ncbf_obs_t = x_t[3:]
-        h_x  = ncbf_apply(phi, ncbf_obs_t)
+        h_x  = ncbf_apply(phi, obs_t)
 
         # Discrete-time CBF condition:
         #   h(x_{t+1}) - h(x_t) + alpha(h(x_t)-gamma_c) >= 0
@@ -311,23 +321,23 @@ def get_dynamics_step_function(env):
 
 def get_dynamics_step_function_mjx(env):
     model = deepcopy(env.initial_mj_model)
+    template_data = mjx.make_data(model)
     mjx_model = mjx.put_model(model)
     n_joints = env.nr_actuator_joints
     nr_substeps = env.nr_substeps
 
     @jax.jit
     def system_dynamics(x, u):
-        data = mjx.make_data(mjx_model)
 
         # harded coded indexing for now
         # qpos : pos(3), quat(4), joint_pos(n_joints)
         # qvel : vel(3), ang_vel(3), joint_vel(n_joints
         # pos(3) is not necessar
-        qpos = data.qpos
+        qpos = template_data.qpos
         qpos = qpos.at[3:7 + n_joints].set(x[:4 + n_joints])
         qvel = x[7 + n_joints:]
 
-        data = data.replace(qpos=qpos, qvel=qvel, ctrl=u)
+        data = template_data.replace(qpos=qpos, qvel=qvel, ctrl=u)
         data, _ = jax.lax.scan(
             f=lambda data, _: (mjx.step(mjx_model, data), None),
             init=data,

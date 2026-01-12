@@ -578,12 +578,22 @@ class LocomotionEnv:
             self.critic_exteroception_obs_idx,
         ], dtype=int)
 
-        # omit the base position from the dynamics observations
         self.dynamics_observation_indices = jnp.concatenate([
             self.qpos_observation_idx,
-            self.qvel_observation_idx,
-            self.contact_obs_idx,
-        ])
+            self.qvel_observation_idx], dtype=int)
+
+        # omit the base position from the ncbf observations
+        actuator_qpos_idx = self.qpos_observation_idx[self.actuator_joint_mask_qpos]
+        actuator_qvel_idx = self.qvel_observation_idx[self.actuator_joint_mask_qvel]
+        self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
+        # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
+
+        self.ncbf_obs_in_dynamics_state_idx = jnp.concatenate([
+            self.actuator_joint_mask_qpos,
+            self.actuator_joint_mask_qvel + self.initial_mj_model.nq
+        ], dtype=int
+        )
+
 
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
 
