@@ -21,13 +21,12 @@ def get_ncbf(config, env):
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 
-    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices) for _ in range(n_ncbf_ensemble)]
+    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units) for _ in range(n_ncbf_ensemble)]
 
     dynamics_step_function = get_dynamics_step_function_mjx(env)
 
     safety_layer_function = make_get_safe_action(
-        ncbf_apply=NCBF[0].predict_with_full_obs,
-        ncbf_predict_from_dynamics_state=NCBF[0].apply,
+        ncbf_apply=NCBF[0].apply,
         system_forward_dynamics_function=dynamics_step_function,
         state_from_obs_id=env.dynamics_observation_indices,
         ncbf_obs_in_dynamics_state_id=env.ncbf_obs_in_dynamics_state_idx,
@@ -91,7 +90,6 @@ def ensemble_forward_pass(train_states, input):
 
 class NCBF_FFNN(nn.Module):
     nr_hidden_units: int
-    observation_indices: Sequence[int]
 
     @nn.compact
     def __call__(self, x):
@@ -110,15 +108,9 @@ class NCBF_FFNN(nn.Module):
         h1 = jnp.squeeze(h1, -1)  # shape ()
         return h1
 
-    def predict_with_full_obs(self, params, obs):
-        x = obs[..., self.observation_indices]
-        h1 = self.apply(params, x)
-        return h1
-
 
 def make_get_safe_action(
     ncbf_apply: Callable[[dict, Array], Array],   # h_phi(obs)
-    ncbf_predict_from_dynamics_state: Callable[[dict, Array], Array],
     system_forward_dynamics_function: Callable[[Array, Array], Array],
     state_from_obs_id: Array,
     ncbf_obs_in_dynamics_state_id:Array,
@@ -169,7 +161,7 @@ def make_get_safe_action(
             def h(u):
                 x_next = system_forward_dynamics_function(x_t, u)
                 h_input_next = x_next[ncbf_obs_in_dynamics_state_id]
-                return ncbf_predict_from_dynamics_state(phi, h_input_next)  # scalar-ish
+                return ncbf_apply(phi, h_input_next)  # scalar-ish
             return h(u)
 
         x_t = obs_t[state_from_obs_id] # get dynamics state from observation, remove contact at end
@@ -178,7 +170,8 @@ def make_get_safe_action(
         a = jax.jacrev(h_of_u, argnums=1)(x_t, u0)  # (m,)
         h_u0 = h_of_u(x_t, u0)
 
-        h_x  = ncbf_apply(phi, obs_t)
+        dynamics_state = obs_t[state_from_obs_id]
+        h_x  = ncbf_apply(phi, dynamics_state[..., ncbf_obs_in_dynamics_state_id])  # h(x_t)
 
         # Discrete-time CBF condition:
         #   h(x_{t+1}) - h(x_t) + alpha(h(x_t)-gamma_c) >= 0

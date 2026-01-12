@@ -81,6 +81,9 @@ class PPO:
         self.ncbf_neg_sampling_ratio = config.algorithm.ncbf_buffer.neg_sampling_ratio
 
         self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps * self.nr_steps
+
+        self.ncbf_observation_indices = env.ncbf_observation_indices
+
         rlx_logger.info(f"NCBF pretrain steps:{self.ncbf_pretrain_steps * self.nr_envs}")
         rlx_logger.info(f"INFO - NCBF pos buffer size:{self.ncbf_pos_buffer_size}")
         rlx_logger.info(f"INFO - NCBF neg buffer size:{self.ncbf_neg_buffer_size}")
@@ -148,7 +151,7 @@ class PPO:
         self.ncbf_state = [
             TrainState.create(
                 apply_fn=self.ncbf[i].apply,
-                params=self.ncbf[i].init(ncbf_keys[i], env_state.next_observation[self.env.ncbf_observation_indices]),
+                params=self.ncbf[i].init(ncbf_keys[i], env_state.next_observation[..., env.ncbf_observation_indices]),
                 tx=optax.chain(
                     optax.clip_by_global_norm(self.max_grad_norm),
                     optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
@@ -274,9 +277,8 @@ class PPO:
 
                 @jax.jit
                 def loss_fn(params, minib_obs, minib_nxt, minib_y, minib_mask, minib_indices_to_term):
-                    gamma_c = self.ncbf_gamma_c
-                    h_x = ncbf_state.apply_fn(params, minib_obs)  # [B,T]
-                    h_xn = ncbf_state.apply_fn(params, minib_nxt)
+                    h_x = ncbf_state.apply_fn(params, minib_obs[..., self.ncbf_observation_indices])  # [B,T]
+                    h_xn = ncbf_state.apply_fn(params, minib_nxt[..., self.ncbf_observation_indices])  # [B,T]
 
                     h_x = nn.sigmoid(h_x)
                     h_xn = nn.sigmoid(h_xn)
@@ -320,7 +322,8 @@ class PPO:
                         def f_single(x_single):
                             # shape (output_dim,) -> reduce to scalar
                             x_single = x_single[None, ...]  # [1, D]
-                            y = self.ncbf_apply(params, x_single)
+                            h_input = x_single[..., self.ncbf_observation_indices]
+                            y = self.ncbf_apply(params, h_input)
                             return jnp.sum(y)
 
                         # Vectorize grad over batch
