@@ -12,6 +12,7 @@ import tree
 import numpy as np
 import jax
 import jax.numpy as jnp
+import jax.nn as nn
 from flax.training.train_state import TrainState
 from flax.training import orbax_utils
 import orbax.checkpoint
@@ -92,7 +93,7 @@ class PPO:
         self.as_shape = env.single_action_space.shape
         
         self.policy, self.get_processed_action = get_policy(config, env)
-        self.ncbf, self.ncbf_apply, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env)
+        self.ncbf, self.ncbf_apply, self.batched_ncbf_safety_layer, self.ncbf_safety_layer, self.system_dynamics_function = get_ncbf(config, env)
         self.critic = get_critic(config, env)
         self.replay_buffer = ReplayBuffer(capacity=config.algorithm.ncbf_buffer.buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=ncbf_key)
 
@@ -129,7 +130,7 @@ class PPO:
         self.ncbf_state = [
             TrainState.create(
                 apply_fn=self.ncbf[i].apply,
-                params=self.ncbf[i].init(ncbf_keys[i], state),
+                params=self.ncbf[i].init(ncbf_keys[i], state[..., self.env.ncbf_observation_indices]),
                 tx=optax.chain(
                     optax.clip_by_global_norm(self.max_grad_norm),
                     optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
@@ -604,7 +605,9 @@ class PPO:
             step_info_collection = {}
             for step in range(self.nr_steps):
                 _, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
-                safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(action, state, self.ncbf_state[0].params)
+                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+
+                safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(action, state, params_stack)
                 processed_action = safe_action
                 next_state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 done = terminated | truncated
@@ -701,7 +704,8 @@ class PPO:
                 evaluation_metrics = {"eval/episode_return": [], "eval/episode_length": []}
                 while True:
                     raw_processed_action = get_deterministic_action(self.policy_state, state)
-                    safe_action, constraint_active, delta_u = self.ncbf_safety_layer(raw_processed_action, state, self.ncbf_state[0].params)
+                    params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+                    safe_action, constraint_active, delta_u = self.ncbf_safety_layer(raw_processed_action, state, params_stack)
                     processed_action = safe_action
                     state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                     done = terminated | truncated
@@ -861,8 +865,12 @@ class PPO:
         def get_action(policy_state: TrainState, state: np.ndarray):
             action_mean, action_logstd = self.policy.apply(policy_state.params, state)
             raw_processed_action = self.get_processed_action(action_mean)
-            safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, state, self.ncbf_state[0].params)
-            return safe_action, raw_processed_action, constraint_active, delta_u
+            params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+            safe_action, constraint_active, delta_u, x_next, h_u0 = self.batched_ncbf_safety_layer(raw_processed_action, state, params_stack)
+            return safe_action, raw_processed_action, constraint_active, delta_u, x_next, h_u0
+
+        rollout_path = self.save_path.replace("models", "rollout")
+        os.makedirs(rollout_path, exist_ok=True)
 
         rollouts = []
         self.set_eval_mode()
@@ -872,44 +880,46 @@ class PPO:
             state, _ = self.env.reset()
             self.env.envs[0].internal_state["safe_prediction"] = 1
 
-            rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[])
+
+            rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[],
+                                delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[], h_u0=[], x_next_true=[], x_next_pred=[])
 
             while not done:
-                processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state)
-                # predictions = self.ncbf_apply(self.ncbf_state, state)
-                # processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(processed_action,
-                #                                                                               state,
-                #                                                                               self.ncbf_state.params)
-
-                # print("prediction: ", prediction, "constraint_active: ", constraint_active, "delta_u: ", delta_u)
-
-                # Stack ensemble params into a pytree with leading axis = ensemble
-                # params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
-                # Vectorized apply over ensemble, then take mean
-                # predictions = jax.vmap(lambda p: self.ncbf[0].apply(p, state))(params_stack)
-
-                prediction_mean, prediction_std, predictions = self.ncbf_apply(self.ncbf_state, state)
-                # predictions = [self.ncbf[i].apply(self.ncbf_state[i].params, state) for i in range(5)]
-                # prediction_mean = np.mean(predictions)
-                # prediction_std = np.std(predictions)
-                print("prediction mean: ", prediction_mean, "prediction std: ", prediction_std, "predictions: ", predictions.squeeze())
-                # print("prediction mean: ", prediction_mean, "prediction std: ", prediction_std)
+                processed_action, raw_action, constraint_active, delta_u, x_next_pred, h_u0 = get_action(self.policy_state, state)
+                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+                prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, state[..., self.env.ncbf_observation_indices])
 
                 self.env.envs[0].internal_state["safe_prediction"] = prediction_mean
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+
                 done = terminated | truncated
                 episode_return += reward
+
+                # # for debugging, check prediction error
+                # qpos = state[:, self.env.envs[0].qpos_observation_idx][:, self.env.envs[0].actuator_joint_mask_qpos]
+                # qvel = state[:, self.env.envs[0].qvel_observation_idx][:, self.env.envs[0].actuator_joint_mask_qvel]
+                # x_next_true = np.concatenate([qpos, qvel], axis=-1)
+                #
+                # pred_error = x_next_true - x_next_pred
+                # print("pred error: ", np.linalg.norm(pred_error))
 
                 rollout_dict["predictions"].append(predictions)
                 rollout_dict["dones"].append(done)
                 rollout_dict["safe_prediction"].append(prediction_mean)
-            rollouts.append(rollout_dict)
+                rollout_dict["delta_u"].append(delta_u)
+                rollout_dict["constraint_active"].append(constraint_active)
+                rollout_dict["raw_action"].append(raw_action)
+                rollout_dict["safe_action"].append(processed_action)
+                rollout_dict["h_u0"].append(h_u0)
 
+                joint_pos = (state[0, self.env.envs[0].joint_positions_obs_idx] * 3.14) + self.env.envs[0].internal_state["actuator_joint_nominal_positions"]
+                rollout_dict["joint_position_obs"].append(joint_pos)
+
+            rollouts.append(rollout_dict)
             rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
 
-        # save rollouts with policy load path name and timestamp
-        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        rollout_file = f"rollouts_{timestamp}.pkl"
+        # save rollout file
+        rollout_file = os.path.join(rollout_path, f"rollouts.pkl")
         with open(rollout_file, "wb") as f:
             pickle.dump(rollouts, f)
 

@@ -15,24 +15,34 @@ Array = jnp.ndarray
 def get_ncbf(config, env):
     # TODO: make different types of ncbf
     n_ncbf_ensemble = config.algorithm.ncbf.n_enssemble
-    ncbf_type = config.algorithm.ncbf.type
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
-    ncbf_observation_indices = getattr(env, "ncbf_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
     gamma_c = config.algorithm.ncbf.gamma_c
+    eta_cbf = config.algorithm.ncbf.eta_cbf
+    lambda_slack = config.algorithm.ncbf.lambda_slack
 
-    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, ncbf_observation_indices) for _ in range(n_ncbf_ensemble)]
-    NCBF_apply = ensemble_forward_pass
+    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units) for _ in range(n_ncbf_ensemble)]
+    NCBF_apply = get_ensemble_forward_pass(NCBF[0].apply)
 
     dynamics_step_function = get_dynamics_step_function_mjx(env.envs[0])
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 
-    safety_layer_function = make_get_safe_action(NCBF[0].apply, dynamics_step_function, env.dynamics_observation_indices,
-                                                 use_safety_layer, act_low, act_high, gamma_c=gamma_c)
+    safety_layer_function = make_get_safe_action(
+        ncbf_apply=NCBF_apply,
+        system_forward_dynamics_function=dynamics_step_function,
+        state_from_obs_id=env.dynamics_observation_indices,
+        ncbf_obs_in_dynamics_state_id=env.ncbf_obs_in_dynamics_state_idx,
+        use_safety_layer=use_safety_layer,
+        act_low=act_low,
+        act_high=act_high,
+        gamma_c=gamma_c,
+        eta_cbf=eta_cbf,
+        lambda_s=lambda_slack
+    )
 
     # dummy only clipping
-    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
+    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0), jnp.array(0.0), jnp.array(0.0))
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -44,50 +54,55 @@ def get_ncbf(config, env):
         jax.vmap(
             safety_layer_function_for_batch,
             in_axes=(0, 0, None),  # action_raw[env], obs_t[env], same phi for items in the batch
-            out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
+            out_axes=(0, 0, 0, 0, 0)  # batched u_safe, constraint_active, delta_u, h_u0
         )
     )
-    return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function
+    return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function, dynamics_step_function
+
+def get_ensemble_forward_pass(apply_fn):
+    alpha = 0.8
+    E = 5  # number of ensemble members, hardcoded for now
+    k = max(1, int(np.ceil((1.0 - alpha) * E)))
+
+    @jax.jit
+    def ensemble_forward_pass(params_stack, input):
+        def single_forward(params):
+            return apply_fn(params, input)
+
+        # Use tree_leaves to iterate over actual parameter dicts
+        predictions = jax.vmap(single_forward, in_axes=0, out_axes=0)(params_stack)
+
+        def aggregate_predictions(preds):
+            # return preds[0]
+            return jnp.mean(preds, axis=0)
+            # # def cvar_soft(losses):
+            # #     eta = jax.lax.stop_gradient(jnp.quantile(losses, alpha))
+            # #     tail = jnp.maximum(losses - eta, 0.0)
+            # #     return eta + jnp.mean(tail) / (1 - alpha)
+            # #
+            # def cvar_topk(losses):
+            #     tail = jnp.sort(losses, axis=0)[-k:, ...]
+            #     return jnp.mean(tail, axis=0)
+
+            # def cvar_gaussian(losses):
+            #     mu = jnp.mean(losses, axis=0)
+            #     sigma = jnp.std(losses, axis=0)
+            # TODO:  implement closed-form Gaussian
+            #
+            # risks = 1 - preds
+            # cvar = 1 - cvar_topk(risks)
+            # return cvar
+
+        return aggregate_predictions(predictions.squeeze()), jnp.std(predictions, axis=0), predictions
+    return ensemble_forward_pass
 
 
-def ensemble_forward_pass(train_states, input):
-    """
-    one step forward pass through an ensemble of networks, 1 input
-    """
-
-    apply_fn = train_states[0].apply_fn
-
-    params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in train_states])
-    # Vectorized apply over ensemble, then take mean
-    predictions = jax.vmap(lambda p: apply_fn(p, input))(params_stack)
-
-    def aggregate_predictions(preds):
-        # return jnp.mean(preds, axis=0), jnp.std(preds, axis=0)
-        def cvar_soft(losses, alpha=0.90):
-            eta = jax.lax.stop_gradient(jnp.quantile(losses, alpha))
-            tail = jnp.maximum(losses - eta, 0.0)
-            return eta + jnp.mean(tail) / (1 - alpha)
-
-        def cvar_topk(losses, alpha=0.80):
-            # losses: (E,) or (E, ...) , larger = worse
-            E = losses.shape[0]
-            k = jnp.maximum(1, jnp.int32(jnp.ceil((1.0 - alpha) * E)))
-            tail = jnp.sort(losses, axis=0)[-k:, ...]
-            return jnp.mean(tail, axis=0)
-
-        risks = 1 - preds
-        cvar = 1 - cvar_topk(risks)
-        return cvar, jnp.std(preds), preds
-
-    return aggregate_predictions(predictions.squeeze())
 
 class NCBF_FFNN(nn.Module):
     nr_hidden_units: int
-    observation_indices: Sequence[int]
 
     @nn.compact
     def __call__(self, x):
-        x = x[..., self.observation_indices]
         # Two hidden layers
         x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.tanh(x)
@@ -100,31 +115,27 @@ class NCBF_FFNN(nn.Module):
         # This output is used in the safety layer to calculate the gradient only, for prediction, use self.predict_with_sigmoid
         return jnp.squeeze(h, -1)  # shape ()
 
-    def predict_with_sigmoid(self,x):
-        h = self.__call__(x)
-        return nn.sigmoid(h)
-
 
 def make_get_safe_action(
     ncbf_apply: Callable[[dict, Array], Array],   # h_phi(obs)
     system_forward_dynamics_function: Callable[[Array, Array], Array],
     state_from_obs_id: Array,
+    ncbf_obs_in_dynamics_state_id: Array,
     use_safety_layer: bool,
-    act_low: Optional[Array],
-    act_high: Optional[Array],
-    *,
-    gamma_c: float = 0.0,
-    eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s
-    lambda_s: float = 1e3,     # slack penalty
+    act_low: Array,
+    act_high: Array,
+    gamma_c: float,
+    eta_cbf: float,      # \tilde alpha(s) = eta_cbf * s
+    lambda_s: float,     # slack penalty
 ):
     """
     Returns a JIT-able safety layer:
         get_safe_action(action_raw, x_t, t, contact, phi) -> (u_safe, info)
 
     Args:
-      ncbf_apply: flax apply function h_phi(obs)
-      system_forward_dynamics_function: x_next = f(x, u, t, contact) (your MJX WBD step)
-      state_from_obs_id: indices to get dynamics state from observation [pos(3), quat(4), joint_pos, joint_vel, contact (4)]
+      ncbf_apply: flax apply function intput: apply_fn, parameters_stack, input
+      system_forward_dynamics_function: x_next = f(x, u, t, contact)
+      state_from_obs_id: indices to get dynamics state from observation [pos(3), quat(4), joint_pos, joint_vel]
         use_safety_layer: whether to use safety layer (if False, returns raw action, but still calculates constraint violations)
       gamma_c: conservative margin
       eta_cbf: class-K gain
@@ -152,14 +163,16 @@ def make_get_safe_action(
             obs_t: current observation (full observation matrix, need to get state from it)
         """
 
-        x_t = obs_t[state_from_obs_id][:-4]  # get dynamics state from observation, remove contact at end
+        x_t = obs_t[state_from_obs_id] # get dynamics state from observation, remove contact at end
 
         def h_of_u(u):
             x_next = system_forward_dynamics_function(x_t, u)
-            obs_next = x_next[3:]
-            return ncbf_apply(phi, obs_next)  # scalar-ish
+            h_input_next = x_next[ncbf_obs_in_dynamics_state_id]
+            h, _, _ = ncbf_apply(phi, h_input_next)
+            return h # scalar-ish # note here phis is parameter stack for the ensemble
 
-        # h_u0, a = jax.value_and_grad(h_of_u)(u0)  # a has shape (act_dim,)
+        # for debugging
+        x_next = system_forward_dynamics_function(x_t, u0)
 
         h_u0, lin = jax.linearize(h_of_u, u0)  # forward-mode, works with dynamic loops
         I = jnp.eye(u0.shape[0], dtype=u0.dtype)
@@ -179,8 +192,8 @@ def make_get_safe_action(
 
         # h_u0 = h_of_u(u0)
 
-        ncbf_obs_t = x_t[3:]
-        h_x  = ncbf_apply(phi, ncbf_obs_t)
+        ncbf_obs_t = x_t[..., ncbf_obs_in_dynamics_state_id]
+        h_x, _, _  = ncbf_apply(phi, ncbf_obs_t)
 
         # Discrete-time CBF condition:
         #   h(x_{t+1}) - h(x_t) + alpha(h(x_t)-gamma_c) >= 0
@@ -191,19 +204,19 @@ def make_get_safe_action(
         # => h_u0 + a^T(u-u0) - h_x + alpha(h_x-gamma_c) >= 0
         # => a^T u >= -h_u0 + h_x - alpha(h_x-gamma_c) + a^T u0  =: c_lin
         c_lin = -h_u0 + h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0)
-        return a, c_lin, h_x, h_u0
+        return a, c_lin, h_x, h_u0, x_next
 
     @jax.jit
     def get_safe_action(
         action_raw: Array,
         obs_t: Array,
-        phi: dict
-    ) -> Tuple[Array, Array, Array]:
+        phis: dict
+    ) -> Tuple[Array, Array, Array, Array, Array]:
 
         # clip action raw first
         # action_raw = jnp.clip(action_raw, act_low, act_high)
 
-        a, c, h_x, h_u0 = a_and_c_from_linearization(obs_t, action_raw, phi)
+        a, c, h_x, h_u0, x_next = a_and_c_from_linearization(obs_t, action_raw, phis)
 
         aTa = jnp.dot(a, a) + 1e-12
         aTu = jnp.dot(a, action_raw)
@@ -215,6 +228,8 @@ def make_get_safe_action(
         # closed-form QP solution (soft slack)
         gain = delta / (aTa + (1.0 / lambda_s))
         u_safe = action_raw + gain * a
+
+        # jax.debug.print("aTa: {aTa}", aTa=aTa)
 
         # eps_star = delta / (1.0 + lambda_s * aTa)
 
@@ -228,7 +243,6 @@ def make_get_safe_action(
         #     # "h_x": h_x,
         #     # "h_u0": h_u0,
         # }
-        constraint_active = jnp.array(delta > 0.0)
 
         u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
         u_processed_clipped = jnp.clip(u_processed, act_low, act_high) if (act_low is not None and act_high is not None) else u_processed
@@ -236,7 +250,8 @@ def make_get_safe_action(
         action_raw_clipped = jnp.clip(action_raw, act_low, act_high)
 
         delta_u = jnp.linalg.norm(u_processed_clipped - action_raw_clipped)
-        return u_processed_clipped, constraint_active, delta_u
+        # for debugging, shut down safety modification
+        return u_processed_clipped, delta, delta_u, x_next, h_u0
 
     return get_safe_action
 
@@ -329,19 +344,28 @@ def get_dynamics_step_function(env):
 def get_dynamics_step_function_mjx(env):
     model = deepcopy(env.initial_mj_model)
     mjx_model = mjx.put_model(model)
-    n_joints = env.nr_actuator_joints
-    nr_substeps = 1 # int(env.nr_substeps)
+    nr_substeps = env.nr_substeps
     template_data = mjx.make_data(mjx_model)
+
+    qpos_mask = env.actuator_joint_mask_qpos
+    qvel_mask = env.actuator_joint_mask_qvel
+
+    nq, nv = mjx_model.nq, mjx_model.nv
+
+    joint_nominal_positions = jnp.array([env.internal_state["actuator_joint_nominal_positions"]])[0]
+    scaling_factor = env.internal_state["scaling_factor"]
 
     @jax.jit
     def system_dynamics(x, u):
         # harded coded indexing for now
         # qpos : pos(3), quat(4), joint_pos(n_joints)
         # qvel : vel(3), ang_vel(3), joint_vel(n_joints
-        # pos(3) is not necessary
-        qpos = template_data.qpos
-        qpos = qpos.at[3:7 + n_joints].set(x[:4 + n_joints])
-        qvel = x[7 + n_joints:]
+        # return: qpos and qvel for actuated joints only
+        qpos = x[:nq]
+        qvel = x[nq:nq+nv]
+
+        # denormalize action
+        u = joint_nominal_positions + u * scaling_factor
 
         data = template_data.replace(qpos=qpos, qvel=qvel, ctrl=u)
         data, _ = jax.lax.scan(
@@ -350,8 +374,8 @@ def get_dynamics_step_function_mjx(env):
             xs=(),
             length=nr_substeps
         )
-        qpos = data.qpos
-        qvel = data.qvel
-        return jnp.concatenate([qpos, qvel], axis=0)
+
+        # only return joint qpos and qvel
+        return jnp.concatenate([data.qpos[qpos_mask], data.qvel[qvel_mask]], axis=0)
 
     return system_dynamics
