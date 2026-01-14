@@ -30,19 +30,23 @@ def get_config(algorithm_name):
     config.ncbf.type = 'FFNN'
     config.ncbf.H = 10  # prediction horizon
     config.ncbf.lr = 1e-3
-    config.ncbf.gamma_c = 1.0     # safety threshold (>=1 is safe, <=0 is unsafe)
     config.ncbf.w_clf = 1.0    # weight for classification loss
     config.ncbf.w_cbf = 1.0    # weight for CBF loss
     config.ncbf.w_lip = 0.0    # weight for lipschitz loss
     config.ncbf.w_wd = 0.0     # weight for weight decay loss
     config.ncbf.L_max = 0.0    # lipschitz target, set to 0.0 if just want small gradient
     config.ncbf.policy_loss_coef = 0.01  # weight for policy loss when training ncbf
-    config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
     config.ncbf.use_safety_layer = False
     config.ncbf.nr_minibatches = 50
     config.ncbf.minibatch_size = 64
     config.ncbf.nr_hidden_units = 512
     config.ncbf.n_enssemble = 5  # number of networks to assemble for ncbf prediction
+
+    # safety layer configs
+    config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
+    config.ncbf.gamma_c = 1.0     # safety threshold (>=1 is safe, <=0 is unsafe)
+    config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
+
 
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_steps = 32768    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
