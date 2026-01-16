@@ -245,9 +245,10 @@ class LocomotionEnv(gym.Env):
                 self.joystick_present = True
         del self.c_model, self.c_data
 
-        # # for debugging, get the system dynamics function
+        # for debugging, get the system dynamics function
         # model = deepcopy(self.initial_mj_model)
         # nr_substeps = self.nr_substeps
+        # template_data = mujoco.MjData(self.internal_state["mj_model"])
         #
         # def system_dynamics(model_data, u):
         #     # harded coded indexing for now
@@ -263,7 +264,32 @@ class LocomotionEnv(gym.Env):
         #     mujoco.mj_forward(model, model_data)
         #     mujoco.mj_step(model, model_data, nr_substeps)
         #     return np.concatenate([model_data.qpos[self.actuator_joint_mask_qpos], model_data.qvel[self.actuator_joint_mask_qvel]], axis=0)
+
+        # def system_dynamics_with_model(model, model_data, u):
+        #     # harded coded indexing for now
+        #     # qpos : pos(3), quat(4), joint_pos(n_joints)
+        #     # qvel : vel(3), ang_vel(3), joint_vel(n_joints
+        #     # pos(3) is not necessary
+        #     # qpos = x[:nq]
+        #     # qvel = x[nq:nq + nv]
+        #
+        #     # data = model_data.replace(qpos=qpos, qvel=qvel, ctrl=u)
+        #
+        #     model_data.ctrl = u
+        #     mujoco.mj_forward(model, model_data)
+        #     mujoco.mj_step(model, model_data, nr_substeps)
+        #     return np.concatenate([model_data.qpos[self.actuator_joint_mask_qpos], model_data.qvel[self.actuator_joint_mask_qvel]], axis=0)
+        #
+        # def system_dynamics_with_only_qpos_and_qvel(qpos, qvel, u):
+        #     template_data.qpos = qpos
+        #     template_data.qvel = qvel
+        #     template_data.ctrl = u
+        #     mujoco.mj_forward(model, template_data)
+        #     mujoco.mj_step(model, template_data, nr_substeps)
+        #     return np.concatenate([template_data.qpos[self.actuator_joint_mask_qpos], template_data.qvel[self.actuator_joint_mask_qvel]], axis=0)
         # self.system_dynamics = system_dynamics
+        # self.system_dynamics_with_model = system_dynamics_with_model
+        # self.system_dynamics_with_only_qpos_and_qvel = system_dynamics_with_only_qpos_and_qvel
 
     
     def render(self):
@@ -391,20 +417,26 @@ class LocomotionEnv(gym.Env):
 
         target_joint_positions = self.control_function.process_action(delayed_action)
 
-        # # for debugging
-        # last_state = np.concatenate([self.internal_state["data"].qpos, self.internal_state["data"].qvel], axis=0)
-        # # copy data to avoid modifying it in-place
-        # # data_copy = mujoco.MjData(self.internal_state["mj_model"])
-        # # mujoco.mj_copyData(data_copy, self.initial_mj_model, self.internal_state["data"])
-        # data_copy = copy.deepcopy(self.internal_state["data"])
-        # x_next_pred = self.system_dynamics(data_copy, target_joint_positions)
-
         self.internal_state["data"].ctrl = target_joint_positions
         mujoco.mj_step(self.internal_state["mj_model"], self.internal_state["data"], self.nr_substeps)
 
+        # for debugging
+        # copy data to avoid modifying it in-place
+        # data_copy = mujoco.MjData(self.internal_state["mj_model"])
+        # mujoco.mj_copyData(data_copy, self.initial_mj_model, self.internal_state["data"])
+        # data_copy1 = copy.deepcopy(self.internal_state["data"])
+        # x_next_pred_without_model = self.system_dynamics(data_copy1, target_joint_positions)
+        # data_copy2 = copy.deepcopy(self.internal_state["data"])
+        # x_next_pred_with_model = self.system_dynamics_with_model(self.internal_state["mj_model"], data_copy2, target_joint_positions)
+        #
+        # x_next_pred_with_qpos = self.system_dynamics_with_only_qpos_and_qvel(self.internal_state["data"].qpos, self.internal_state["data"].qvel, target_joint_positions)
+        # self.internal_state["data"].ctrl = target_joint_positions
+        # mujoco.mj_step(self.internal_state["mj_model"], self.internal_state["data"], self.nr_substeps)
+
         # x_next_true = np.concatenate([self.internal_state["data"].qpos[self.actuator_joint_mask_qpos], self.internal_state["data"].qvel[self.actuator_joint_mask_qvel]], axis=0)
-        # state_diff = x_next_true - x_next_pred
-        # print("State diff:", np.linalg.norm(state_diff))
+        # print("State diff with model:", np.linalg.norm(x_next_pred_with_model - x_next_true),
+        #       "State diff without model:", np.linalg.norm(x_next_pred_without_model - x_next_true),
+        #       "State diff with only qpos and qvel:", np.linalg.norm(x_next_pred_with_qpos - x_next_true))
 
         max_qvel = 100 * np.ones(self.initial_mj_model.nv)
         max_qvel[self.actuator_joint_mask_qvel] = self.internal_state["actuator_joint_max_velocities"]
