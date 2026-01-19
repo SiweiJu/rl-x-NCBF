@@ -22,11 +22,12 @@ def get_ncbf(config, env):
     act_high = jnp.array(env.single_action_space.high)
 
     NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units) for _ in range(n_ncbf_ensemble)]
+    NCBF_apply = get_ensemble_forward_pass(NCBF[0].apply)
 
     dynamics_step_function = get_dynamics_step_function_mjx(env)
 
     safety_layer_function = make_get_safe_action(
-        ncbf_apply=NCBF[0].apply,
+        ncbf_apply=NCBF_apply,
         system_forward_dynamics_function=dynamics_step_function,
         state_from_obs_id=env.dynamics_observation_indices,
         ncbf_obs_in_dynamics_state_id=env.ncbf_obs_in_dynamics_state_idx,
@@ -52,40 +53,40 @@ def get_ncbf(config, env):
             out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
         )
     )
-    return NCBF, ensemble_forward_pass, batched_get_safe_action, safety_layer_function
+    return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function
 
 
-@jax.jit
-def ensemble_forward_pass(train_states, input):
-    """
-    one step forward pass through an ensemble of networks, 1 input
-    """
+def get_ensemble_forward_pass(apply_fn):
+    alpha = 0.4
+    E = 5  # number of ensemble members, hardcoded for now
+    k = max(1, int(np.ceil((1.0 - alpha) * E)))
 
-    apply_fn = train_states[0].apply_fn
+    @jax.jit
+    def ensemble_forward_pass(params_stack, input):
+        """
+        one step forward pass through an ensemble of networks, 1 input
+        """
+        # Vectorized apply over ensemble, then take mean
+        predictions = jax.vmap(lambda p: apply_fn(p, input))(params_stack)
 
-    params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in train_states])
-    # Vectorized apply over ensemble, then take mean
-    predictions = jax.vmap(lambda p: apply_fn(p, input))(params_stack)
+        def aggregate_predictions(preds):
+            # return jnp.mean(preds, axis=0)
+            # def cvar_soft(losses, alpha=0.90):
+            #     eta = jax.lax.stop_gradient(jnp.quantile(losses, alpha))
+            #     tail = jnp.maximum(losses - eta, 0.0)
+            #     return eta + jnp.mean(tail) / (1 - alpha)
+            #
+            def cvar_topk(losses, alpha=0.80):
+                # losses: (E,) or (E, ...) , larger = worse
+                tail = jnp.sort(losses, axis=0)[-k:, ...]
+                return jnp.mean(tail, axis=0)
+            #
+            risks = 1 - preds
+            cvar = 1 - cvar_topk(risks)
+            return cvar
 
-    def aggregate_predictions(preds):
-        # return jnp.mean(preds, axis=0), jnp.std(preds, axis=0)
-        def cvar_soft(losses, alpha=0.90):
-            eta = jax.lax.stop_gradient(jnp.quantile(losses, alpha))
-            tail = jnp.maximum(losses - eta, 0.0)
-            return eta + jnp.mean(tail) / (1 - alpha)
-
-        def cvar_topk(losses, alpha=0.80):
-            # losses: (E,) or (E, ...) , larger = worse
-            E = losses.shape[0]
-            k = jnp.maximum(1, jnp.int32(jnp.ceil((1.0 - alpha) * E)))
-            tail = jnp.sort(losses, axis=0)[-k:, ...]
-            return jnp.mean(tail, axis=0)
-
-        risks = 1 - preds
-        cvar = 1 - cvar_topk(risks)
-        return cvar, jnp.std(preds), preds
-
-    return aggregate_predictions(predictions.squeeze())
+        return aggregate_predictions(predictions), jnp.std(predictions), predictions
+    return ensemble_forward_pass
 
 
 class NCBF_FFNN(nn.Module):
@@ -158,11 +159,11 @@ def make_get_safe_action(
 
         def h_of_u(x_t, u):
             # derivtives needs to be take for u only, x_t fixed
-            def h(u):
-                x_next = system_forward_dynamics_function(x_t, u)
-                h_input_next = x_next[ncbf_obs_in_dynamics_state_id]
-                return ncbf_apply(phi, h_input_next)  # scalar-ish
-            return h(u)
+            x_next = system_forward_dynamics_function(x_t, u)
+            h_input_next = x_next[ncbf_obs_in_dynamics_state_id]
+            h, _, _ = ncbf_apply(phi, h_input_next)
+            return h  # TODO, pass std if needed
+
 
         x_t = obs_t[state_from_obs_id] # get dynamics state from observation, remove contact at end
 
@@ -171,7 +172,7 @@ def make_get_safe_action(
         h_u0 = h_of_u(x_t, u0)
 
         dynamics_state = obs_t[state_from_obs_id]
-        h_x  = ncbf_apply(phi, dynamics_state[..., ncbf_obs_in_dynamics_state_id])  # h(x_t)
+        h_x, h_x_std, _  = ncbf_apply(phi, dynamics_state[..., ncbf_obs_in_dynamics_state_id])  # h(x_t)
 
         # Discrete-time CBF condition:
         #   h(x_{t+1}) - h(x_t) + alpha(h(x_t)-gamma_c) >= 0

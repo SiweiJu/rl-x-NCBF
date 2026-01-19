@@ -119,7 +119,8 @@ class PPO:
         self.critic = get_critic(self.config, self.env)
 
         self.ncbf, self.ncbf_forward, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env)
-        self.ncbf_apply = self.ncbf[0].apply # TODO: fix this
+        # self.ncbf_apply = self.ncbf[0].apply # TODO: fix this
+        self.ncbf_apply = self.ncbf_forward
 
         def linear_schedule(count):
             fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates
@@ -152,6 +153,10 @@ class PPO:
             TrainState.create(
                 apply_fn=self.ncbf[i].apply,
                 params=self.ncbf[i].init(ncbf_keys[i], env_state.next_observation[..., env.ncbf_observation_indices]),
+                # params=self`.ncbf[i].init(
+                #     ncbf_keys[i],
+                #     jnp.zeros((self.env.ncbf_observation_indices.shape[0],), dtype=jnp.float32)
+                # ),
                 tx=optax.chain(
                     optax.clip_by_global_norm(self.max_grad_norm),
                     optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
@@ -182,8 +187,10 @@ class PPO:
                     2.0 * jnp.pi) - action_logstd).sum(1)
                 raw_processed_action = self.get_processed_action(action)
 
-                processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, observation,
-                                                                                      ncbf_state[0].params)
+                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+
+                processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, observation[...,self.ncbf_observation_indices],
+                                                                                      params_stack)
                 value = self.critic.apply(critic_state.params, observation).squeeze(-1)
 
                 env_state = self.env.step(env_state, processed_action)
@@ -277,8 +284,9 @@ class PPO:
 
                 @jax.jit
                 def loss_fn(params, minib_obs, minib_nxt, minib_y, minib_mask, minib_indices_to_term):
-                    h_x = ncbf_state.apply_fn(params, minib_obs[..., self.ncbf_observation_indices])  # [B,T]
-                    h_xn = ncbf_state.apply_fn(params, minib_nxt[..., self.ncbf_observation_indices])  # [B,T]
+                    # vmap_apply = jax.vmap(ncbf_state.apply_fn, in_axes=(None, 0))
+                    h_x = ncbf_state.apply_fn(params, minib_obs[..., self.ncbf_observation_indices])  # [B]
+                    h_xn = ncbf_state.apply_fn(params, minib_nxt[..., self.ncbf_observation_indices])  # [B]
 
                     h_x = nn.sigmoid(h_x)
                     h_xn = nn.sigmoid(h_xn)
@@ -323,7 +331,7 @@ class PPO:
                             # shape (output_dim,) -> reduce to scalar
                             x_single = x_single[None, ...]  # [1, D]
                             h_input = x_single[..., self.ncbf_observation_indices]
-                            y = self.ncbf_apply(params, h_input)
+                            y = ncbf_state.apply_fn(params, h_input)
                             return jnp.sum(y)
 
                         # Vectorize grad over batch
@@ -732,7 +740,7 @@ class PPO:
 
 
                     # Optimizing
-                    def loss_fn(policy_params, critic_params, ncbf_params, state_b, action_b, log_prob_b, return_b, advantage_b):
+                    def loss_fn(policy_params, critic_params, ncbf_state, state_b, action_b, log_prob_b, return_b, advantage_b):
                         # Policy loss
                         action_mean, action_logstd = self.policy.apply(policy_params, state_b)
                         action_std = jnp.exp(action_logstd)
@@ -756,7 +764,8 @@ class PPO:
                         critic_loss = 0.5 * (new_value - return_b) ** 2
 
                         # anticipation loss
-                        safe_action_b, _, _ = self.ncbf_safety_layer(action_b, state_b, ncbf_params)
+                        ncbf_params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in ncbf_state])
+                        safe_action_b, _, _ = self.ncbf_safety_layer(action_b, state_b, ncbf_params_stack)
 
                         # for debugging:
                         # anticipation_loss = 0.0
@@ -804,7 +813,7 @@ class PPO:
                         (loss, metrics), (policy_gradients, critic_gradients) = grad_loss_fn(
                             policy_state.params,
                             critic_state.params,
-                            ncbf_state[0].params,
+                            ncbf_state,
                             batch_states[minibatch_indices],
                             batch_actions[minibatch_indices],
                             batch_log_probs[minibatch_indices],
