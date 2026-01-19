@@ -80,6 +80,9 @@ class PPO:
         self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps
         self.ncbf_pretrain_nr_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
 
+        self.action_noise_sampling_ratio = config.algorithm.action_noise_sampling_ratio
+        self.rollout_save_name = config.algorithm.rollout_save_name
+
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
         if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
             raise ValueError("NCBF batch size must divide evenly into nr_steps * nr_envs.")
@@ -859,12 +862,92 @@ class PPO:
 
         return model
     
+    def validate_dynamics_model_on_the_real_robot(self):
+        # quick and dirty validation of the system dynamics function and the ncbf using real data collected from the robot
+        file_list = "/home/siwei/Documents/repos/rl-x-NCBF/misc/data_paths.txt"
+        target_path = "/home/siwei/Documents/repos/rl-x-NCBF/misc/real_robot_rollouts_validation"
+
+        os.makedirs(target_path, exist_ok=True)
+
+        def _load_rollout_paths(self, file_list_path: str) -> list[str]:
+            """
+            Read newline-separated rollout paths from `file_list_path`.
+            Lines starting with # or blank lines are ignored.
+            """
+            if not os.path.isfile(file_list_path):
+                raise FileNotFoundError(f"Rollout file list not found: {file_list_path}")
+
+            with open(file_list_path, "r", encoding="utf-8") as file_handle:
+                paths = [
+                    os.path.abspath(line.strip())
+                    for line in file_handle
+                    if line.strip() and not line.lstrip().startswith("#")
+                ]
+
+            if not paths:
+                raise ValueError(f"No rollout paths found in: {file_list_path}")
+
+            return paths
+
+        rollout_paths = _load_rollout_paths(self, file_list)
+
+        def _load_rollouts_from_json(self, file_paths: list[str]) -> list[list]:
+            """
+            Load rollout datasets stored as JSON lists.
+            """
+            datasets = []
+            for path in file_paths:
+                if not os.path.isfile(path):
+                    raise FileNotFoundError(f"Rollout file not found: {path}")
+                try:
+                    with open(path, "r", encoding="utf-8") as file_handle:
+                        rollout_data = json.load(file_handle)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Failed to parse rollout file: {path}") from exc
+                if not isinstance(rollout_data, dict):
+                    raise ValueError(f"Rollout file must contain a JSON dict: {path}")
+                datasets.append(rollout_data)
+            return datasets
+
+        rollouts = _load_rollouts_from_json(self, rollout_paths)
+
+        for idx, rollout in enumerate(rollouts):
+            pos = np.array(rollout["pos"])
+            qpos = np.array(rollout["joint_positions"])
+            qvel = np.array(rollout["joint_velocities"])
+            actions = np.array(rollout["action"])
+
+            x_true = np.concatenate([qpos, qvel], axis=-1)
+            x_pred = np.stack([self.system_dynamics_function(pos_row, x_row, a_row) for pos_row, x_row, a_row in zip(pos[:-1], x_true[:-1], actions[:-1])])
+            pred_error = x_true[1:, ...] - x_pred[..., self.env.ncbf_obs_in_dynamics_state_idx]
+            pred_error_norm = np.linalg.norm(pred_error, axis=-1)
+            print("prediction error: ", np.mean(pred_error_norm))
+
+            h_input = x_true
+            prediction_mean, prediction_std, _ = self.ncbf_apply(
+                jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state]),
+                h_input[:-1]
+            )
+
+
+
 
     def test(self, episodes):
-        @jax.jit
+        # self.validate_dynamics_model_on_the_real_robot()
+        # return
+
+        # @jax.jit
         def get_action(policy_state: TrainState, state: np.ndarray):
             action_mean, action_logstd = self.policy.apply(policy_state.params, state)
             raw_processed_action = self.get_processed_action(action_mean)
+
+            sampling_ratio = self.action_noise_sampling_ratio
+            self.key, sampling_key, action_offset_key = jax.random.split(self.key, 3)
+            if_sampling = jax.random.uniform(sampling_key, (1,)) < sampling_ratio
+            # print("if_sampling: ", if_sampling)
+            # add action noise
+
+            raw_processed_action = raw_processed_action + jax.random.normal(action_offset_key, raw_processed_action.shape) * 2 * if_sampling
             params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
             safe_action, constraint_active, delta_u, x_next, h_u0 = self.batched_ncbf_safety_layer(raw_processed_action, state, params_stack)
             return safe_action, raw_processed_action, constraint_active, delta_u, x_next, h_u0
@@ -882,25 +965,31 @@ class PPO:
 
 
             rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[],
-                                delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[], h_u0=[], x_next_true=[], x_next_pred=[])
+                                delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[], h_u0=[], x_next_true=[], x_next_pred=[], ret=[])
 
             while not done:
                 processed_action, raw_action, constraint_active, delta_u, x_next_pred, h_u0 = get_action(self.policy_state, state)
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                 prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, state[..., self.env.ncbf_observation_indices])
 
+                # qpos = state[0, self.env.envs[0].qpos_observation_idx]
+                # qvel = state[0, self.env.envs[0].qvel_observation_idx]
+                # x = np.concatenate([qpos, qvel], axis=-1)
+                # x_next_pred = self.system_dynamics_function(x, processed_action)
+
+                prediction_mean = nn.sigmoid(prediction_mean)
                 self.env.envs[0].internal_state["safe_prediction"] = prediction_mean
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
 
                 done = terminated | truncated
                 episode_return += reward
 
-                # # for debugging, check prediction error
+                # for debugging, check prediction error
                 # qpos = state[:, self.env.envs[0].qpos_observation_idx][:, self.env.envs[0].actuator_joint_mask_qpos]
                 # qvel = state[:, self.env.envs[0].qvel_observation_idx][:, self.env.envs[0].actuator_joint_mask_qvel]
                 # x_next_true = np.concatenate([qpos, qvel], axis=-1)
                 #
-                # pred_error = x_next_true - x_next_pred
+                # pred_error = x_next_true - x_next_pred[0, self.env.envs[0].ncbf_obs_in_dynamics_state_idx]
                 # print("pred error: ", np.linalg.norm(pred_error))
 
                 rollout_dict["predictions"].append(predictions)
@@ -915,11 +1004,13 @@ class PPO:
                 joint_pos = (state[0, self.env.envs[0].joint_positions_obs_idx] * 3.14) + self.env.envs[0].internal_state["actuator_joint_nominal_positions"]
                 rollout_dict["joint_position_obs"].append(joint_pos)
 
+            rollout_dict["ret"].append(episode_return)
             rollouts.append(rollout_dict)
             rlx_logger.info(f"Episode {i + 1} - Return: {episode_return}")
 
+
         # save rollout file
-        rollout_file = os.path.join(rollout_path, f"rollouts.pkl")
+        rollout_file = os.path.join(rollout_path, f"{self.rollout_save_name}.pkl")
         with open(rollout_file, "wb") as f:
             pickle.dump(rollouts, f)
 

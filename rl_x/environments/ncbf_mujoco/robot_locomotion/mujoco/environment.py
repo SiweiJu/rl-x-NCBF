@@ -354,9 +354,9 @@ class LocomotionEnv(gym.Env):
 
             # add safety light
         safety = self.internal_state["safe_prediction"]
-        if safety < 0.5:
+        if safety < 0.2:
             safety_color = np.array([1.0, 0.0, 0.0, 1.0])  # red
-        elif safety < 0.8:
+        elif safety < 0.5:
             safety_color = np.array([1.0, 1.0, 0.0, 1.0])  # yellow
         else:
             safety_color = np.array([0.0, 1.0, 0.0, 1.0])  # green
@@ -520,7 +520,7 @@ class LocomotionEnv(gym.Env):
         observation = np.clip(observation, -10.0, 10.0)
 
         return observation
-    
+
 
     def handle_domain_randomization(self, is_episode_start=False):
         should_randomize_domain_episode_start = self.domain_randomization_sampling_function.setup()

@@ -56,7 +56,6 @@ class RandomTrajectoryCommands:
 
     def get_next_command(self):
         goal_velocities = self.command_trajectory[self.command_index]
-        print("Goal velocities:", goal_velocities)
         self.command_index = (self.command_index + 1) % self.trajectory_length
 
         self.env.internal_state["goal_velocities"] = goal_velocities
