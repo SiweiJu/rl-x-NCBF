@@ -17,6 +17,7 @@ def get_ncbf(config, env):
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
     ncbf_observation_indices = env.ncbf_observation_indices
     gamma_c = config.algorithm.ncbf.gamma_c
+    ncbf_clipping = config.algorithm.ncbf.action_clipping
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
@@ -37,8 +38,11 @@ def get_ncbf(config, env):
         gamma_c=gamma_c
     )
 
-    # dummy onnly clipping
-    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
+    # dummy
+    if ncbf_clipping:
+        dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
+    else:
+        dummy_safety_layer_function = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0))
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -121,7 +125,8 @@ def make_get_safe_action(
     gamma_c: float = 0.0,
     eta_cbf: float = 1.0,      # \tilde alpha(s) = eta_cbf * s
     lambda_s: float = 1e3,     # slack penalty
-):
+    action_clipping: bool = False
+    ):
     """
     Returns a JIT-able safety layer:
         get_safe_action(action_raw, x_t, t, contact, phi) -> (u_safe, info)
@@ -191,6 +196,9 @@ def make_get_safe_action(
         obs_t: Array,
         phi: dict
     ) -> Tuple[Array, Array, Array]:
+
+        action_raw = jax.lax.cond(action_clipping, lambda x: jnp.clip(x, act_low, act_high), lambda x: x, action_raw)
+
         a, c, h_x, h_u0 = a_and_c_from_linearization(obs_t, action_raw, phi)
 
         aTa = jnp.dot(a, a) + 1e-12
@@ -219,11 +227,15 @@ def make_get_safe_action(
 
         u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
 
-        u_clipped = jnp.clip(u_processed, act_low, act_high)
-        action_raw_clipped = jnp.clip(action_raw, act_low, act_high)
-        delta_u = jnp.linalg.norm(u_clipped - action_raw_clipped)
+        u_processed = jax.lax.cond(
+            action_clipping,
+            lambda x: jnp.clip(x, act_low, act_high),
+            lambda x: x,
+            u_processed
+        )
+        delta_u = jnp.linalg.norm(u_processed - action_raw)
 
-        return u_clipped, constraint_active, delta_u
+        return u_processed, constraint_active, delta_u
 
     return get_safe_action
 

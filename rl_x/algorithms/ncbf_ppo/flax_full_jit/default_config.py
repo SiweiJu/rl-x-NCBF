@@ -43,7 +43,7 @@ def get_config(algorithm_name):
     config.ncbf.nr_hidden_units = 512
     config.ncbf.policy_loss_coef = 0.01  # weight for policy loss when training ncbf
     config.ncbf.coef_decay_lambda = 0.95  # decay lambda for ncbf loss coefficients < 1
-
+    config.ncbf.action_clipping = True
 
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_steps = 2    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
