@@ -9,6 +9,8 @@ from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from mujoco import mjx
 
+import jax.scipy as jsp
+
 Array = jnp.ndarray
 
 
@@ -19,6 +21,8 @@ def get_ncbf(config, env):
     gamma_c = config.algorithm.ncbf.gamma_c
     eta_cbf = config.algorithm.ncbf.eta_cbf
     lambda_slack = config.algorithm.ncbf.lambda_slack
+    ncbf_clipping = config.algorithm.ncbf.action_clipping
+
 
     NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units) for _ in range(n_ncbf_ensemble)]
     NCBF_apply = get_ensemble_forward_pass(NCBF[0].apply)
@@ -41,8 +45,14 @@ def get_ncbf(config, env):
         lambda_s=lambda_slack
     )
 
-    # dummy only clipping
-    dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0), jnp.array(0.0), jnp.array(0.0))
+    # dummy
+    if ncbf_clipping:
+        dummy_safety_layer_function = lambda action_raw, obs_t, phi: (jnp.clip(action_raw, act_low, act_high),
+                                                                      jnp.array(False), jnp.array(0.0), jnp.array(0.0),
+                                                                      jnp.array(0.0))
+    else:
+        dummy_safety_layer_function = lambda action_raw, obs_t, phi: (action_raw, jnp.array(False), jnp.array(0.0), jnp.array(0.0),
+                                                                      jnp.array(0.0))
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -60,9 +70,10 @@ def get_ncbf(config, env):
     return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function, dynamics_step_function
 
 def get_ensemble_forward_pass(apply_fn):
-    alpha = 0.8
+    alpha = 0.0
     E = 5  # number of ensemble members, hardcoded for now
     k = max(1, int(np.ceil((1.0 - alpha) * E)))
+    # print("cvar consider least k:", k)
 
     @jax.jit
     def ensemble_forward_pass(params_stack, input):
@@ -74,24 +85,41 @@ def get_ensemble_forward_pass(apply_fn):
 
         def aggregate_predictions(preds):
             # return preds[0]
-            return jnp.mean(preds, axis=0)
+            # return jnp.mean(preds, axis=0)
             # # def cvar_soft(losses):
             # #     eta = jax.lax.stop_gradient(jnp.quantile(losses, alpha))
             # #     tail = jnp.maximum(losses - eta, 0.0)
             # #     return eta + jnp.mean(tail) / (1 - alpha)
             # #
-            # def cvar_topk(losses):
-            #     tail = jnp.sort(losses, axis=0)[-k:, ...]
-            #     return jnp.mean(tail, axis=0)
+            def cvar_topk(losses):
+                tail = jnp.sort(losses, axis=0)[-k:, ...]
+                return jnp.mean(tail, axis=0)
 
-            # def cvar_gaussian(losses):
+
+            # def cvar_gaussian(losses, eps=1e-6):
+            #     """
+            #     Gaussian-fitted lower-tail CVaR at level alpha.
+            #     losses: (E, ...) with larger=worse.
+            #     Returns: CVaR_alpha(losses) with same shape as losses[0].
+            #     """
             #     mu = jnp.mean(losses, axis=0)
-            #     sigma = jnp.std(losses, axis=0)
+            #     # Use ddof=0 for stability with small E; add eps to avoid sigma=0 issues.
+            #     sigma = jnp.std(losses, axis=0) + eps
+            #
+            #     # z_alpha = Phi^{-1}(alpha)
+            #     z = jsp.special.ndtri(alpha)
+            #
+            #     # phi(z) = standard normal pdf
+            #     phi = jnp.exp(-0.5 * z * z) / jnp.sqrt(2.0 * jnp.pi)
+            #
+            #     # lower-tail CVaR (worst tail)
+            #     return mu - sigma * (phi / alpha)
+
             # TODO:  implement closed-form Gaussian
             #
-            # risks = 1 - preds
-            # cvar = 1 - cvar_topk(risks)
-            # return cvar
+            risks = 1 - preds
+            cvar = 1 - cvar_topk(risks)
+            return cvar
 
         return aggregate_predictions(predictions.squeeze()), jnp.std(predictions, axis=0), predictions
     return ensemble_forward_pass
@@ -127,6 +155,8 @@ def make_get_safe_action(
     gamma_c: float,
     eta_cbf: float,      # \tilde alpha(s) = eta_cbf * s
     lambda_s: float,     # slack penalty
+    action_clipping: bool = False
+
 ):
     """
     Returns a JIT-able safety layer:
@@ -193,7 +223,7 @@ def make_get_safe_action(
         # h_u0 = h_of_u(u0)
 
         ncbf_obs_t = x_t[..., ncbf_obs_in_dynamics_state_id]
-        h_x, _, _  = ncbf_apply(phi, ncbf_obs_t)
+        h_x, h_x_std, _  = ncbf_apply(phi, ncbf_obs_t)
 
         # Discrete-time CBF condition:
         #   h(x_{t+1}) - h(x_t) + alpha(h(x_t)-gamma_c) >= 0
@@ -204,7 +234,7 @@ def make_get_safe_action(
         # => h_u0 + a^T(u-u0) - h_x + alpha(h_x-gamma_c) >= 0
         # => a^T u >= -h_u0 + h_x - alpha(h_x-gamma_c) + a^T u0  =: c_lin
         c_lin = -h_u0 + h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0)
-        return a, c_lin, h_x, h_u0, x_next
+        return a, c_lin, h_x, h_u0, x_next, h_x_std
 
     @jax.jit
     def get_safe_action(
@@ -215,16 +245,18 @@ def make_get_safe_action(
 
         # clip action raw first
         # action_raw = jnp.clip(action_raw, act_low, act_high)
+        action_raw = jax.lax.cond(action_clipping, lambda x: jnp.clip(x, act_low, act_high), lambda x: x, action_raw)
 
-        a, c, h_x, h_u0, x_next = a_and_c_from_linearization(obs_t, action_raw, phis)
+        a, c, h_x, h_u0, x_next, h_x_std = a_and_c_from_linearization(obs_t, action_raw, phis)
 
         aTa = jnp.dot(a, a) + 1e-12
         aTu = jnp.dot(a, action_raw)
 
         # constraint violation amount
         delta = jnp.maximum(0.0, c - aTu)
-        # jax.debug.print("delta: {delta}, h_x: {h_x}, h_u0: {h_u0}, a: {a}", delta=delta, h_x=h_x, h_u0=h_u0, a=a)
 
+
+        # jax.debug.print("c: {c}, aTu: {aTu}, delta: {delta}, std={h_x_std}", c=c, aTu=aTu, delta=delta, h_x_std=h_x_std)
         # closed-form QP solution (soft slack)
         gain = delta / (aTa + (1.0 / lambda_s))
         u_safe = action_raw + gain * a
@@ -245,13 +277,16 @@ def make_get_safe_action(
         # }
 
         u_processed = jax.lax.cond(use_safety_layer, lambda _: u_safe, lambda _: action_raw, operand=None)
-        u_processed_clipped = jnp.clip(u_processed, act_low, act_high) if (act_low is not None and act_high is not None) else u_processed
+        u_clipped = jax.lax.cond(
+            action_clipping,
+            lambda x: jnp.clip(x, act_low, act_high),
+            lambda x: x,
+            u_processed
+        )
+        delta_u = jnp.linalg.norm(u_clipped - action_raw)
 
-        action_raw_clipped = jnp.clip(action_raw, act_low, act_high)
-
-        delta_u = jnp.linalg.norm(u_processed_clipped - action_raw_clipped)
         # for debugging, shut down safety modification
-        return u_processed_clipped, delta, delta_u, x_next, h_u0
+        return u_processed, delta, delta_u, x_next, h_u0
 
     return get_safe_action
 
@@ -347,9 +382,6 @@ def get_dynamics_step_function_mjx(env):
     nr_substeps = env.nr_substeps
     template_data = mjx.make_data(mjx_model)
 
-    qpos_mask = env.actuator_joint_mask_qpos
-    qvel_mask = env.actuator_joint_mask_qvel
-
     nq, nv = mjx_model.nq, mjx_model.nv
 
     joint_nominal_positions = jnp.array([env.internal_state["actuator_joint_nominal_positions"]])[0]
@@ -376,6 +408,48 @@ def get_dynamics_step_function_mjx(env):
         )
 
         # only return joint qpos and qvel
-        return jnp.concatenate([data.qpos[qpos_mask], data.qvel[qvel_mask]], axis=0)
+        return jnp.concatenate([data.qpos, data.qvel], axis=0)
 
     return system_dynamics
+
+
+
+# # TODO change this quick and dirty fix back to the normal one after debugging
+# def get_dynamics_step_function_mjx(env):
+#     model = deepcopy(env.initial_mj_model)
+#     mjx_model = mjx.put_model(model)
+#     nr_substeps = env.nr_substeps
+#     template_data = mjx.make_data(mjx_model)
+#
+#     nq, nv = mjx_model.nq, mjx_model.nv
+#
+#     joint_nominal_positions = jnp.array([env.internal_state["actuator_joint_nominal_positions"]])[0]
+#     scaling_factor = env.internal_state["scaling_factor"]
+#
+#     @jax.jit
+#     def system_dynamics(pos, x, u):
+#         # harded coded indexing for now
+#         # qpos : pos(3), quat(4), joint_pos(n_joints)
+#         # qvel : vel(3), ang_vel(3), joint_vel(n_joints
+#         # return: qpos and qvel for actuated joints only
+#         qpos = template_data.qpos
+#         qpos.at[:3].set(pos)
+#         qpos.at[7:nq].set(x[:12])
+#         qvel = template_data.qvel
+#         qvel.at[6:nv].set(x[12:24])
+#
+#         # denormalize action
+#         u = joint_nominal_positions + u * scaling_factor
+#
+#         data = template_data.replace(qpos=qpos, qvel=qvel, ctrl=u)
+#         data, _ = jax.lax.scan(
+#             f=lambda data, _: (mjx.step(mjx_model, data), None),
+#             init=data,
+#             xs=(),
+#             length=nr_substeps
+#         )
+#
+#         # only return joint qpos and qvel
+#         return jnp.concatenate([data.qpos, data.qvel], axis=0)
+#
+#     return system_dynamics
