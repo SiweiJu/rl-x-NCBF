@@ -35,7 +35,8 @@ def get_ncbf(config, env):
         use_safety_layer=use_safety_layer,
         act_low=act_low,
         act_high=act_high,
-        gamma_c=gamma_c
+        gamma_c=gamma_c,
+        action_clipping=ncbf_clipping,
     )
 
     # dummy
