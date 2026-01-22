@@ -47,16 +47,18 @@ def get_config(algorithm_name):
     config.ncbf.gamma_c = 1.0     # safety threshold (>=1 is safe, <=0 is unsafe)
     config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
 
-
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_steps = 32768    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
     config.ncbf.pretrain.nr_minibatches = 100
+
+    config.ncbf.action_clipping = True
+    config.ncbf.use_robust_safety_layer = False  # use robust safety layer that considers action noise
 
     config.ncbf_buffer = config_dict.ConfigDict()
     config.ncbf_buffer.buffer_size = int(1e6)
     config.ncbf_buffer.negative_buffer_size = int(1e6)
     config.ncbf_buffer.neg_sampling_ratio = 0.5 # ratio of sampling from negative buffer
 
-    config.action_noise_sampling_ratio = 0.1  # ratio of sampling actions for ncbf evaluation
+    config.action_noise_sampling_ratio = 0.0  # ratio of sampling actions for ncbf evaluation
     config.rollout_save_name = "rollouts"       #  default name for rollout saving
     return config
