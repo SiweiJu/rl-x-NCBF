@@ -71,6 +71,7 @@ def get_config(environment_name):
             },
             "perturbation": {
                 "sampling_type": "step_probability",
+                "sampling_probability": 0.002,
                 "type": "default",
                 "trunk_velocity_clip_mass_factor": 0.1,
                 "trunk_velocity_clip_limit": 1.0,
