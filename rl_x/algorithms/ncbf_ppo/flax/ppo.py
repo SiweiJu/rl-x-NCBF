@@ -947,7 +947,9 @@ class PPO:
             # print("if_sampling: ", if_sampling)
             # add action noise
 
-            raw_processed_action = raw_processed_action + jax.random.normal(action_offset_key, raw_processed_action.shape) * 2 * if_sampling
+            raw_processed_action = raw_processed_action + jax.random.normal(action_offset_key,
+                                                                    raw_processed_action.shape) * 2 * if_sampling
+
             params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
             safe_action, constraint_active, delta_u, x_next, h_u0 = self.batched_ncbf_safety_layer(raw_processed_action, state, params_stack)
             return safe_action, raw_processed_action, constraint_active, delta_u, x_next, h_u0
@@ -969,6 +971,7 @@ class PPO:
 
             while not done:
                 processed_action, raw_action, constraint_active, delta_u, x_next_pred, h_u0 = get_action(self.policy_state, state)
+
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                 prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, state[..., self.env.ncbf_observation_indices])
 
