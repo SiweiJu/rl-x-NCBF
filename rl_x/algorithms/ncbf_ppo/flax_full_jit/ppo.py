@@ -148,15 +148,14 @@ class PPO:
             )
         )
 
+        # dummy_ncbf_input is observation and action
+        dummy_action = jnp.zeros((env_state.next_observation.shape[0],) + self.as_shape)
+        dummy_ncbf_input = jnp.concatenate([env_state.next_observation[..., env.ncbf_observation_indices], dummy_action], axis=-1)
         ncbf_keys = jax.random.split(ncbf_key, self.ncbf_n_ensemble)
         self.ncbf_state = [
             TrainState.create(
                 apply_fn=self.ncbf[i].apply,
-                params=self.ncbf[i].init(ncbf_keys[i], env_state.next_observation[..., env.ncbf_observation_indices]),
-                # params=self`.ncbf[i].init(
-                #     ncbf_keys[i],
-                #     jnp.zeros((self.env.ncbf_observation_indices.shape[0],), dtype=jnp.float32)
-                # ),
+                params=self.ncbf[i].init(ncbf_keys[i], dummy_ncbf_input),
                 tx=optax.chain(
                     optax.clip_by_global_norm(self.max_grad_norm),
                     optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
@@ -283,10 +282,11 @@ class PPO:
                 """
 
                 @jax.jit
-                def loss_fn(params, minib_obs, minib_nxt, minib_y, minib_mask, minib_indices_to_term):
+                def loss_fn(params, minib_obs, minib_nxt, minib_acts, minib_y, minib_mask, minib_indices_to_term):
                     # vmap_apply = jax.vmap(ncbf_state.apply_fn, in_axes=(None, 0))
-                    h_x = ncbf_state.apply_fn(params, minib_obs[..., self.ncbf_observation_indices])  # [B]
-                    h_xn = ncbf_state.apply_fn(params, minib_nxt[..., self.ncbf_observation_indices])  # [B]
+                    h_input = jnp.concatenate([minib_obs[..., self.ncbf_observation_indices], minib_acts], axis=-1)
+                    h_x = ncbf_state.apply_fn(params, h_input)  # [B]
+                    h_xn = ncbf_state.apply_fn(params, h_input)  # [B]
 
                     h_x = nn.sigmoid(h_x)
                     h_xn = nn.sigmoid(h_xn)
@@ -330,8 +330,7 @@ class PPO:
                         def f_single(x_single):
                             # shape (output_dim,) -> reduce to scalar
                             x_single = x_single[None, ...]  # [1, D]
-                            h_input = x_single[..., self.ncbf_observation_indices]
-                            y = ncbf_state.apply_fn(params, h_input)
+                            y = ncbf_state.apply_fn(params, x_single)
                             return jnp.sum(y)
 
                         # Vectorize grad over batch
@@ -342,7 +341,7 @@ class PPO:
                         return lip_loss, grad_norm
 
                     #
-                    lip_loss, grad_norm = grad_norm_penalty(ncbf_state.params, minib_obs, self.ncbf_L_target)
+                    lip_loss, grad_norm = grad_norm_penalty(ncbf_state.params, h_input, self.ncbf_L_target)
 
                     # (4) weight decay
                     wd_loss = sum(jnp.sum(jnp.square(p)) for p in jax.tree.leaves(params))
@@ -417,18 +416,21 @@ class PPO:
 
                             states_pos = pos_buffer["states"][pos_indices]
                             next_states_pos = pos_buffer["next_states"][pos_indices]
+                            actions_pos = pos_buffer["actions"][pos_indices]
                             y_target_pos = pos_buffer["y_target"][pos_indices]
                             masks_pos = pos_buffer["masks"][pos_indices]
                             indices_to_term_pos = pos_buffer["indices_to_term"][pos_indices]
 
                             states_neg = neg_buffer["states"][neg_indices]
                             next_states_neg = neg_buffer["next_states"][neg_indices]
+                            actions_neg = neg_buffer["actions"][neg_indices]
                             y_target_neg = neg_buffer["y_target"][neg_indices]
                             masks_neg = neg_buffer["masks"][neg_indices]
                             indices_to_term_neg = neg_buffer["indices_to_term"][neg_indices]
 
                             states = jnp.concatenate([states_pos, states_neg], axis=0)
                             next_states = jnp.concatenate([next_states_pos, next_states_neg], axis=0)
+                            actions = jnp.concatenate([actions_pos, actions_neg], axis=0)
                             y_target = jnp.concatenate([y_target_pos, y_target_neg], axis=0)
                             masks = jnp.concatenate([masks_pos, masks_neg], axis=0)
                             indices_to_term = jnp.concatenate([indices_to_term_pos, indices_to_term_neg], axis=0)
@@ -441,14 +443,15 @@ class PPO:
                             y_target = y_target[perm]
                             masks = masks[perm]
                             indices_to_term = indices_to_term[perm]
-                            return states, next_states, y_target, masks, indices_to_term
+                            return states, next_states, actions, y_target, masks, indices_to_term
 
-                        states, next_states, y_targets, masks, indices_to_term = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
+                        states, next_states, actions, y_targets, masks, indices_to_term = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
 
                         (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
                             ncbf_state.params,
                             states,
                             next_states,
+                            actions,
                             y_targets,
                             masks,
                             indices_to_term
