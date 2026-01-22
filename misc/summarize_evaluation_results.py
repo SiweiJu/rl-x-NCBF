@@ -2,24 +2,23 @@
 """
 Summarize rollout evaluation PKLs and plot results.
 
-For each input .pkl file (one experiment setting), this script reports:
+Expected filenames like:
+  eval_safety_False_gamma_0p5_sampling_prob_0p002.pkl
+  eval_safety_True_gamma_m1p386_sampling_prob_0p016.pkl
+
+Reports per file:
   - n_episodes
   - finished_episodes: number of episodes with length >= threshold
   - early_terminated: number of episodes with length < threshold
-  - avg_return (episode["ret"])
+  - avg_return (episode["ret"] or sum(rewards))
   - std_return
 
-Then it plots:
-  - x-axis: action noise ratio
+Plots:
+  - x-axis: sampling_prob
   - left y-axis: number of finished episodes
   - right y-axis: avg return
   - safety_layer=False shown in grey
-  - safety_layer=True colored from red->green depending on gamma_c
-
-Usage:
-  python summarize_eval_pkls.py /path/a.pkl /path/b.pkl
-  python summarize_eval_pkls.py --glob "/path/to/rollout/eval_safety_*.pkl"
-  python summarize_eval_pkls.py --glob "..." --out_csv results.csv --plot_out summary.png
+  - safety_layer=True colored from red->green depending on gamma
 """
 
 import argparse
@@ -35,29 +34,38 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 
 SETTING_RE = re.compile(
-    r"eval_safety_(?P<safety>True|False)_ratio_(?P<ratio>[0-9mp]+)"
-    r"(?:_gamma_(?P<gamma>[0-9mp]+))?"
+    r"eval_safety_(?P<safety>True|False)"
+    r"_gamma_(?P<gamma>[0-9mp]+)"
+    r"_sampling_prob_(?P<sp>[0-9mp]+)"
+    r"seed_42"
     r"\.pkl$"
 )
+
+
+def tok_to_float(tok: Optional[str]) -> Optional[float]:
+    """Convert tokens like 0p002, 1p0, m0p405 into floats."""
+    if tok is None:
+        return None
+    sign = -1.0 if tok.startswith("m") else 1.0
+    core = tok[1:] if tok.startswith("m") else tok
+    core = core.replace("p", ".")
+    return sign * float(core)
 
 
 def parse_setting_from_filename(p: Path) -> Dict[str, Any]:
     m = SETTING_RE.search(p.name)
     if not m:
-        return {"safety_layer": None, "ratio": None, "gamma_c": None, "name": p.stem}
-
-    def tok_to_float(tok: Optional[str]) -> Optional[float]:
-        if tok is None:
-            return None
-        sign = -1.0 if tok.startswith("m") else 1.0
-        core = tok[1:] if tok.startswith("m") else tok
-        core = core.replace("p", ".")
-        return sign * float(core)
+        return {
+            "safety_layer": None,
+            "sampling_prob": None,
+            "gamma": None,
+            "name": p.stem,
+        }
 
     return {
         "safety_layer": (m.group("safety") == "True"),
-        "ratio": tok_to_float(m.group("ratio")),
-        "gamma_c": tok_to_float(m.group("gamma")),
+        "sampling_prob": tok_to_float(m.group("sp")),
+        "gamma": tok_to_float(m.group("gamma")),
         "name": p.stem,
     }
 
@@ -88,9 +96,14 @@ def episode_length(ep: Dict[str, Any]) -> int:
 
 
 def episode_return(ep: Dict[str, Any]) -> Optional[float]:
+    # Many rollouts store ret as [scalar] or scalar; handle both.
     if "ret" in ep:
         try:
-            return ep["ret"][0]
+            r = ep["ret"]
+            arr = np.asarray(r)
+            if arr.shape == ():  # scalar
+                return float(arr)
+            return float(arr[0])
         except Exception:
             pass
     if "episode_return" in ep:
@@ -128,8 +141,8 @@ def summarize_file(path: Path, threshold: int) -> Dict[str, Any]:
         "file": str(path),
         "name": setting["name"],
         "safety_layer": setting["safety_layer"],
-        "ratio": setting["ratio"],
-        "gamma_c": setting["gamma_c"],
+        "sampling_prob": setting["sampling_prob"],
+        "gamma": setting["gamma"],
         "n_episodes": len(rollouts),
         "finished_episodes(>=thr)": finished,
         "early_terminated(<thr)": early,
@@ -137,7 +150,6 @@ def summarize_file(path: Path, threshold: int) -> Dict[str, Any]:
         "avg_return": float(np.mean(rets_arr)) if rets_arr.size else float("nan"),
         "std_return": float(np.std(rets_arr)) if rets_arr.size else float("nan"),
         "missing_ret": missing_ret,
-        # keep these for debugging/optional post-processing
         "avg_ep_len": float(np.mean(lengths)) if lengths.size else float("nan"),
         "min_ep_len": int(np.min(lengths)) if lengths.size else 0,
         "max_ep_len": int(np.max(lengths)) if lengths.size else 0,
@@ -146,7 +158,7 @@ def summarize_file(path: Path, threshold: int) -> Dict[str, Any]:
 
 def format_table(rows: List[Dict[str, Any]]) -> str:
     cols = [
-        "safety_layer", "ratio", "gamma_c",
+        "safety_layer", "sampling_prob", "gamma",
         "n_episodes",
         "finished_episodes(>=thr)",
         "early_terminated(<thr)",
@@ -158,7 +170,7 @@ def format_table(rows: List[Dict[str, Any]]) -> str:
         if isinstance(v, float):
             if np.isnan(v):
                 return "nan"
-            return f"{v:.4f}"
+            return f"{v:.6f}"
         return str(v)
 
     widths = {c: max(len(c), max((len(fmt(r.get(c, ""))) for r in rows), default=0)) for c in cols}
@@ -178,39 +190,40 @@ def _sorted_unique(xs: List[float]) -> List[float]:
 def plot_summary(rows: List[Dict[str, Any]], plot_out: Optional[str] = None, show: bool = True) -> None:
     rows_use = [
         r for r in rows
-        if r.get("ratio") is not None
+        if r.get("sampling_prob") is not None
         and r.get("finished_episodes(>=thr)") is not None
         and not np.isnan(r.get("avg_return", np.nan))
         and r.get("safety_layer") is not None
     ]
     if not rows_use:
-        print("[WARN] No rows with (ratio, finished_episodes, avg_return, safety_layer) available for plotting.")
+        print("[WARN] No rows with (sampling_prob, finished_episodes, avg_return, safety_layer) available for plotting.")
+        print("       Likely filename parsing failed; check SETTING_RE against your filenames.")
         return
 
     fig, ax_fin = plt.subplots(figsize=(10, 5))
     ax_ret = ax_fin.twinx()
 
-    # Safety layer OFF: single grey series across ratios
+    # Safety layer OFF: grey series
     off = [r for r in rows_use if r["safety_layer"] is False]
     if off:
-        off = sorted(off, key=lambda r: float(r["ratio"]))
-        x = np.array([r["ratio"] for r in off], dtype=float)
+        off = sorted(off, key=lambda r: float(r["sampling_prob"]))
+        x = np.array([r["sampling_prob"] for r in off], dtype=float)
         y_fin = np.array([r["finished_episodes(>=thr)"] for r in off], dtype=float)
         y_ret = np.array([r["avg_return"] for r in off], dtype=float)
         ax_fin.plot(x, y_fin, color="0.5", marker="o", linewidth=2, label="No safety layer (finished)")
         ax_ret.plot(x, y_ret, color="0.5", marker="x", linestyle="--", linewidth=2, label="No safety layer (ret)")
 
-    # Safety layer ON: multiple series by gamma, colored red->green
+    # Safety layer ON: colored by gamma
     on = [r for r in rows_use if r["safety_layer"] is True]
-    gammas = _sorted_unique([r["gamma_c"] for r in on if r.get("gamma_c") is not None])
+    gammas = _sorted_unique([r["gamma"] for r in on if r.get("gamma") is not None])
     if on and gammas:
         norm = mcolors.Normalize(vmin=min(gammas), vmax=max(gammas))
-        cmap = cm.get_cmap("RdYlGn")  # red -> yellow -> green
+        cmap = cm.get_cmap("RdYlGn")
 
         for g in gammas:
-            grp = [r for r in on if r.get("gamma_c") == g]
-            grp = sorted(grp, key=lambda r: float(r["ratio"]))
-            x = np.array([r["ratio"] for r in grp], dtype=float)
+            grp = [r for r in on if r.get("gamma") == g]
+            grp = sorted(grp, key=lambda r: float(r["sampling_prob"]))
+            x = np.array([r["sampling_prob"] for r in grp], dtype=float)
             y_fin = np.array([r["finished_episodes(>=thr)"] for r in grp], dtype=float)
             y_ret = np.array([r["avg_return"] for r in grp], dtype=float)
 
@@ -218,12 +231,11 @@ def plot_summary(rows: List[Dict[str, Any]], plot_out: Optional[str] = None, sho
             ax_fin.plot(x, y_fin, color=col, marker="o", linewidth=2, label=f"Safety layer γ={g:g} (finished)")
             ax_ret.plot(x, y_ret, color=col, marker="x", linestyle="--", linewidth=2, label=f"Safety layer γ={g:g} (ret)")
 
-    ax_fin.set_xlabel("Action noise ratio")
+    ax_fin.set_xlabel("Sampling probability")
     ax_fin.set_ylabel("Number of finished episodes (len >= threshold)")
     ax_ret.set_ylabel("Average return")
     ax_fin.grid(True, linestyle="--", alpha=0.3)
 
-    # Combined legend
     h1, l1 = ax_fin.get_legend_handles_labels()
     h2, l2 = ax_ret.get_legend_handles_labels()
     ax_fin.legend(h1 + h2, l1 + l2, loc="best", fontsize=9, ncol=2)
@@ -262,7 +274,6 @@ def main():
         files.extend(sorted(glob.glob(args.glob_pat)))
     files.extend(args.pkl_files)
 
-    # de-dup while preserving order
     seen = set()
     uniq_files = []
     for f in files:
@@ -285,15 +296,14 @@ def main():
             print(f"[ERROR] Failed on {p}: {e}")
             continue
 
-    # sort: safety False first, then ratio, then gamma
     def sort_key(r: Dict[str, Any]) -> Tuple[int, float, float]:
         safety = r["safety_layer"]
         safety_rank = 2 if safety is None else (1 if safety else 0)
-        ratio = r["ratio"]
-        gamma = r["gamma_c"]
+        sp = r["sampling_prob"]
+        gamma = r["gamma"]
         return (
             safety_rank,
-            float(ratio) if ratio is not None else 1e9,
+            float(sp) if sp is not None else 1e9,
             float(gamma) if gamma is not None else 1e9,
         )
 
