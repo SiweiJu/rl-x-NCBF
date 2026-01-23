@@ -36,20 +36,21 @@ def get_ncbf(config, env):
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 
-    safety_layer_function = make_get_safe_action(
-        ncbf_apply=NCBF_apply,
-        system_forward_dynamics_function=dynamics_step_function,
-        state_from_obs_id=env.dynamics_observation_indices,
-        ncbf_obs_in_dynamics_state_id=env.ncbf_obs_in_dynamics_state_idx,
-        use_safety_layer=use_safety_layer,
-        act_low=act_low,
-        act_high=act_high,
-        gamma_c=gamma_c,
-        eta_cbf=eta_cbf,
-        lambda_s=lambda_slack,
-        use_robust_safety_layer=use_robot_safety_layer,
-        action_clipping=ncbf_clipping,
-    )
+    if config.algorithm.ncbf.use_safety_layer:
+        safety_layer_function = make_get_safe_action(
+            ncbf_apply=NCBF_apply,
+            system_forward_dynamics_function=dynamics_step_function,
+            state_from_obs_id=env.dynamics_observation_indices,
+            ncbf_obs_in_dynamics_state_id=env.ncbf_obs_in_dynamics_state_idx,
+            use_safety_layer=use_safety_layer,
+            act_low=act_low,
+            act_high=act_high,
+            gamma_c=gamma_c,
+            eta_cbf=eta_cbf,
+            lambda_s=lambda_slack,
+            use_robust_safety_layer=use_robot_safety_layer,
+            action_clipping=ncbf_clipping,
+        )
 
     # dummy
     if ncbf_clipping:
@@ -73,10 +74,10 @@ def get_ncbf(config, env):
             out_axes=(0, 0, 0, 0, 0)  # batched u_safe, constraint_active, delta_u, h_u0
         )
     )
-    return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function, dynamics_step_function
+    return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function_for_batch, dynamics_step_function
 
 def get_ensemble_forward_pass(apply_fn):
-    alpha = 0.0
+    alpha = 0.6
     E = 5  # number of ensemble members, hardcoded for now
     k = max(1, int(np.ceil((1.0 - alpha) * E)))
     # print("cvar consider least k:", k)

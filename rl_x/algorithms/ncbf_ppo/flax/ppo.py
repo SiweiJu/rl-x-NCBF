@@ -129,11 +129,12 @@ class PPO:
             )
         )
 
+        dummy_h_input = jnp.concatenate([state[..., self.env.ncbf_observation_indices], jnp.zeros((state.shape[0], self.as_shape[0]))], axis=-1)
         ncbf_keys = jax.random.split(ncbf_key, self.ncbf_n_ensemble)
         self.ncbf_state = [
             TrainState.create(
                 apply_fn=self.ncbf[i].apply,
-                params=self.ncbf[i].init(ncbf_keys[i], state[..., self.env.ncbf_observation_indices]),
+                params=self.ncbf[i].init(ncbf_keys[i], dummy_h_input),
                 tx=optax.chain(
                     optax.clip_by_global_norm(self.max_grad_norm),
                     optax.inject_hyperparams(optax.adam)(learning_rate=config.algorithm.ncbf.lr),
@@ -944,11 +945,11 @@ class PPO:
             sampling_ratio = self.action_noise_sampling_ratio
             self.key, sampling_key, action_offset_key = jax.random.split(self.key, 3)
             if_sampling = jax.random.uniform(sampling_key, (1,)) < sampling_ratio
-            # print("if_sampling: ", if_sampling)
+            # print("raw action: ", raw_processed_action)
             # add action noise
 
             raw_processed_action = raw_processed_action + jax.random.normal(action_offset_key,
-                                                                    raw_processed_action.shape) * 2 * if_sampling
+                                                                    raw_processed_action.shape) * 1 * if_sampling
 
             params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
             safe_action, constraint_active, delta_u, x_next, h_u0 = self.batched_ncbf_safety_layer(raw_processed_action, state, params_stack)
@@ -973,7 +974,8 @@ class PPO:
                 processed_action, raw_action, constraint_active, delta_u, x_next_pred, h_u0 = get_action(self.policy_state, state)
 
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
-                prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, state[..., self.env.ncbf_observation_indices])
+                h_input = jnp.concatenate([state[..., self.env.ncbf_obs_in_dynamics_state_idx], processed_action], axis=-1)
+                prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, h_input)
 
                 # qpos = state[0, self.env.envs[0].qpos_observation_idx]
                 # qvel = state[0, self.env.envs[0].qvel_observation_idx]
