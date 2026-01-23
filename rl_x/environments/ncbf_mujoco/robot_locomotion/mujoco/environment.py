@@ -29,7 +29,7 @@ from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.terrain_functions.han
 
 class LocomotionEnv(gym.Env):
     def __init__(self, robot_config, runner_mode, seed, render, env_config, nr_envs):
-        
+
         self.robot_config = robot_config
         self.runner_mode = runner_mode
         self.should_render = render
@@ -38,6 +38,10 @@ class LocomotionEnv(gym.Env):
         self.nr_envs = nr_envs
 
         self.np_rng = np.random.default_rng(seed)
+
+        # FOR CREATION OF DOUBLE VISUALIZATION
+        self.record_rollout = (self.runner_mode == "test")
+        self.rollout_buffer = []
 
         xml_path = (self.robot_config["directory_path"] / "data" / "plane.xml").as_posix()
         xml_handle = mjcf.from_path(xml_path)
@@ -344,12 +348,27 @@ class LocomotionEnv(gym.Env):
     def reset(self, seed=None):
         self.terrain_function.sample()
 
+        # FOR DOUBLE VISUALIZATION
+        # Inside your reset function, after self.terrain_function.sample()
+        mujoco.mj_saveLastXML("rollouts/current_episode_terrain.xml", self.internal_state["mj_model"])
+        # Inside the "if self.record_rollout" block in reset:
+        np.save("rollouts/terrain_data.npy", self.internal_state["mj_model"].hfield_data)
+
         qpos, qvel = self.initial_state_function.setup()
         self.internal_state["data"] = mujoco.MjData(self.internal_state["mj_model"])
         self.internal_state["data"].qpos = qpos
         self.internal_state["data"].qvel = qvel
         self.internal_state["data"].ctrl = np.zeros(self.nr_actuator_joints)
         mujoco.mj_forward(self.internal_state["mj_model"], self.internal_state["data"])
+
+        # FOR CREATION OF DOUBLE VISUALIZATION
+        if self.record_rollout:
+            self.rollout_buffer = []
+            self.rollout_buffer.append({
+                "qpos": self.internal_state["data"].qpos.copy(),
+                "qvel": self.internal_state["data"].qvel.copy(),
+        })
+
 
         episode_success = self.internal_state["info_episode_store"]["episode_return"] >= 10.0
         self.internal_state["env_curriculum_levels_in_a_row"] = np.where(episode_success,
@@ -402,6 +421,14 @@ class LocomotionEnv(gym.Env):
         self.internal_state["data"].ctrl = target_joint_positions
         mujoco.mj_step(self.internal_state["mj_model"], self.internal_state["data"], self.nr_substeps)
 
+        # FOR CREATION OF DOUBLE VISUALIZATION
+        if self.record_rollout:
+            self.rollout_buffer.append({
+                "qpos": self.internal_state["data"].qpos.copy(),
+                "qvel": self.internal_state["data"].qvel.copy(),
+            })
+
+
         # x_next_true = np.concatenate([self.internal_state["data"].qpos[self.actuator_joint_mask_qpos], self.internal_state["data"].qvel[self.actuator_joint_mask_qvel]], axis=0)
         # state_diff = x_next_true - x_next_pred
         # print("State diff:", np.linalg.norm(state_diff))
@@ -428,6 +455,18 @@ class LocomotionEnv(gym.Env):
         terminated = self.termination_function.should_terminate() | np.any(np.abs(self.internal_state["data"].qvel[:3]) == 100.0)
         truncated = self.internal_state["info_episode_store"]["episode_step"] >= (self.horizon - 1)
         done = terminated | truncated
+
+        # FOR DOUBLE VISUALIZATION
+        if self.record_rollout and done:
+            rollout_path = Path("rollouts")
+            rollout_path.mkdir(exist_ok=True)
+
+            np.savez(
+                rollout_path / "episode_rollout.npz",
+                qpos=np.stack([s["qpos"] for s in self.rollout_buffer]),
+                qvel=np.stack([s["qvel"] for s in self.rollout_buffer]),
+            )
+
 
         self.terrain_function.post_step()
         self.reward_function.step()
