@@ -143,8 +143,6 @@ class NCBF_FFNN(nn.Module):
         # Scalar CBF output h(x)
         h = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
-        # h = nn.sigmoid(h)
-        # This output is used in the safety layer to calculate the gradient only, for prediction, use self.predict_with_sigmoid
         return jnp.squeeze(h, -1)  # shape ()
 
 

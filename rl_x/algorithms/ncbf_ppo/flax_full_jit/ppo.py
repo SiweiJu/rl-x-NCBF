@@ -187,9 +187,9 @@ class PPO:
                     2.0 * jnp.pi) - action_logstd).sum(1)
                 raw_processed_action = self.get_processed_action(action)
 
-                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in ncbf_state])
 
-                processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, observation[...,self.ncbf_observation_indices],
+                processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, observation,
                                                                                       params_stack)
                 value = self.critic.apply(critic_state.params, observation).squeeze(-1)
 
