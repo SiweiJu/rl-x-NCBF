@@ -585,14 +585,18 @@ class LocomotionEnv:
         # omit the base position from the ncbf observations
         actuator_qpos_idx = self.qpos_observation_idx[self.actuator_joint_mask_qpos]
         actuator_qvel_idx = self.qvel_observation_idx[self.actuator_joint_mask_qvel]
-        self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
-        # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
 
-        self.ncbf_obs_in_dynamics_state_idx = jnp.concatenate([
-            self.actuator_joint_mask_qpos,
-            self.actuator_joint_mask_qvel + self.initial_mj_model.nq
-        ], dtype=int
-        )
+        if self.env_config["ncbf_use_policy_observations"]:
+            # this is for the state and action model used in ncbf, which uses the same obs as the policy
+            self.ncbf_observation_indices = self.policy_observation_indices
+        else:
+            self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
+            # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
+            self.ncbf_obs_in_dynamics_state_idx = jnp.concatenate([
+                self.actuator_joint_mask_qpos,
+                self.actuator_joint_mask_qvel + self.initial_mj_model.nq
+            ], dtype=int
+            )
 
 
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
