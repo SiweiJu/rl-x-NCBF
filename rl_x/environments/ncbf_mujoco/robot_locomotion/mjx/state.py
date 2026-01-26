@@ -17,3 +17,5 @@ class State:
     info_episode_store: Dict[str, Any]
     internal_state: Dict[str, Any]
     key: jax.random.PRNGKey
+    last_action: jax.Array
+    last_state: jax.Array

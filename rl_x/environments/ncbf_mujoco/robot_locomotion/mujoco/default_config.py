@@ -9,6 +9,7 @@ def get_config(environment_name):
         "render": False,
         "train_robot": "unitree_go2",
         "control_type": "pd",
+        "ncbf_use_policy_observations": False,
         "command": {
             "type": "random",
             "sampling_type": "step_probability",

@@ -395,6 +395,11 @@ class LocomotionEnv(gym.Env):
         self.internal_state["imu_orientation_rotation_inverse"] = self.internal_state["imu_orientation_rotation"].inv()
         self.internal_state["imu_orientation_euler"] = self.internal_state["imu_orientation_rotation"].as_euler("xyz")
         self.internal_state["last_action"] = np.zeros(self.nr_actuator_joints)
+        self.internal_state["last_state"] = np.zeros(self.policy_observation_indices.shape[0])
+
+        self.internal_state["info"]["last_state"] = self.internal_state["last_state"].copy()
+        self.internal_state["info"]["last_action"] = self.internal_state["last_action"].copy()
+
         self.internal_state["second_last_action"] = np.zeros(self.nr_actuator_joints)
         self.reward_function.setup()
         self.domain_randomization_action_delay_function.setup()
@@ -407,6 +412,7 @@ class LocomotionEnv(gym.Env):
             "episode_total_xy_velocity_diff_abs": 0.0,
         }
         self.internal_state["safe_prediction"] = 1.0
+
 
         return next_observation, self.internal_state["info"]
 
@@ -461,18 +467,23 @@ class LocomotionEnv(gym.Env):
         truncated = self.internal_state["info_episode_store"]["episode_step"] >= (self.horizon - 1)
         done = terminated | truncated
 
+        last_state = self.internal_state["last_state"].copy()
+        last_action = self.internal_state["last_action"].copy()
+
         self.terrain_function.post_step()
         self.reward_function.step()
 
         self.internal_state["second_last_action"] = self.internal_state["last_action"].copy()
         self.internal_state["last_action"] = chosen_action.copy()
+        self.internal_state["last_state"] = next_observation.copy()
         self.internal_state["info_episode_store"]["episode_step"] += 1
         self.internal_state["info_episode_store"]["episode_return"] += reward
         self.internal_state["info_episode_store"]["episode_total_xy_velocity_diff_abs"] += self.internal_state["info"]["env_info/xy_vel_diff_abs"]
         self.internal_state["info"]["rollout/episode_return"] = np.where(done, self.internal_state["info_episode_store"]["episode_return"], self.internal_state["info"]["rollout/episode_return"])
         self.internal_state["info"]["rollout/episode_length"] = np.where(done, self.internal_state["info_episode_store"]["episode_step"], self.internal_state["info"]["rollout/episode_length"])
         self.internal_state["info"]["env_curriculum/coefficient"] = self.internal_state["env_curriculum_coeff"]
-
+        self.internal_state["info"]["last_state"] = last_state
+        self.internal_state["info"]["last_action"] = last_action
         if self.should_render:
             self.render()
 
@@ -610,7 +621,11 @@ class LocomotionEnv(gym.Env):
 
         actuator_qpos_idx = self.qpos_observation_idx[self.actuator_joint_mask_qpos]
         actuator_qvel_idx = self.qvel_observation_idx[self.actuator_joint_mask_qvel]
-        self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
+
+        if self.env_config.ncbf_use_policy_observations:
+            self.ncbf_observation_indices = self.policy_observation_indices
+        else:
+            self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
         # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
 
         self.ncbf_obs_in_dynamics_state_idx = np.concatenate([

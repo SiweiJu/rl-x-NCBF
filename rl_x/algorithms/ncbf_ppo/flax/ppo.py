@@ -96,7 +96,7 @@ class PPO:
         self.as_shape = env.single_action_space.shape
         
         self.policy, self.get_processed_action = get_policy(config, env)
-        self.ncbf, self.ncbf_apply, self.batched_ncbf_safety_layer, self.ncbf_safety_layer, self.system_dynamics_function = get_ncbf(config, env)
+        self.ncbf, self.ncbf_apply, self.batched_ncbf_safety_layer, self.ncbf_safety_layer = get_ncbf(config, env)
         self.critic = get_critic(config, env)
         self.replay_buffer = ReplayBuffer(capacity=config.algorithm.ncbf_buffer.buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=ncbf_key)
 
@@ -938,7 +938,7 @@ class PPO:
         # return
 
         # @jax.jit
-        def get_action(policy_state: TrainState, state: np.ndarray):
+        def get_action(policy_state: TrainState, state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray):
             action_mean, action_logstd = self.policy.apply(policy_state.params, state)
             raw_processed_action = self.get_processed_action(action_mean)
 
@@ -951,30 +951,39 @@ class PPO:
             raw_processed_action = raw_processed_action + jax.random.normal(action_offset_key,
                                                                     raw_processed_action.shape) * 1 * if_sampling
 
-            params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
-            safe_action, constraint_active, delta_u, x_next, h_u0 = self.batched_ncbf_safety_layer(raw_processed_action, state, params_stack)
-            return safe_action, raw_processed_action, constraint_active, delta_u, x_next, h_u0
+            if last_action is not None:
+                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+                safe_action, constraint_active, delta_u, x_next, h_u0 = self.batched_ncbf_safety_layer(raw_processed_action, state, last_action, last_state, params_stack)
+            else:
+                safe_action = raw_processed_action
+                constraint_active = jnp.array([0])
+                delta_u = jnp.array([0])
+                h_u0 = jnp.array([0])
+            return safe_action, raw_processed_action, constraint_active, delta_u, h_u0
 
         rollout_path = self.save_path.replace("models", "rollout")
         os.makedirs(rollout_path, exist_ok=True)
+        last_state = None
+        last_action = None
 
         rollouts = []
         self.set_eval_mode()
         for i in range(episodes):
             done = False
             episode_return = 0
-            state, _ = self.env.reset()
+            state, info = self.env.reset()
             self.env.envs[0].internal_state["safe_prediction"] = 1
-
+            last_state = np.stack(info["last_state"])
+            last_action = np.stack(info["last_action"])
 
             rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[],
                                 delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[], h_u0=[], x_next_true=[], x_next_pred=[], ret=[])
 
             while not done:
-                processed_action, raw_action, constraint_active, delta_u, x_next_pred, h_u0 = get_action(self.policy_state, state)
+                processed_action, raw_action, constraint_active, delta_u, h_u0 = get_action(self.policy_state, state, last_state, last_action)
 
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
-                h_input = jnp.concatenate([state[..., self.env.ncbf_obs_in_dynamics_state_idx], processed_action], axis=-1)
+                h_input = jnp.concatenate([state[:, self.env.envs[0].ncbf_observation_indices], processed_action], axis=-1)
                 prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, h_input)
 
                 # qpos = state[0, self.env.envs[0].qpos_observation_idx]
@@ -988,6 +997,9 @@ class PPO:
 
                 done = terminated | truncated
                 episode_return += reward
+
+                last_state = state
+                last_action = processed_action
 
                 # for debugging, check prediction error
                 # qpos = state[:, self.env.envs[0].qpos_observation_idx][:, self.env.envs[0].actuator_joint_mask_qpos]

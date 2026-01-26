@@ -274,7 +274,8 @@ class LocomotionEnv:
         reward = 0.0
         terminated = False
         truncated = False
-
+        last_action = jnp.zeros(self.nr_actuator_joints)
+        last_observation = next_observation
 
         internal_state = {
             "in_eval_mode": eval_mode,
@@ -288,6 +289,7 @@ class LocomotionEnv:
             "imu_orientation_euler": jnp.array([0.0, 0.0, 0.0]),
             "last_action": jnp.zeros(self.nr_actuator_joints),
             "second_last_action": jnp.zeros(self.nr_actuator_joints),
+            "last_state": last_observation,
             "joint_dropout_mask": jnp.ones(self.nr_actuator_joints, dtype=bool),
             "robot_dimensions_mean": self.robot_dimensions_mean,
             "max_command_velocity": jnp.minimum(self.robot_dimensions_mean * self.command_function.max_velocity_per_m_factor, self.command_function.clip_max_velocity),
@@ -312,7 +314,7 @@ class LocomotionEnv:
             "episode_total_xy_velocity_diff_abs": 0.0,
         }
 
-        state = State(mjx_model, data, next_observation, next_observation, reward, terminated, truncated, info, info_episode_store, internal_state, key)
+        state = State(mjx_model, data, next_observation, next_observation, reward, terminated, truncated, info, info_episode_store, internal_state, key, last_action, last_observation)
         
         return self._reset(state)
 
@@ -355,6 +357,7 @@ class LocomotionEnv:
         new_state.internal_state["imu_orientation_euler"] = new_state.internal_state["imu_orientation_rotation"].as_euler("xyz")
         new_state.internal_state["last_action"] = jnp.zeros(self.nr_actuator_joints)
         new_state.internal_state["second_last_action"] = jnp.zeros(self.nr_actuator_joints)
+        new_state.internal_state["last_state"] = jnp.zeros(self.single_observation_space.shape)
         self.reward_function.setup(new_state.internal_state)
         self.domain_randomization_action_delay_function.setup(new_state.internal_state)
         data, mjx_model = self.handle_domain_randomization(new_state.internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
@@ -373,7 +376,8 @@ class LocomotionEnv:
         new_state = new_state.replace(
             mjx_model=mjx_model,
             data=data,
-            next_observation=next_observation, actual_next_observation=next_observation,
+            next_observation=next_observation,
+            actual_next_observation=next_observation,
             reward=reward,
             terminated=terminated, truncated=truncated,
             info_episode_store=info_episode_store
@@ -430,8 +434,12 @@ class LocomotionEnv:
         data = self.terrain_function.post_step(data, mjx_model, state.internal_state, terrain_key)
         self.reward_function.step(data, state.internal_state)
 
+        last_state = state.internal_state["last_state"]
+        last_action = state.internal_state["last_action"]
+
         state.internal_state["second_last_action"] = state.internal_state["last_action"]
         state.internal_state["last_action"] = chosen_action
+        state.internal_state["last_state"] = next_observation
         state.info_episode_store["episode_step"] += 1
         state.info_episode_store["episode_return"] += reward
         state.info_episode_store["episode_total_xy_velocity_diff_abs"] += state.info["env_info/xy_vel_diff_abs"]
@@ -444,7 +452,7 @@ class LocomotionEnv:
             start_state = start_state.replace(actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated)
             return start_state
         def when_not_done(_):
-            return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated)
+            return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated, last_state=last_state, last_action=last_action)
         state = jax.lax.cond(done, when_done, when_not_done, None)
 
         return state
@@ -592,11 +600,12 @@ class LocomotionEnv:
         else:
             self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
             # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
-            self.ncbf_obs_in_dynamics_state_idx = jnp.concatenate([
-                self.actuator_joint_mask_qpos,
-                self.actuator_joint_mask_qvel + self.initial_mj_model.nq
-            ], dtype=int
-            )
+        # TODO get rid of htis after updating safety layer function based on q
+        self.ncbf_obs_in_dynamics_state_idx = jnp.concatenate([
+            self.actuator_joint_mask_qpos,
+            self.actuator_joint_mask_qvel + self.initial_mj_model.nq
+        ], dtype=int
+        )
 
 
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
