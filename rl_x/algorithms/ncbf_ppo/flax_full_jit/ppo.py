@@ -105,7 +105,7 @@ class PPO:
 
         if self.evaluation_and_save_frequency % self.batch_size != 0:
             raise ValueError("Evaluation and save frequency must be a multiple of batch size")
-        
+
         if self.nr_parallel_seeds > 1:
             raise ValueError("Parallel seeds are not supported yet. This is mainly limited by not being able to log mutliple wandb runs at the same time.")
 
@@ -169,7 +169,7 @@ class PPO:
             self.latest_model_file_name = "latest.model"
             self.latest_model_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 
- 
+
     def train(self):
         def jitable_train_function(key, parallel_seed_id):
 
@@ -286,9 +286,9 @@ class PPO:
                     # vmap_apply = jax.vmap(ncbf_state.apply_fn, in_axes=(None, 0))
                     h_input = jnp.concatenate([last_states[..., self.ncbf_observation_indices], last_actions], axis=-1)
                     h_input_next = jnp.concatenate([minib_obs[..., self.ncbf_observation_indices], minib_acts], axis=-1)
-                    # h_x = ncbf_state.apply_fn(params, h_input)  # [B]
+                    h_x = ncbf_state.apply_fn(params, h_input)  # [B]
                     h_xn = ncbf_state.apply_fn(params, h_input_next)  # [B]
-                    h_x = ncbf_state.apply_fn(params, h_input_next)  # [B]
+                    # h_x = ncbf_state.apply_fn(params, h_input_next)  # [B]
 
                     h_x = nn.sigmoid(h_x)
                     h_xn = nn.sigmoid(h_xn)
@@ -316,8 +316,13 @@ class PPO:
                     neg_mask = (1.0 - minib_y) * minib_mask  # only apply to unsafe samples
 
                     violation = jnp.maximum(0.0, cbf_decrease)  # ReLU(h_xn - h_x)
-                    cbf_loss = jnp.sum(neg_mask * violation) / (jnp.sum(neg_mask) + 1e-8)
+                    neg_cbf_loss = jnp.sum(neg_mask * violation) / (jnp.sum(neg_mask) + 1e-8)
 
+                    # if both x and x_n is safe, apply cbf to encourage h(x_n) >= h(x)
+                    pos_mask = minib_y * minib_mask * (minib_indices_to_term > self.ncbf_H)  # only apply to safe samples that will not terminate in next H steps
+                    pos_cbf_increase = jnp.maximum(0.0, -cbf_decrease)  # ReLU(h_x - h_xn)
+                    pos_cbf_loss = jnp.sum(pos_mask * pos_cbf_increase) / (jnp.sum(pos_mask) + 1e-8)
+                    cbf_loss = neg_cbf_loss + pos_cbf_loss
 
 
                     # (3) Lipschitz regularizer: fixed-size pair sampling from valid positions
@@ -453,6 +458,8 @@ class PPO:
                             y_target = y_target[perm]
                             masks = masks[perm]
                             indices_to_term = indices_to_term[perm]
+                            last_states = last_states[perm]
+                            last_actions = last_actions[perm]
                             return states, next_states, actions, y_target, masks, indices_to_term, last_states, last_actions
 
                         states, next_states, actions, y_targets, masks, indices_to_term, last_states, last_actions = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
@@ -768,7 +775,7 @@ class PPO:
                         new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
                         new_log_prob = new_log_prob.sum(1)
                         entropy = action_logstd + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e)
-                        
+
                         logratio = new_log_prob - log_prob_b
                         ratio = jnp.exp(logratio)
                         approx_kl_div = (ratio - 1) - logratio
@@ -777,9 +784,9 @@ class PPO:
                         pg_loss1 = -advantage_b * ratio
                         pg_loss2 = -advantage_b * jnp.clip(ratio, 1 - self.clip_range, 1 + self.clip_range)
                         pg_loss = jnp.maximum(pg_loss1, pg_loss2)
-                        
+
                         entropy_loss = entropy.sum(1)
-                        
+
                         # Critic loss
                         new_value = self.critic.apply(critic_params, state_b)
                         critic_loss = 0.5 * (new_value - return_b) ** 2
@@ -855,7 +862,7 @@ class PPO:
                         carry = (policy_state, critic_state, ncbf_state)
 
                         return carry, metrics
-                    
+
                     init_carry = (policy_state, critic_state, ncbf_state)
                     carry, optimization_metrics = jax.lax.scan(minibatch_update, init_carry, batch_indices)
                     policy_state, critic_state, ncbf_state = carry
@@ -890,7 +897,7 @@ class PPO:
 
                     ncbf_replay_buffer = (ncbf_pos_buffer, ncbf_neg_buffer)
                     return (policy_state, critic_state, ncbf_state, env_state, ncbf_replay_buffer, key), None
-                    
+
                 key, subkey = jax.random.split(key)
                 learning_iteration_carry, _ = jax.lax.scan(learning_iteration, (policy_state, critic_state, ncbf_state, env_state, ncbf_replay_buffer, subkey), jnp.arange(self.nr_updates_per_multi_learning_iteration))
                 policy_state, critic_state, ncbf_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
@@ -928,7 +935,7 @@ class PPO:
 
                     global_step = (multi_learning_iteration_step + 1) * self.nr_updates_per_multi_learning_iteration * self.nr_steps * self.nr_envs
                     jax.debug.callback(callback, (eval_metrics, global_step))
-                
+
 
                 # Saving
                 if self.save_model:
@@ -936,11 +943,11 @@ class PPO:
                         self.save(policy_state, critic_state, ncbf_state)
                     jax.debug.callback(save_with_check, policy_state, critic_state, ncbf_state)
 
-                
+
                 return (policy_state, critic_state, ncbf_state, env_state, ncbf_replay_buffer, key), None
 
             jax.lax.scan(multi_learning_and_eval_save_iteration, (policy_state, critic_state, ncbf_state, env_state, ncbf_replay_buffer, key), jnp.arange(self.nr_multi_learning_and_eval_save_iterations))
-            
+
 
         self.key, subkey = jax.random.split(self.key)
         seed_keys = jax.random.split(subkey, self.nr_parallel_seeds)
@@ -949,14 +956,14 @@ class PPO:
         self.start_time = deepcopy(self.last_time)
         jax.block_until_ready(train_function(seed_keys, jnp.arange(self.nr_parallel_seeds)))
         rlx_logger.info(f"Average time: {max([time.time() - t for t in self.start_time]):.2f} s")
-    
+
 
     def log(self, name, value, step):
         if self.track_tb:
             self.writer.add_scalar(name, value, step)
         if self.track_console:
             self.log_console(name, value)
-    
+
 
     def log_console(self, name, value):
         value = np.format_float_positional(value, trim="-")
@@ -993,7 +1000,7 @@ class PPO:
 
         if self.track_wandb:
             wandb.save(f"{self.save_path}/{self.latest_model_file_name}", base_path=self.save_path)
-    
+
 
     def load(config, env, run_path, writer, explicitly_set_algorithm_params):
         splitted_path = config.runner.load_model.split("/")
@@ -1001,7 +1008,7 @@ class PPO:
         checkpoint_file_name = splitted_path[-1]
         shutil.unpack_archive(f"{checkpoint_dir}/{checkpoint_file_name}", f"{checkpoint_dir}/tmp", "zip")
         checkpoint_dir = f"{checkpoint_dir}/tmp"
-        
+
         loaded_algorithm_config = json.load(open(f"{checkpoint_dir}/config_algorithm.json", "r"))
         for key, value in loaded_algorithm_config.items():
             if f"algorithm.{key}" not in explicitly_set_algorithm_params and key in config.algorithm:

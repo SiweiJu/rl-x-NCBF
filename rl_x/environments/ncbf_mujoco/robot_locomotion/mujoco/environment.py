@@ -634,6 +634,8 @@ class LocomotionEnv(gym.Env):
         ], dtype=int
         )
 
+        self.act_in_policy_obs_idx = jnp.where(jnp.isin(self.policy_observation_indices, self.joint_previous_actions_obs_idx))[0]
+
         observation_space_low = -np.ones(current_observation_idx) * np.inf
         observation_space_high = np.ones(current_observation_idx) * np.inf
 

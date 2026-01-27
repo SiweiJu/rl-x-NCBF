@@ -350,14 +350,16 @@ class LocomotionEnv:
                 -1
             )
         )
+        last_action = jnp.zeros(self.nr_actuator_joints)
+        last_state = jnp.zeros(self.single_observation_space.shape)
         new_state.internal_state["env_curriculum_coeff"] =  jnp.clip(new_state.internal_state["env_curriculum_coeff"] + new_state.internal_state["env_curriculum_levels_in_a_row"] / self.env_curriculum_nr_levels, 0.0, 1.0)
         new_state.internal_state["env_curriculum_coeff"] = jnp.where(new_state.internal_state["in_eval_mode"], 1.0, new_state.internal_state["env_curriculum_coeff"])
         new_state.internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
         new_state.internal_state["imu_orientation_rotation_inverse"] = new_state.internal_state["imu_orientation_rotation"].inv()
         new_state.internal_state["imu_orientation_euler"] = new_state.internal_state["imu_orientation_rotation"].as_euler("xyz")
-        new_state.internal_state["last_action"] = jnp.zeros(self.nr_actuator_joints)
+        new_state.internal_state["last_action"] = last_action
         new_state.internal_state["second_last_action"] = jnp.zeros(self.nr_actuator_joints)
-        new_state.internal_state["last_state"] = jnp.zeros(self.single_observation_space.shape)
+        new_state.internal_state["last_state"] = last_state
         self.reward_function.setup(new_state.internal_state)
         self.domain_randomization_action_delay_function.setup(new_state.internal_state)
         data, mjx_model = self.handle_domain_randomization(new_state.internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
@@ -380,7 +382,9 @@ class LocomotionEnv:
             actual_next_observation=next_observation,
             reward=reward,
             terminated=terminated, truncated=truncated,
-            info_episode_store=info_episode_store
+            info_episode_store=info_episode_store,
+            last_state=last_state,
+            last_action=last_action,
         )
 
         return new_state
@@ -435,7 +439,7 @@ class LocomotionEnv:
         self.reward_function.step(data, state.internal_state)
 
         last_state = state.internal_state["last_state"]
-        last_action = state.internal_state["last_action"]
+        last_action = chosen_action
 
         state.internal_state["second_last_action"] = state.internal_state["last_action"]
         state.internal_state["last_action"] = chosen_action
@@ -572,6 +576,7 @@ class LocomotionEnv:
             self.policy_exteroception_obs_idx,
         ], dtype=int)
 
+
         self.critic_observation_indices = jnp.concatenate([
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
@@ -599,6 +604,7 @@ class LocomotionEnv:
             self.ncbf_observation_indices = self.policy_observation_indices
         else:
             self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
+
             # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
         # TODO get rid of htis after updating safety layer function based on q
         self.ncbf_obs_in_dynamics_state_idx = jnp.concatenate([
@@ -606,6 +612,7 @@ class LocomotionEnv:
             self.actuator_joint_mask_qvel + self.initial_mj_model.nq
         ], dtype=int
         )
+        self.act_in_ncbf_obs_idx = jnp.where(jnp.isin(self.ncbf_observation_indices, self.joint_previous_actions_obs_idx))[0]
 
 
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
