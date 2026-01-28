@@ -676,9 +676,9 @@ class PPO:
                     # step set to zero for pretrian logging
                     self.start_logging(0)
                     metrics = carry
-                    # for key, value in metrics.items():
-                        # self.log(f"{key}", np.asarray(value), 0)
-                    wandb.log(metrics, step=0)
+                    for key, value in metrics.items():
+                        self.log(f"{key}", np.asarray(value), 0)
+                    # wandb.log(metrics, step=0)
                     self.end_logging()
 
                 jax.debug.callback(pretrain_callback, ncbf_metrics)
@@ -890,9 +890,9 @@ class PPO:
                         self.last_time[parallel_seed_id] = current_time
                         global_step = int(metrics["steps/nr_env_steps"])
                         self.start_logging(global_step)
-                        # for key, value in metrics.items():
-                        #     self.log(f"{key}", np.asarray(value), global_step)
-                        wandb.log(metrics, step=global_step)
+                        for key, value in metrics.items():
+                            self.log(f"{key}", np.asarray(value), global_step)
+                        # wandb.log(metrics, step=global_step)
                         self.end_logging()
 
                     jax.debug.callback(callback, (combined_metrics, parallel_seed_id))
@@ -965,6 +965,7 @@ class PPO:
             self.writer.add_scalar(name, value, step)
         if self.track_console:
             self.log_console(name, value)
+
 
 
     def log_console(self, name, value):
