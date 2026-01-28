@@ -278,7 +278,6 @@ class Runner:
 
     def _train(self, _):
         self.init_config()
-
         if self._config.runner.track_wandb:
             import wandb
             wandb.init(
@@ -287,7 +286,7 @@ class Runner:
                 group=self._config.runner.exp_name,
                 name=self._config.runner.run_name,
                 notes=self._config.runner.notes,
-                sync_tensorboard=True,
+                sync_tensorboard=False,
                 config=self._config.to_dict(),
                 monitor_gym=True,
                 save_code=True,
