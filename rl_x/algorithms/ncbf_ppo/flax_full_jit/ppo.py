@@ -274,8 +274,7 @@ class PPO:
                 trunc_done = dones & (~terminates)
                 any_done_next_H, _ = _future_trunc_within_H(terminates, trunc_done)
                 mask = ~any_done_next_H
-
-                mask = jnp.logical_and(mask, undefined_interval)
+                mask = jnp.logical_and(mask, ~undefined_interval)
 
                 return y, mask, dists_to_next_term
 
@@ -559,8 +558,7 @@ class PPO:
 
                     return jax.lax.fori_loop(0, states.shape[0], body_fun, buffer)
 
-                pos_mask = y_target == 1.0
-
+                pos_mask = y_target
                 neg_mask = ~pos_mask
 
                 new_pos_buffer = write_to_buffer(pos_buffer, pos_mask & masks)
@@ -679,12 +677,22 @@ class PPO:
                     # process the batch data to get mask and y_target
                     y_target, masks, indices_to_term = window_any_done_next_H(dones, terminations)
 
+                    # def dbg(arrs):
+                    #     y, m = arrs
+                    #     print("mean_y:", np.asarray(jnp.mean(y)),
+                    #           "mean_mask:", np.asarray(jnp.mean(m)),
+                    #           "pos_kept:", np.asarray(jnp.sum(y & m)),
+                    #           "pos_total:", np.asarray(jnp.sum(y)),
+                    #           "mask_on_pos:", np.asarray(jnp.mean(m[y])) if np.asarray(jnp.sum(y)) > 0 else -1)
+                    #
+                    # jax.debug.callback(dbg, (y_target, masks))
+
                     ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
                         ncbf_pos_buffer, ncbf_neg_buffer,
                         states, next_states, actions, dones, terminations, y_target, masks, indices_to_term)
 
-                    mean_indices_to_term_pos_rollout = jnp.sum(indices_to_term * masks * (y_target==1.0)) / (jnp.sum(masks * (y_target==1.0)) + 1e-8)
-                    mean_indices_to_term_neg_rollout = jnp.sum(indices_to_term * masks * (y_target==0.0)) / (jnp.sum(masks * (y_target==0.0)) + 1e-8)
+                    mean_indices_to_term_pos_rollout = jnp.sum(indices_to_term * masks * y_target) / (jnp.sum(masks * y_target) + 1e-8)
+                    mean_indices_to_term_neg_rollout = jnp.sum(indices_to_term * masks * ~y_target) / (jnp.sum(masks * ~y_target) + 1e-8)
 
                     # train ncbf
                     ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_pos_buffer, ncbf_neg_buffer, key,
