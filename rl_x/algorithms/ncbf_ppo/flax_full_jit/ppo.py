@@ -240,7 +240,14 @@ class PPO:
                     return any_next_H, dists
 
                 any_term_next_H, dists_to_next_term = _future_terms_within_H(terminates, dones)
-                y = ~any_term_next_H
+                # y = ~any_term_next_H
+
+                # baseline with safefall
+                # indices > 150: safe
+                # indices <= 5: unsafe
+                # inbetween: mask out for training (not include in loss calculation) since they are in a gray area where safety is uncertain and also have very few samples
+                y = jnp.where(dists_to_next_term > 150, True, False)
+                undefined_interval = (dists_to_next_term > 5) & (dists_to_next_term <= 150)
 
                 def _future_trunc_within_H(terms, truncs):
                     # set mask to false if any truncation (either timely trauncation or at the end of each env rollouts)
@@ -267,6 +274,8 @@ class PPO:
                 trunc_done = dones & (~terminates)
                 any_done_next_H, _ = _future_trunc_within_H(terminates, trunc_done)
                 mask = ~any_done_next_H
+
+                mask = jnp.logical_and(mask, undefined_interval)
 
                 return y, mask, dists_to_next_term
 
