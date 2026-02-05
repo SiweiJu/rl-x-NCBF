@@ -50,6 +50,9 @@ def get_config(algorithm_name):
     config.ncbf.pretrain.nr_steps = 2    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
     config.ncbf.pretrain.nr_minibatches = 100
 
+    config.ncbf.safe_fall_H = 5
+
+
     config.ncbf_buffer = config_dict.ConfigDict()
     config.ncbf_buffer.pos_buffer_size = 10 # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions
     config.ncbf_buffer.neg_buffer_size = 10

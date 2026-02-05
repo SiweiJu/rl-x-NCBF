@@ -59,6 +59,8 @@ def get_config(algorithm_name):
     config.ncbf_buffer.negative_buffer_size = int(1e6)
     config.ncbf_buffer.neg_sampling_ratio = 0.5 # ratio of sampling from negative buffer
 
+    config.ncbf.safe_fall_H = 5
+
     config.action_noise_sampling_ratio = 0.0  # ratio of sampling actions for ncbf evaluation
     config.rollout_save_name = "rollouts"       #  default name for rollout saving
     return config

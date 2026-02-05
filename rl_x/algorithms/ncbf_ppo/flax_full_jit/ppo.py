@@ -65,6 +65,7 @@ class PPO:
 
         self.ncbf_n_ensemble = config.algorithm.ncbf.n_ensemble
         self.ncbf_H = config.algorithm.ncbf.H
+        self.ncbf_safe_fall_H = config.algorithm.ncbf.safe_fall_H
         self.ncbf_gamma_c = config.algorithm.ncbf.gamma_c
         self.ncbf_w_clf = config.algorithm.ncbf.w_clf
         self.ncbf_w_cbf = config.algorithm.ncbf.w_cbf
@@ -216,6 +217,7 @@ class PPO:
                                        0 means terminate at t; cap (=H+1) means none within episode horizon
                 """
                 H = self.ncbf_H  # must be a Python int for good jit behavior
+                ncbf_safe_fall_H = self.ncbf_safe_fall_H
                 cap = jnp.int32(H + 10)
 
                 dones = dones.at[-1, :].set(True)
@@ -239,7 +241,10 @@ class PPO:
                     return any_next_H, dists
 
                 any_term_next_H, dists_to_next_term = _future_terms_within_H(terminates, dones)
-                y = ~any_term_next_H
+                safe = dists_to_next_term > H + 1
+                notdefined = jnp.logical_and(dists_to_next_term <= H, dists_to_next_term > ncbf_safe_fall_H)
+                unsafe = dists_to_next_term <= ncbf_safe_fall_H
+                y = safe
 
                 def _future_trunc_within_H(terms, truncs):
                     # set mask to false if any truncation (either timely trauncation or at the end of each env rollouts)
@@ -266,6 +271,8 @@ class PPO:
                 trunc_done = dones & (~terminates)
                 any_done_next_H, _ = _future_trunc_within_H(terminates, trunc_done)
                 mask = ~any_done_next_H
+
+                mask = mask & (~notdefined)
 
                 return y, mask, dists_to_next_term
 
