@@ -466,6 +466,10 @@ class LocomotionEnv:
         # feet ground contact appears twice in the observation, one normalized for critic, one originaly for forward dynamics model
         feet_ground_contact = self.terrain_function.check_feet_floor_contact(data)
 
+        # omit unactuated joints from observation
+        qpos = jnp.concatenate([data.qpos[:7], data.qpos[self.actuator_joint_mask_qpos]], axis=0)
+        qvel = jnp.concatenate([data.qvel[:6], data.qvel[self.actuator_joint_mask_qvel]], axis=0)
+
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
             data.qvel[self.actuator_joint_mask_qvel],
@@ -479,8 +483,8 @@ class LocomotionEnv:
             internal_state["imu_orientation_rotation_inverse"].apply(jnp.array([0.0, 0.0, -1.0])),
             jnp.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             jnp.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
-            data.qpos, # qpos all not normalized, base pose can be dummy for deployment
-            data.qvel, # qvel all not normalized
+            qpos, # qpos all not normalized, base pose can be dummy for deployment
+            qvel, # qvel all not normalized
             feet_ground_contact
         ])
 
@@ -563,8 +567,8 @@ class LocomotionEnv:
         self.qvel_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 6)])
         current_observation_idx += self.nr_actuator_joints + 6
 
-        self.contact_obs_idx = jnp.array([current_observation_idx + i for i in range(4)])
-        current_observation_idx += 4
+        self.contact_obs_idx = jnp.array([current_observation_idx + i for i in range(self.nr_feet)])
+        current_observation_idx += self.nr_feet
 
         self.policy_observation_indices = jnp.concatenate([
             self.joint_positions_obs_idx,
