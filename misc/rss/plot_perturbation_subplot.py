@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+IEEEtran-style figure, but ONLY plotting the last two experiments:
+  - perturbation (flat terrain)
+  - perturbation_hfield (heightfield terrain)
+
+Row 1: success rate vs chosen x (mean ± std over entry folders)
+Row 2: avg return  vs chosen x (mean ± std over entry folders)
+
+Other formatting/placements are kept unchanged, except:
+  - figure is now 2x2 (since only 2 experiments)
+  - default width set to IEEE single-column width (~3.5in)
+  - different color set for methods
+"""
+
+import argparse
+from pathlib import Path
+from typing import List, Optional, Tuple, Dict
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# --- NEW: paper-friendly color set (Okabe–Ito inspired) ---
+COLORSET = [
+    "#0072B2",  # blue
+    "#E69F00",  # orange
+    "#009E73",  # green
+    "#CC79A7",  # purple
+    "#56B4E9",  # light blue
+    "#D55E00",  # vermillion
+    "#F0E442",  # yellow
+    "#000000",  # black
+]
+
+exp_name_table = {
+    "action_noise_2": "Action Noise - Flat Terrain",
+    "action_noise_hfield": "Action Noise - Heightfield Terrain",
+    "perturbation": "Perturbation - Flat Terrain",
+    "perturbation_hfield": "Perturbation - Heightfield Terrain",
+}
+
+# --- ONLY these two experiments ---
+TARGET_EXPERIMENTS = ["perturbation", "perturbation_hfield"]
+
+LEGEND_NAME_MAP = {
+    "ours": "best (H = 25)",
+    "NCBF": "H = 1",
+    "H50": "H = 50",
+    "H10": "H = 10",
+}
+
+
+def map_legend_label(name: str) -> str:
+    if name in LEGEND_NAME_MAP:
+        return LEGEND_NAME_MAP[name]
+    low = name.lower()
+    for k, v in LEGEND_NAME_MAP.items():
+        if low == k.lower():
+            return v
+    return name
+
+
+def apply_ieee_style() -> None:
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        "font.size": 8,
+        "axes.titlesize": 8,
+        "axes.labelsize": 8,
+        "legend.fontsize": 7,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
+        "axes.linewidth": 0.6,
+        "lines.linewidth": 1.4,
+        "lines.markersize": 3.2,
+        "grid.linewidth": 0.4,
+        "savefig.dpi": 300,
+        "figure.dpi": 150,
+    })
+
+
+def _to_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def _ensure_finished_rate(df: pd.DataFrame) -> pd.DataFrame:
+    if "finished_rate" in df.columns and df["finished_rate"].notna().any():
+        return df
+    if "finished_count" in df.columns and "n_episodes" in df.columns:
+        df["finished_rate"] = df["finished_count"] / df["n_episodes"].replace(0, np.nan)
+        return df
+    if "finished_episodes(>=thr)" in df.columns and "n_episodes" in df.columns:
+        df["finished_rate"] = df["finished_episodes(>=thr)"] / df["n_episodes"].replace(0, np.nan)
+        return df
+    raise ValueError(
+        "Could not compute finished_rate. Need one of:\n"
+        "  - finished_rate\n"
+        "  - finished_count + n_episodes\n"
+        "  - finished_episodes(>=thr) + n_episodes"
+    )
+
+
+def infer_runroot_experiment_entry_from_file(p: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    try:
+        parts = Path(p).parts
+        for i in range(len(parts) - 3):
+            if parts[i] == "experiments" and parts[i + 1] == "runs":
+                run_root = parts[i + 2] if i + 2 < len(parts) else None
+                experiment = parts[i + 3] if i + 3 < len(parts) else None
+                entry = parts[i + 4] if i + 4 < len(parts) else None
+                return run_root, experiment, entry
+        return None, None, None
+    except Exception:
+        return None, None, None
+
+
+def _read_one_csv(path: Path, x_candidates: List[str]) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    if "file" not in df.columns:
+        raise ValueError(f"{path} missing required column: file")
+
+    numeric_cols = ["avg_return", "gamma", "n_episodes", "finished_count", "finished_episodes(>=thr)", "finished_rate"]
+    numeric_cols += [c for c in x_candidates if c in df.columns]
+    df = _to_numeric(df, numeric_cols)
+
+    if "avg_return" not in df.columns:
+        raise ValueError(f"{path} missing required column: avg_return")
+
+    df = _ensure_finished_rate(df)
+
+    triples = df["file"].astype(str).map(infer_runroot_experiment_entry_from_file)
+    df["run_root"] = [t[0] for t in triples]
+    df["experiment"] = [t[1] for t in triples]
+    df["entry_name"] = [t[2] for t in triples]
+    df = df.dropna(subset=["run_root", "experiment", "entry_name"]).copy()
+    return df
+
+
+def pick_xcol_for_experiment(df_union: pd.DataFrame, exp: str, x_candidates: List[str]) -> Optional[str]:
+    sub = df_union[df_union["experiment"].astype(str) == str(exp)]
+    for c in x_candidates:
+        if c in sub.columns:
+            vals = sub[c].dropna().unique()
+            if len(vals) >= 2:
+                return c
+    for c in x_candidates:
+        if c in sub.columns and sub[c].dropna().shape[0] > 0:
+            return c
+    return None
+
+
+def aggregate_mean_std_over_entries(df: pd.DataFrame, xcol: str, ycol: str) -> pd.DataFrame:
+    tmp = df[[xcol, ycol, "entry_name"]].dropna(subset=[xcol, ycol, "entry_name"]).copy()
+    if tmp.empty:
+        return pd.DataFrame(columns=[xcol, "mean", "std", "n_entries"])
+
+    per_entry = (
+        tmp.groupby(["entry_name", xcol], dropna=False)[ycol]
+        .mean()
+        .reset_index()
+        .rename(columns={ycol: "entry_mean"})
+    )
+
+    out = (
+        per_entry.groupby(xcol, dropna=False)["entry_mean"]
+        .agg(mean="mean", std="std", n_entries="count")
+        .reset_index()
+    )
+    out["std"] = out["std"].fillna(0.0)
+    return out
+
+
+def _sorted_unique_numeric(s: pd.Series) -> List[float]:
+    xs = pd.to_numeric(s, errors="coerce").dropna().astype(float).unique().tolist()
+    return sorted(set(float(x) for x in xs))
+
+
+def draw_subplot(ax: plt.Axes,
+                 series_list: List[pd.DataFrame],
+                 labels: List[str],
+                 colors: List[str],
+                 xcol: str,
+                 ylabel: str,
+                 title: str,
+                 y_is_rate: bool,
+                 show_ylabel: bool) -> None:
+    ax.set_title(title, pad=2.0)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.35)
+    ax.grid(False, axis="x")
+
+    all_x: List[float] = []
+    for s in series_list:
+        if xcol in s.columns and not s.empty:
+            all_x.extend(_sorted_unique_numeric(s[xcol]))
+    x_vals = np.array(sorted(set(all_x)), dtype=float)
+    if x_vals.size == 0:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+        return
+
+    for s, lab, col in zip(series_list, labels, colors):
+        if s.empty or xcol not in s.columns:
+            continue
+        s2 = s.copy()
+        s2[xcol] = pd.to_numeric(s2[xcol], errors="coerce")
+        s2 = s2.dropna(subset=[xcol]).sort_values(xcol)
+
+        mean_map = {float(r): float(m) for r, m in zip(s2[xcol].tolist(), s2["mean"].tolist())}
+        std_map = {float(r): float(sd) for r, sd in zip(s2[xcol].tolist(), s2["std"].tolist())}
+
+        y_mean = np.array([mean_map.get(float(r), np.nan) for r in x_vals], dtype=float)
+        y_std = np.array([std_map.get(float(r), np.nan) for r in x_vals], dtype=float)
+
+        ax.plot(x_vals, y_mean, marker="o", color=col, label=lab)
+        ax.fill_between(
+            x_vals,
+            y_mean - y_std / 2.236,
+            y_mean + y_std / 2.236,
+            color=col,
+            alpha=0.18,
+            linewidth=0,
+        )
+
+    if ylabel == "avg. return":
+        ax.set_xlabel("sampling probability")
+        ax.set_xticks(x_vals)
+        ax.set_xticklabels([f"{r:g}" for r in x_vals])
+    else:
+        ax.set_xticklabels([])
+
+    if show_ylabel:
+        ax.set_ylabel(ylabel)
+        ax.tick_params(axis="y", labelleft=True)   # <- add this
+
+    else:
+        ax.set_ylabel("")
+        ax.tick_params(axis="y", labelleft=False)
+
+    if y_is_rate:
+        ax.set_ylim(-0.02, 1.02)
+
+
+def main():
+    apply_ieee_style()
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("csvs", nargs="+")
+    ap.add_argument("--labels", nargs="*", default=None)
+    ap.add_argument("--x_candidates", nargs="*", default=["sampling_prob"],
+                    help="Ordered list of possible x columns. First with variation is used per experiment.")
+    ap.add_argument("--out", type=str, default="/home/siwei/Pictures/RSS2026/exps_H.pdf")
+    ap.add_argument("--no_show", action="store_true")
+    ap.add_argument("--runroot_filter", type=str, default=None)
+    ap.add_argument("--experiment_filter", type=str, default=None)
+    ap.add_argument("--fig_width_in", type=float, default=3.5)  # --- NEW: IEEE single-column width ---
+    args = ap.parse_args()
+
+    csv_paths = [Path(p).expanduser().resolve() for p in args.csvs]
+    for p in csv_paths:
+        if not p.is_file():
+            raise SystemExit(f"CSV not found: {p}")
+
+    labels = args.labels
+    if not labels or len(labels) != len(csv_paths):
+        labels = [p.stem for p in csv_paths]
+
+    labels = [map_legend_label(lab) for lab in labels]
+    colors = [COLORSET[i % len(COLORSET)] for i in range(len(labels))]
+
+    dfs_all: List[pd.DataFrame] = []
+    for p in csv_paths:
+        df = _read_one_csv(p, args.x_candidates)
+
+        if args.runroot_filter:
+            df = df[df["run_root"].astype(str).str.contains(args.runroot_filter, na=False)]
+        if args.experiment_filter:
+            df = df[df["experiment"].astype(str).str.contains(args.experiment_filter, na=False)]
+
+        dfs_all.append(df)
+
+    df_union = pd.concat(dfs_all, ignore_index=True)
+    if df_union.empty:
+        raise SystemExit("No data after loading/filtering.")
+
+    # --- NEW: fixed to last two experiments only ---
+    experiments = [e for e in TARGET_EXPERIMENTS if e in set(df_union["experiment"].astype(str).unique())]
+    if len(experiments) != 2:
+        raise SystemExit(f"Expected experiments {TARGET_EXPERIMENTS}, found: {experiments}")
+
+    # pick xcol per experiment
+    exp_to_xcol: Dict[str, str] = {}
+    for exp in experiments:
+        xcol = pick_xcol_for_experiment(df_union, exp, args.x_candidates)
+        if xcol is None:
+            raise SystemExit(
+                f"Could not pick x column for experiment '{exp}'. "
+                f"None of {args.x_candidates} present with data."
+            )
+        exp_to_xcol[exp] = xcol
+
+    # aggregate series
+    series_finish_by_exp: Dict[str, List[pd.DataFrame]] = {}
+    series_return_by_exp: Dict[str, List[pd.DataFrame]] = {}
+
+    for exp in experiments:
+        xcol = exp_to_xcol[exp]
+        s_fin: List[pd.DataFrame] = []
+        s_ret: List[pd.DataFrame] = []
+        for df in dfs_all:
+            sub = df[df["experiment"].astype(str) == str(exp)].copy()
+            if sub.empty or xcol not in sub.columns:
+                s_fin.append(pd.DataFrame(columns=[xcol, "mean", "std", "n_entries"]))
+                s_ret.append(pd.DataFrame(columns=[xcol, "mean", "std", "n_entries"]))
+            else:
+                s_fin.append(aggregate_mean_std_over_entries(sub, xcol, "finished_rate"))
+                s_ret.append(aggregate_mean_std_over_entries(sub, xcol, "avg_return"))
+        series_finish_by_exp[exp] = s_fin
+        series_return_by_exp[exp] = s_ret
+
+    # --- NEW: 2x2 figure (2 experiments) ---
+    fig_w = float(args.fig_width_in)
+    fig_h = 2  # keep unchanged
+    fig, axes = plt.subplots(2, 2, figsize=(fig_w, fig_h), sharex=False)
+
+    # top row: success rate
+    for j, exp in enumerate(experiments):
+        xcol = exp_to_xcol[exp]
+        draw_subplot(
+            ax=axes[0, j],
+            series_list=series_finish_by_exp[exp],
+            labels=labels,
+            colors=colors,
+            xcol=xcol,
+            ylabel="success rate",
+            title=f"{exp_name_table[exp]}",
+            y_is_rate=True,
+            show_ylabel=(j == 0),
+        )
+
+    # bottom row: avg return
+    for j, exp in enumerate(experiments):
+        xcol = exp_to_xcol[exp]
+        draw_subplot(
+            ax=axes[1, j],
+            series_list=series_return_by_exp[exp],
+            labels=labels,
+            colors=colors,
+            xcol=xcol,
+            ylabel="avg. return",
+            title="",
+            y_is_rate=False,
+            show_ylabel=(j == 0),
+        )
+
+    # shared legend (unchanged placement logic)
+    handles, leg_labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            leg_labels,
+            loc="upper center",
+            ncol=min(len(labels), 5),
+            frameon=False,
+            bbox_to_anchor=(0.5, 1.02),
+        )
+
+    plt.subplots_adjust(left=0.12, right=0.995, top=0.87, bottom=0.25, wspace=0.1, hspace=0.08)
+
+    out_path = Path(args.out).expanduser().resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    print(f"Wrote: {out_path}")
+    print("Per-experiment x-axis:", {k: v for k, v in exp_to_xcol.items()})
+
+    if args.no_show:
+        plt.close(fig)
+    else:
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
