@@ -64,7 +64,7 @@ class LocomotionEnv(gym.Env):
         if self.should_render:
             # add the safety light
             trunk = xml_handle.find("body", "trunk")
-            trunk.add("geom", name="safety_light", pos="0 0 0.2", type="sphere", dclass="visual", size="0.05", rgba="1 0 0 1")
+            trunk.add("geom", name="safety_light", pos="0 0 1", type="sphere", dclass="visual", size="0.05", rgba="1 0 0 1", group="0")
             # light_vec = xml_handle.find("body", "safety_light_body")
             # light_vec.add("site", name="safety_light", type="sphere", size="0.2", pos="0 0 0.6", rgba="0 1 0 1")
             #
@@ -491,6 +491,9 @@ class LocomotionEnv(gym.Env):
 
 
     def get_observation(self, action):
+        qpos = np.concatenate([self.internal_state["data"].qpos[:7], self.internal_state["data"].qpos[self.actuator_joint_mask_qpos]], axis=0)
+        qvel = np.concatenate([self.internal_state["data"].qvel[:6], self.internal_state["data"].qvel[self.actuator_joint_mask_qvel]], axis=0)
+
         feet_ground_contact = self.terrain_function.check_feet_floor_contact()
         observation = np.concatenate([
             self.internal_state["data"].qpos[self.actuator_joint_mask_qpos],
@@ -505,8 +508,8 @@ class LocomotionEnv(gym.Env):
             self.internal_state["imu_orientation_rotation_inverse"].apply(np.array([0.0, 0.0, -1.0])),
             np.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation()]).reshape(-1),
             np.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation()]).reshape(-1),
-            self.internal_state["data"].qpos,    # qpos all
-            self.internal_state["data"].qvel,    # qvel all
+            qpos,    # qpos all
+            qvel,    # qvel all
             feet_ground_contact,
         ])
 
@@ -587,8 +590,8 @@ class LocomotionEnv(gym.Env):
         self.qvel_observation_idx = np.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 6)])
         current_observation_idx += self.nr_actuator_joints + 6
 
-        self.contact_obs_idx = np.array([current_observation_idx + i for i in range(4)])
-        current_observation_idx += 4
+        self.contact_obs_idx = np.array([current_observation_idx + i for i in range(self.nr_feet)])
+        current_observation_idx += self.nr_feet
 
         self.policy_observation_indices = np.concatenate([
             self.joint_positions_obs_idx,
@@ -619,12 +622,12 @@ class LocomotionEnv(gym.Env):
             self.qvel_observation_idx,
         ])
 
-        actuator_qpos_idx = self.qpos_observation_idx[self.actuator_joint_mask_qpos]
-        actuator_qvel_idx = self.qvel_observation_idx[self.actuator_joint_mask_qvel]
-
         if self.env_config.ncbf_use_policy_observations:
             self.ncbf_observation_indices = self.policy_observation_indices
         else:
+            actuator_qpos_idx = self.qpos_observation_idx[self.actuator_joint_mask_qpos]
+            actuator_qvel_idx = self.qvel_observation_idx[self.actuator_joint_mask_qvel]
+
             self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
         # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
 
@@ -633,8 +636,6 @@ class LocomotionEnv(gym.Env):
             self.actuator_joint_mask_qvel + self.initial_mj_model.nq
         ], dtype=int
         )
-
-        self.act_in_policy_obs_idx = jnp.where(jnp.isin(self.policy_observation_indices, self.joint_previous_actions_obs_idx))[0]
 
         observation_space_low = -np.ones(current_observation_idx) * np.inf
         observation_space_high = np.ones(current_observation_idx) * np.inf
