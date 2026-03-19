@@ -11,6 +11,7 @@ def get_config(environment_name):
         "train_robot": "unitree_go2",
         "control_type": "pd",
         "ncbf_use_policy_observations": False,
+        "nr_history_steps": 10,
         "command": {
             "type": "random",
             "sampling_type": "step_probability",

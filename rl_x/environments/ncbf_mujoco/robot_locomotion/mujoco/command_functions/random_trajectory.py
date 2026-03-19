@@ -15,11 +15,20 @@ class RandomTrajectoryCommands:
         self.default_actuator_joint_keep_nominal = np.array(self.default_actuator_joint_keep_nominal)
 
         self.trajectory_length = int(self.env.env_config["command"].get("trajectory_length_in_seconds", 10) / self.env.dt)
-        self.min_steps_each_command = self.env.env_config["command"].get("min_steps_each_command", 50)
+        self.min_steps_each_command = self.env.env_config["command"].get("min_steps_each_command", 400)
+
+        self.random_command_traj_path = "/home/siwei/Documents/repos/rl-x-NCBF-q/misc/random_trajs"
+        self.random_traj_id = 0
 
     def init(self):
         self.env.internal_state["actuator_joint_keep_nominal"] = self.default_actuator_joint_keep_nominal
         self._generate_random_trajectory()
+        # self._generate_random_trajectories_and_save(50)
+        # self._load_random_trajectory(self.random_traj_id)
+
+    def _load_random_trajectory(self, traj_id):
+        self.command_trajectory = np.load(f"{self.random_command_traj_path}/random_traj_{traj_id}.npy")
+        self.command_index = 0
 
     # generate a random velocity command at the start
     def _sample_single_command(self):
@@ -40,6 +49,11 @@ class RandomTrajectoryCommands:
         goal_velocities = np.where(mask_single_zero, 0.0, goal_velocities)
 
         return goal_velocities
+
+    def _generate_random_trajectories_and_save(self, num_trajectories):
+        for i in range(num_trajectories):
+            self._generate_random_trajectory()
+            np.save(f"{self.random_command_traj_path}/random_traj_{i}.npy", self.command_trajectory)
 
     def _generate_random_trajectory(self):
         """Generate a full random trajectory of length self.trajectory_length."""

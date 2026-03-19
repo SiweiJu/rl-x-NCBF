@@ -54,4 +54,14 @@ def get_config(algorithm_name):
     config.ncbf_buffer.pos_buffer_size = 10 # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions
     config.ncbf_buffer.neg_buffer_size = 10
     config.ncbf_buffer.neg_sampling_ratio = 0.5 # ratio of sampling from negative buffer
+
+    config.next_step_predictor = config_dict.ConfigDict()
+    config.next_step_predictor.lr = 1e-3
+    config.next_step_predictor.nr_minibatches = 50
+    config.next_step_predictor.pretrain_nr_steps = 2
+    config.next_step_predictor.pretrain_nr_minibatches = 100
+    config.next_step_predictor.history_encoder_type = 'FFNN'  # 'FFNN' or 'GRU'
+    config.next_step_predictor.history_encoder_hidden_size = 128
+    config.next_step_predictor.decoder_output_dim = None  # Will be set to observation_dim at runtime
+
     return config

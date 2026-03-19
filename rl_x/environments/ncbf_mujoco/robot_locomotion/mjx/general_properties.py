@@ -10,3 +10,5 @@ class GeneralProperties:
     data_interface_type = DataInterfaceType.JAX
 
     simulation_type = SimulationType.JAX_BASED
+
+    nr_history_steps = int

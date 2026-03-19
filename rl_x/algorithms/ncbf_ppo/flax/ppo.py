@@ -963,8 +963,6 @@ class PPO:
 
         rollout_path = self.save_path.replace("models", "rollout")
         os.makedirs(rollout_path, exist_ok=True)
-        last_state = None
-        last_action = None
 
         rollouts = []
         self.set_eval_mode()
@@ -976,6 +974,8 @@ class PPO:
             last_state = np.stack(info["last_state"])
             last_action = np.stack(info["last_action"])
 
+            # hard coded load commands
+            # self.env.envs[0].command_function._load_random_trajectory(i)
             rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[],
                                 delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[], h_u0=[], x_next_true=[], x_next_pred=[], ret=[])
 

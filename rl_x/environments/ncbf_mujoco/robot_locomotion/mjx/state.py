@@ -19,3 +19,4 @@ class State:
     key: jax.random.PRNGKey
     last_action: jax.Array
     last_state: jax.Array
+    history_stack: jax.Array

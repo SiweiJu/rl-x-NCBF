@@ -41,6 +41,7 @@ class LocomotionEnv:
         self.env_config = env_config
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.nr_envs = nr_envs
+        self.nr_history_steps = env_config["nr_history_steps"]
 
         xml_path = (self.robot_config["directory_path"] / "data" / "plane.xml").as_posix()
         xml_handle = mjcf.from_path(xml_path)
@@ -276,6 +277,7 @@ class LocomotionEnv:
         truncated = False
         last_action = jnp.zeros(self.nr_actuator_joints)
         last_observation = next_observation
+        history_stack = jnp.zeros((self.env_config["nr_history_steps"], self.single_observation_space.shape[0]))
 
         internal_state = {
             "in_eval_mode": eval_mode,
@@ -294,6 +296,7 @@ class LocomotionEnv:
             "robot_dimensions_mean": self.robot_dimensions_mean,
             "max_command_velocity": jnp.minimum(self.robot_dimensions_mean * self.command_function.max_velocity_per_m_factor, self.command_function.clip_max_velocity),
             "nr_collisions_in_nominal": 0,
+            "history_stack": history_stack,
         }
         self.command_function.init(internal_state)
         self.reward_function.init(internal_state, mjx_model)
@@ -314,7 +317,7 @@ class LocomotionEnv:
             "episode_total_xy_velocity_diff_abs": 0.0,
         }
 
-        state = State(mjx_model, data, next_observation, next_observation, reward, terminated, truncated, info, info_episode_store, internal_state, key, last_action, last_observation)
+        state = State(mjx_model, data, next_observation, next_observation, reward, terminated, truncated, info, info_episode_store, internal_state, key, last_action, last_observation, history_stack)
         
         return self._reset(state)
 
@@ -350,6 +353,7 @@ class LocomotionEnv:
                 -1
             )
         )
+        history_stack = jnp.zeros((self.env_config["nr_history_steps"], self.single_observation_space.shape[0]))
         last_action = jnp.zeros(self.nr_actuator_joints)
         last_state = jnp.zeros(self.single_observation_space.shape)
         new_state.internal_state["env_curriculum_coeff"] =  jnp.clip(new_state.internal_state["env_curriculum_coeff"] + new_state.internal_state["env_curriculum_levels_in_a_row"] / self.env_curriculum_nr_levels, 0.0, 1.0)
@@ -360,6 +364,7 @@ class LocomotionEnv:
         new_state.internal_state["last_action"] = last_action
         new_state.internal_state["second_last_action"] = jnp.zeros(self.nr_actuator_joints)
         new_state.internal_state["last_state"] = last_state
+        new_state.internal_state["history_stack"] = history_stack
         self.reward_function.setup(new_state.internal_state)
         self.domain_randomization_action_delay_function.setup(new_state.internal_state)
         data, mjx_model = self.handle_domain_randomization(new_state.internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
@@ -385,6 +390,7 @@ class LocomotionEnv:
             info_episode_store=info_episode_store,
             last_state=last_state,
             last_action=last_action,
+            history_stack=history_stack,
         )
 
         return new_state
@@ -440,10 +446,14 @@ class LocomotionEnv:
 
         last_state = state.internal_state["last_state"]
         last_action = chosen_action
+        history_stack = state.internal_state["history_stack"]
 
         state.internal_state["second_last_action"] = state.internal_state["last_action"]
         state.internal_state["last_action"] = chosen_action
         state.internal_state["last_state"] = next_observation
+        state.internal_state["history_stack"] = jnp.roll(history_stack, -1, axis=0).at[-1].set(next_observation)
+
+
         state.info_episode_store["episode_step"] += 1
         state.info_episode_store["episode_return"] += reward
         state.info_episode_store["episode_total_xy_velocity_diff_abs"] += state.info["env_info/xy_vel_diff_abs"]
@@ -456,7 +466,7 @@ class LocomotionEnv:
             start_state = start_state.replace(actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated)
             return start_state
         def when_not_done(_):
-            return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated, last_state=last_state, last_action=last_action)
+            return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated, last_state=last_state, last_action=last_action, history_stack=history_stack)
         state = jax.lax.cond(done, when_done, when_not_done, None)
 
         return state
@@ -618,7 +628,12 @@ class LocomotionEnv:
         )
         self.act_in_ncbf_obs_idx = jnp.where(jnp.isin(self.ncbf_observation_indices, self.joint_previous_actions_obs_idx))[0]
 
-
+        self.next_state_indices = jnp.concatenate([
+            self.qvel_observation_idx[:3],
+            self.joint_positions_obs_idx,
+            self.joint_velocities_obs_idx,
+        ], dtype=int
+        )
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
 
 
