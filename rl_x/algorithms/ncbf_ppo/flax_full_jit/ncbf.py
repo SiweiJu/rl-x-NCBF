@@ -44,9 +44,9 @@ def get_ncbf(config, env):
 
     # dummy
     if ncbf_clipping:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
     else:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, phi: (action_raw, jnp.array(False), jnp.array(0.0))
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -57,7 +57,7 @@ def get_ncbf(config, env):
     batched_get_safe_action = jax.jit(
         jax.vmap(
             safety_layer_function_for_batch,
-            in_axes=(0, 0, 0, 0, None),  # action_raw[env], obs_t[env], same phi for items in the batch
+            in_axes=(0, 0, 0, 0, 0, None),  # action_raw[env], obs_t[env], same phi for items in the batch
             out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
         )
     )
@@ -73,6 +73,7 @@ def get_ensemble_forward_pass(apply_fn):
     def ensemble_forward_pass(params_stack, input):
         """
         one step forward pass through an ensemble of networks, 1 input
+        input is a tuple of (observation, and history latent)
         """
         # Vectorized apply over ensemble, then take mean
         predictions = jax.vmap(lambda p: apply_fn(p, input))(params_stack)
@@ -153,7 +154,7 @@ def make_get_safe_action(
         return eta_cbf * s
 
     @jax.jit
-    def a_and_c_from_linearization(obs_t: Array, u0: Array, obs_last, u_last, phi: dict):
+    def a_and_c_from_linearization(obs_t: Array, u0: Array, obs_last, u_last, latent_z, phi: dict):
         """
         Compute:
           a = d/du h_phi(x_{t+1}(u)) | u0
@@ -166,14 +167,14 @@ def make_get_safe_action(
         x_last = obs_last[ncbf_obs_from_obs_idx]
 
         def q_of_u(u):
-            q_input = jnp.concatenate([x_t, u], axis=-1)
+            q_input = jnp.concatenate([x_t, u, latent_z], axis=-1)
             q, _, _ = ncbf_apply(phi, q_input)
             return q  # scalar-ish # note here phis is parameter stack for the ensemble
 
         a = jax.grad(q_of_u)(u0)
 
-        h_x, h_x_std, _ = ncbf_apply(phi, jnp.concatenate([x_last, u_last], axis=-1))
-        h_u0, h_u0_std, _ = ncbf_apply(phi, jnp.concatenate([x_t, u0], axis=-1))
+        h_x, h_x_std, _ = ncbf_apply(phi, jnp.concatenate([x_last, u_last, latent_z], axis=-1))
+        h_u0, h_u0_std, _ = ncbf_apply(phi, jnp.concatenate([x_t, u0, latent_z], axis=-1))
 
         c_lin = h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0) - h_u0
         return a, c_lin, h_x, h_u0, h_u0_std
@@ -184,12 +185,13 @@ def make_get_safe_action(
         obs_t: Array,
         last_action: Array,
         last_obs: Array,
+        latent_z: Array,
         phis: dict
     ) -> Tuple[Array, Array, Array]:
 
         action_raw = jax.lax.cond(action_clipping, lambda x: jnp.clip(x, act_low, act_high), lambda x: x, action_raw)
 
-        a, c, h_x, h_u0, h_u0_std = a_and_c_from_linearization(obs_t, action_raw, last_obs, last_action, phis)
+        a, c, h_x, h_u0, h_u0_std = a_and_c_from_linearization(obs_t, action_raw, last_obs, last_action, latent_z, phis)
 
         aTa = jnp.dot(a, a) + 1e-12
         aTu = jnp.dot(a, action_raw)
