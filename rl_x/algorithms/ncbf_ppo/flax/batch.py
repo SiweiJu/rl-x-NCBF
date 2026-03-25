@@ -1,6 +1,6 @@
 class Batch:
     def __init__(self, states, next_states, actions, rewards, values, dones, terminations, log_probs, advantages, returns,
-                 masks, y_targets, constraint_violated, delta_u):
+                 masks, y_targets, constraint_violated, delta_u, history_stacks):
         self.states = states
         self.next_states = next_states
         self.actions = actions
@@ -15,3 +15,4 @@ class Batch:
         self.y_targets = y_targets
         self.constraint_violated = constraint_violated
         self.delta_u = delta_u
+        self.history_stacks = history_stacks
