@@ -10,7 +10,9 @@
     <geom solref="-1000 -80" contype="0" conaffinity="0" group="1"/>
     <joint damping="0.01" armature="0.01" frictionloss="0.1"/>
     <position forcelimited="true" kp="45" kv="1.0"/>
-
+    <default class="visual">
+      <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+    </default>
     <default class="foot">
       <geom type="box" size="0.095 0.027 0.004" solimp="0.015 1 0.004" pos="0.034 0.0 -0.03" priority="1" condim="6" friction="1.0 0.005 0.0001" group="4"/>
       <site pos="0.034 0.0 -0.03"/>
