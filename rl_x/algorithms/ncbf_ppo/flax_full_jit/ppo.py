@@ -588,7 +588,7 @@ class PPO:
                     actions_pos = pos_buffer["actions"][pos_indices]
                     dones_pos = pos_buffer["dones"][pos_indices]
                     terminations_pos = pos_buffer["terminations"][pos_indices]
-                    history_stack_pos = pos_buffer["history_stack"]
+                    history_stack_pos = pos_buffer["history_stack"][pos_indices]
                     masks_pos = jnp.logical_or(dones_pos, terminations_pos)
 
                     obs_neg = neg_buffer["states"][neg_indices]
@@ -596,7 +596,7 @@ class PPO:
                     actions_neg = neg_buffer["actions"][neg_indices]
                     dones_neg = neg_buffer["dones"][neg_indices]
                     terminations_neg = neg_buffer["terminations"][neg_indices]
-                    history_stack_neg = neg_buffer["history_stack"]
+                    history_stack_neg = neg_buffer["history_stack"][neg_indices]
                     masks_neg = jnp.logical_or(dones_neg, terminations_neg)
 
                     obs = jnp.concatenate([obs_pos, obs_neg], axis=0)
