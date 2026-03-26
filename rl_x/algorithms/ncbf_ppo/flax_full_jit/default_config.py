@@ -61,7 +61,7 @@ def get_config(algorithm_name):
     config.next_step_predictor.pretrain_nr_steps = 2
     config.next_step_predictor.pretrain_nr_minibatches = 100
     config.next_step_predictor.history_encoder_type = 'FFNN'  # 'FFNN' or 'GRU'
-    config.next_step_predictor.history_encoder_hidden_size = 128
+    config.next_step_predictor.history_encoder_hidden_size = 64
     config.next_step_predictor.decoder_output_dim = None  # Will be set to observation_dim at runtime
 
     return config
