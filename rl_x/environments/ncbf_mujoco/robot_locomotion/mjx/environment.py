@@ -276,9 +276,9 @@ class LocomotionEnv:
         terminated = False
         truncated = False
         last_action = jnp.zeros(self.nr_actuator_joints)
-        last_observation = next_observation
-        history_stack = jnp.zeros((self.env_config["nr_history_steps"], self.single_observation_space.shape[0]))
+        history_stack = jnp.tile(next_observation[None, :], (self.nr_history_steps, 1))
 
+        last_observation = next_observation
         internal_state = {
             "in_eval_mode": eval_mode,
             "env_curriculum_coeff": jnp.where(eval_mode, 1.0, 0.0),
@@ -340,10 +340,15 @@ class LocomotionEnv:
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=jnp.zeros(self.nr_actuator_joints))
         # data = mjx.forward(self.initial_mjx_model, data)
 
+        history_stack = jnp.zeros((self.env_config["nr_history_steps"], self.single_observation_space.shape[0]))
+        last_action = jnp.zeros(self.nr_actuator_joints)
+        last_state = jnp.zeros(self.single_observation_space.shape)
+
         new_state = state
+        new_internal_state = dict(new_state.internal_state)
 
         episode_success = new_state.info_episode_store["episode_return"] >= self.env_curriculum_level_success_episode_return
-        new_state.internal_state["env_curriculum_levels_in_a_row"] = jnp.where(episode_success,
+        new_internal_state["env_curriculum_levels_in_a_row"] = jnp.where(episode_success,
             jnp.where(new_state.internal_state["env_curriculum_levels_in_a_row"] >= 0,
                 new_state.internal_state["env_curriculum_levels_in_a_row"] + 1,
                 1
@@ -353,20 +358,18 @@ class LocomotionEnv:
                 -1
             )
         )
-        history_stack = jnp.zeros((self.env_config["nr_history_steps"], self.single_observation_space.shape[0]))
-        last_action = jnp.zeros(self.nr_actuator_joints)
-        last_state = jnp.zeros(self.single_observation_space.shape)
-        new_state.internal_state["env_curriculum_coeff"] =  jnp.clip(new_state.internal_state["env_curriculum_coeff"] + new_state.internal_state["env_curriculum_levels_in_a_row"] / self.env_curriculum_nr_levels, 0.0, 1.0)
-        new_state.internal_state["env_curriculum_coeff"] = jnp.where(new_state.internal_state["in_eval_mode"], 1.0, new_state.internal_state["env_curriculum_coeff"])
-        new_state.internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
-        new_state.internal_state["imu_orientation_rotation_inverse"] = new_state.internal_state["imu_orientation_rotation"].inv()
-        new_state.internal_state["imu_orientation_euler"] = new_state.internal_state["imu_orientation_rotation"].as_euler("xyz")
-        new_state.internal_state["last_action"] = last_action
-        new_state.internal_state["second_last_action"] = jnp.zeros(self.nr_actuator_joints)
-        new_state.internal_state["last_state"] = last_state
-        new_state.internal_state["history_stack"] = history_stack
-        self.reward_function.setup(new_state.internal_state)
-        self.domain_randomization_action_delay_function.setup(new_state.internal_state)
+        new_internal_state["env_curriculum_coeff"] =  jnp.clip(new_internal_state["env_curriculum_coeff"] + new_state.internal_state["env_curriculum_levels_in_a_row"] / self.env_curriculum_nr_levels, 0.0, 1.0)
+        new_internal_state["env_curriculum_coeff"] = jnp.where(new_internal_state["in_eval_mode"], 1.0, new_state.internal_state["env_curriculum_coeff"])
+        new_internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
+        new_internal_state["imu_orientation_rotation_inverse"] = new_state.internal_state["imu_orientation_rotation"].inv()
+        new_internal_state["imu_orientation_euler"] = new_internal_state["imu_orientation_rotation"].as_euler("xyz")
+        new_internal_state["last_action"] = last_action
+        new_internal_state["second_last_action"] = jnp.zeros(self.nr_actuator_joints)
+        new_internal_state["last_state"] = last_state
+        new_internal_state["history_stack"] = history_stack
+
+        self.reward_function.setup(new_internal_state)
+        self.domain_randomization_action_delay_function.setup(new_internal_state)
         data, mjx_model = self.handle_domain_randomization(new_state.internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
 
         next_observation = self.get_observation(data, mjx_model, new_state.internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
@@ -391,6 +394,7 @@ class LocomotionEnv:
             last_state=last_state,
             last_action=last_action,
             history_stack=history_stack,
+            internal_state=new_internal_state,
         )
 
         return new_state
@@ -448,25 +452,35 @@ class LocomotionEnv:
         last_action = chosen_action
         history_stack = state.internal_state["history_stack"]
 
-        state.internal_state["second_last_action"] = state.internal_state["last_action"]
-        state.internal_state["last_action"] = chosen_action
-        state.internal_state["last_state"] = next_observation
-        state.internal_state["history_stack"] = jnp.roll(history_stack, -1, axis=0).at[-1].set(next_observation)
+        new_internal_state = dict(state.internal_state)
+        new_internal_state["second_last_action"] = state.internal_state["last_action"]
+        new_internal_state["last_action"] = chosen_action
+        new_internal_state["last_state"] = last_state
+        new_internal_state["history_stack"] = jnp.roll(history_stack, -1, axis=0).at[-1].set(next_observation)
+
+        new_info_episode_store = dict(state.info_episode_store)
+        new_info_episode_store["episode_step"] += 1
+        new_info_episode_store["episode_return"] += reward
+        new_info_episode_store["episode_total_xy_velocity_diff_abs"] = state.info["env_info/xy_vel_diff_abs"]
+
+        new_info = dict(state.info)
+        new_info["rollout/episode_return"] = jnp.where(done, state.info_episode_store["episode_return"],
+                                                         state.info["rollout/episode_return"])
+        new_info["rollout/episode_length"] = jnp.where(done, state.info_episode_store["episode_step"],
+                                                         state.info["rollout/episode_length"])
+        new_info["env_curriculum/coefficient"] = state.internal_state["env_curriculum_coeff"]
 
 
-        state.info_episode_store["episode_step"] += 1
-        state.info_episode_store["episode_return"] += reward
-        state.info_episode_store["episode_total_xy_velocity_diff_abs"] += state.info["env_info/xy_vel_diff_abs"]
-        state.info["rollout/episode_return"] = jnp.where(done, state.info_episode_store["episode_return"], state.info["rollout/episode_return"])
-        state.info["rollout/episode_length"] = jnp.where(done, state.info_episode_store["episode_step"], state.info["rollout/episode_length"])
-        state.info["env_curriculum/coefficient"] = state.internal_state["env_curriculum_coeff"]
+        state = state.replace(internal_state=new_internal_state, info=new_info, info_episode_store=new_info_episode_store)
 
         def when_done(_):
             start_state = self._reset(state)
             start_state = start_state.replace(actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated)
             return start_state
         def when_not_done(_):
-            return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated, last_state=last_state, last_action=last_action, history_stack=history_stack)
+            return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation,
+                                 reward=reward, terminated=terminated, truncated=truncated,
+                                 last_state=last_state, last_action=last_action, history_stack=history_stack)
         state = jax.lax.cond(done, when_done, when_not_done, None)
 
         return state
