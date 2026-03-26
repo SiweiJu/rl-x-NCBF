@@ -226,7 +226,7 @@ class PPO:
                 env_state = self.env.step(env_state, processed_action)
                 done = env_state.terminated | env_state.truncated
                 transition = (observation, env_state.actual_next_observation, action, env_state.reward, value,
-                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, env_state.last_state, env_state.last_action, env_state.history_stack)
+                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, env_state.last_state, env_state.last_action)
 
                 if self.render:
                     def render(env_state):
@@ -465,7 +465,6 @@ class PPO:
                             indices_to_term_pos = pos_buffer["indices_to_term"][pos_indices]
                             last_state_pos = pos_buffer["last_state"][pos_indices]
                             last_action_pos = pos_buffer["last_action"][pos_indices]
-                            history_stacks_pos = pos_buffer["history_stack"][pos_indices]
 
                             states_neg = neg_buffer["states"][neg_indices]
                             next_states_neg = neg_buffer["next_states"][neg_indices]
@@ -475,7 +474,6 @@ class PPO:
                             indices_to_term_neg = neg_buffer["indices_to_term"][neg_indices]
                             last_state_neg = neg_buffer["last_state"][neg_indices]
                             last_action_neg = neg_buffer["last_action"][neg_indices]
-                            history_stacks_neg = neg_buffer["history_stack"][neg_indices]
 
                             states = jnp.concatenate([states_pos, states_neg], axis=0)
                             next_states = jnp.concatenate([next_states_pos, next_states_neg], axis=0)
@@ -485,7 +483,6 @@ class PPO:
                             indices_to_term = jnp.concatenate([indices_to_term_pos, indices_to_term_neg], axis=0)
                             last_states = jnp.concatenate([last_state_pos, last_state_neg], axis=0)
                             last_actions = jnp.concatenate([last_action_pos, last_action_neg], axis=0)
-                            history_stacks = jnp.concatenate([history_stacks_pos, history_stacks_neg], axis=0)
 
                             # shuffle
                             perm_key, _ = jax.random.split(key)
@@ -497,10 +494,12 @@ class PPO:
                             indices_to_term = indices_to_term[perm]
                             last_states = last_states[perm]
                             last_actions = last_actions[perm]
-                            history_stacks = history_stacks[perm]
-                            return states, next_states, actions, y_target, masks, indices_to_term, last_states, last_actions, history_stacks
+                            return states, next_states, actions, y_target, masks, indices_to_term, last_states, last_actions
 
-                        states, next_states, actions, y_targets, masks, indices_to_term, last_states, last_actions, history_stacks = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
+                        states, next_states, actions, y_targets, masks, indices_to_term, last_states, last_actions = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
+
+                        # reconstruct history_stack from here
+                        # TODO
 
                         latent = encoder_state.apply_fn(encoder_state.params, history_stacks)
 
@@ -587,7 +586,6 @@ class PPO:
                     actions_pos = pos_buffer["actions"][pos_indices]
                     dones_pos = pos_buffer["dones"][pos_indices]
                     terminations_pos = pos_buffer["terminations"][pos_indices]
-                    history_stack_pos = pos_buffer["history_stack"][pos_indices]
                     masks_pos = jnp.logical_or(dones_pos, terminations_pos)
 
                     obs_neg = neg_buffer["states"][neg_indices]
@@ -595,13 +593,11 @@ class PPO:
                     actions_neg = neg_buffer["actions"][neg_indices]
                     dones_neg = neg_buffer["dones"][neg_indices]
                     terminations_neg = neg_buffer["terminations"][neg_indices]
-                    history_stack_neg = neg_buffer["history_stack"][neg_indices]
                     masks_neg = jnp.logical_or(dones_neg, terminations_neg)
 
                     obs = jnp.concatenate([obs_pos, obs_neg], axis=0)
                     next_obs = jnp.concatenate([next_obs_pos, next_obs_neg], axis=0)
                     actions = jnp.concatenate([actions_pos, actions_neg], axis=0)
-                    history_stack = jnp.concatenate([history_stack_pos, history_stack_neg], axis=0)
                     masks = jnp.concatenate([masks_pos, masks_neg], axis=0)
                     masks = ~masks  # we want masks to indicate valid samples (not done or terminated)
 
@@ -611,9 +607,8 @@ class PPO:
                     obs = obs[perm]
                     next_obs = next_obs[perm]
                     actions = actions[perm]
-                    history_stack = history_stack[perm]
                     masks = masks[perm]
-                    return obs, next_obs, actions, masks, history_stack
+                    return obs, next_obs, actions, masks
 
                 @jax.jit
                 def loss_fn(encoder_params, decoder_params, minib_obs, minib_next_obs, minib_actions, minib_masks, minib_history_stack):
@@ -631,7 +626,10 @@ class PPO:
                 def minibatch_update(carry, _):
                     encoder_state, decoder_state, key = carry
                     predictor_key, key = jax.random.split(key)
-                    states, next_states, actions, masks, history_stack = sample_minibatch(pos_buffer, neg_buffer, predictor_key)
+                    states, next_states, actions, masks = sample_minibatch(pos_buffer, neg_buffer, predictor_key)
+
+                    # TODO reconstruct history_stack here
+
                     loss, grads = grad_predictor_loss_fn(
                         encoder_state.params,
                         decoder_state.params,
@@ -832,8 +830,9 @@ class PPO:
                     ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_pos_buffer, ncbf_neg_buffer, key,
                                                                          self.ncbf_nr_minibatches)
 
-                    encoder_state, decoder_state, predictor_metrics, key = train_next_step_predictor(
-                        encoder_state, decoder_state, ncbf_pos_buffer, ncbf_neg_buffer, key, self.next_step_predictor_nr_minibatches)
+                    # no training, load pretrained encoder
+                    # encoder_state, decoder_state, predictor_metrics, key = train_next_step_predictor(
+                    #     encoder_state, decoder_state, ncbf_pos_buffer, ncbf_neg_buffer, key, self.next_step_predictor_nr_minibatches)
 
 
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
