@@ -16,9 +16,6 @@ from flax.training import orbax_utils
 import orbax.checkpoint
 import optax
 import wandb
-from jax import lax
-from numpy.ma.core import indices
-from tensorflow.python.training.training_util import global_step
 
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.general_properties import GeneralProperties
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.policy import get_policy
@@ -315,19 +312,13 @@ class PPO:
                 """
 
                 @jax.jit
-                def loss_fn(params, minib_obs, minib_nxt, minib_acts, minib_y, minib_mask, minib_indices_to_term, last_states, last_actions, minib_history_stack):
+                def loss_fn(params, minib_obs, minib_nxt, minib_acts, minib_y, minib_mask, minib_indices_to_term, last_states, last_actions, minib_latent, minib_latent_next):
                     # vmap_apply = jax.vmap(ncbf_state.apply_fn, in_axes=(None, 0))
                     h_input = jnp.concatenate([minib_obs[..., self.ncbf_observation_indices], last_actions], axis=-1)
                     h_input_next = jnp.concatenate([minib_nxt[..., self.ncbf_observation_indices], minib_acts], axis=-1)
 
-                    latent = encoder_state.apply_fn(encoder_state.params, minib_history_stack)
-                    # the history stack of the previous step should be calculated by appending minib_nxt to the second dimension on the minib_history stack
-                    # Remove the first observation in history and append the next observation
-                    minib_history_stack_next = jnp.concatenate([minib_history_stack[:, 1:, :], minib_obs[:, None, :]], axis=1)
-                    latent_next = encoder_state.apply_fn(encoder_state.params, minib_history_stack_next)
-
-                    h_input = jnp.concatenate((h_input, latent), axis=-1)
-                    h_input_next = jnp.concatenate((h_input_next, latent_next), axis=-1)
+                    h_input = jnp.concatenate((h_input, minib_latent), axis=-1)
+                    h_input_next = jnp.concatenate((h_input_next, minib_latent_next), axis=-1)
 
                     h_x = ncbf_state.apply_fn(params, h_input)  # [B]
                     h_xn = ncbf_state.apply_fn(params, h_input_next)  # [B]
@@ -511,6 +502,13 @@ class PPO:
 
                         states, next_states, actions, y_targets, masks, indices_to_term, last_states, last_actions, history_stacks = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
 
+                        latent = encoder_state.apply_fn(encoder_state.params, history_stacks)
+
+                        # Remove the first observation in history and append the next observation
+                        minib_history_stack_next = jnp.concatenate(
+                            [history_stacks[:, 1:, :], states[:, None, :]], axis=1)
+                        latent_next = encoder_state.apply_fn(encoder_state.params, minib_history_stack_next)
+
                         (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
                             ncbf_state.params,
                             states,
@@ -521,7 +519,8 @@ class PPO:
                             indices_to_term,
                             last_states,
                             last_actions,
-                            history_stacks
+                            latent,
+                            latent_next,
                         )
                         metrics["grad_norm"] = optax.global_norm(ncbf_grads)
                         new_state = ncbf_state.apply_gradients(grads=ncbf_grads)
@@ -867,9 +866,8 @@ class PPO:
                     advantages, returns = calculate_gae_advantages(critic_state, next_states, rewards, values, terminations, history_stack)
 
                     # Optimizing
-                    def loss_fn(policy_params, critic_params, ncbf_state, encoder_state, state_b, action_b, log_prob_b, return_b, advantage_b, last_state_b, last_action_b, history_stack_b):
+                    def loss_fn(policy_params, critic_params, ncbf_state, state_b, action_b, log_prob_b, return_b, advantage_b, last_state_b, last_action_b, latent_b):
                         # Policy loss
-                        latent_b = encoder_state.apply_fn(encoder_state.params, history_stack_b)
                         action_mean, action_logstd = self.policy.apply(policy_params, state_b, latent_b)
                         action_std = jnp.exp(action_logstd)
                         new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
@@ -924,8 +922,9 @@ class PPO:
                     batch_last_states = last_state.reshape((-1,) + self.os_shape)
                     batch_last_actions = last_action.reshape((-1,) + self.as_shape)
                     batch_history_stack = history_stack.reshape((-1,) + (self.nr_history_steps, ) + self.os_shape)
+                    batch_latents = encoder_state.apply_fn(encoder_state.params, batch_history_stack)
 
-                    vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
+                    vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
                     safe_mean = lambda x: jnp.mean(x) if x is not None else x
                     mean_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
                     grad_loss_fn = jax.value_and_grad(mean_loss_fn, argnums=(0, 1), has_aux=True)
@@ -945,7 +944,6 @@ class PPO:
                             policy_state.params,
                             critic_state.params,
                             ncbf_state,
-                            encoder_state,
                             batch_states[minibatch_indices],
                             batch_actions[minibatch_indices],
                             batch_log_probs[minibatch_indices],
@@ -953,7 +951,7 @@ class PPO:
                             minibatch_advantages,
                             batch_last_states[minibatch_indices],
                             batch_last_actions[minibatch_indices],
-                            batch_history_stack[minibatch_indices],
+                            batch_latents[minibatch_indices],
                         )
 
                         policy_state = policy_state.apply_gradients(grads=policy_gradients)
