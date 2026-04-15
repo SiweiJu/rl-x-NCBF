@@ -340,7 +340,6 @@ class LocomotionEnv:
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=jnp.zeros(self.nr_actuator_joints))
         # data = mjx.forward(self.initial_mjx_model, data)
 
-        history_stack = jnp.zeros((self.env_config["nr_history_steps"], self.single_observation_space.shape[0]))
         last_action = jnp.zeros(self.nr_actuator_joints)
         last_state = jnp.zeros(self.single_observation_space.shape)
 
@@ -366,7 +365,6 @@ class LocomotionEnv:
         new_internal_state["last_action"] = last_action
         new_internal_state["second_last_action"] = jnp.zeros(self.nr_actuator_joints)
         new_internal_state["last_state"] = last_state
-        new_internal_state["history_stack"] = history_stack
 
         self.reward_function.setup(new_internal_state)
         self.domain_randomization_action_delay_function.setup(new_internal_state)
@@ -381,6 +379,9 @@ class LocomotionEnv:
             "episode_step": 0,
             "episode_total_xy_velocity_diff_abs": 0.0,
         }
+
+        history_stack = jnp.tile(next_observation[None, :], (self.nr_history_steps, 1))
+        new_internal_state["history_stack"] = history_stack
 
         # Reset everything besides parts of the internal_state, info and the key
         new_state = new_state.replace(
