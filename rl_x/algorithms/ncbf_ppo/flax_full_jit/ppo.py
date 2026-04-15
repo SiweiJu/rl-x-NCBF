@@ -718,6 +718,7 @@ class PPO:
                                                            self.nr_pretrain_steps)
                 policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key = single_rollout_carry
                 states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_state, last_action, history_stacks= batch
+                next_step_prediction_mask = ~ jnp.logical_or(terminations, dones)
 
                 # process the batch data to get mask and y_target
                 y_target, masks, indices_to_term = window_any_done_next_H(dones, terminations)
@@ -746,7 +747,7 @@ class PPO:
 
             if self.next_step_predictor_pretrain_steps > 0:
                 encoder_state, decoder_state, predictor_metrics, key = train_next_step_predictor(
-                    encoder_state, decoder_state, states, next_states, actions, masks, history_stacks, key, self.next_step_predictor_pretrain_nr_minibatches)
+                    encoder_state, decoder_state, states, next_states, actions, next_step_prediction_mask, history_stacks, key, self.next_step_predictor_pretrain_nr_minibatches)
                 predictor_pretrain_metrics = tree.map_structure(lambda x: jnp.mean(x), predictor_metrics)
                 pretrain_metrics.update(predictor_pretrain_metrics)
 
@@ -771,17 +772,23 @@ class PPO:
                     rollout_carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key)
                     single_rollout_carry, batch = jax.lax.scan(single_rollout, rollout_carry, None, self.nr_steps)
                     policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key = single_rollout_carry
-                    states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stack = batch
+                    states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks = batch
 
                     # process the batch data to get mask and y_target
                     y_target, masks, indices_to_term = window_any_done_next_H(dones, terminations)
+                    next_step_prediction_mask = ~ dones
 
                     ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
                         ncbf_pos_buffer, ncbf_neg_buffer,
-                        states, next_states, actions, dones, terminations, y_target, masks, indices_to_term, last_states, last_actions, history_stack)
+                        states, next_states, actions, dones, terminations, y_target, masks, indices_to_term, last_states, last_actions, history_stacks)
 
                     mean_indices_to_term_pos_rollout = jnp.sum(indices_to_term * masks * (y_target==1.0)) / (jnp.sum(masks * (y_target==1.0)) + 1e-8)
                     mean_indices_to_term_neg_rollout = jnp.sum(indices_to_term * masks * (y_target==0.0)) / (jnp.sum(masks * (y_target==0.0)) + 1e-8)
+
+                    # train predictor
+                    encoder_state, decoder_state, predictor_metrics, key = train_next_step_predictor(
+                        encoder_state, decoder_state, states, next_states, actions, next_step_prediction_mask, history_stacks, key, self.next_step_predictor_nr_minibatches)
+
 
                     # train ncbf
                     ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_pos_buffer, ncbf_neg_buffer, key,
@@ -794,10 +801,6 @@ class PPO:
                                                                          self.ncbf_nr_minibatches)
                     ncbf_state[4], ncbf_metrics, key = train_ncbf(ncbf_state[4], ncbf_pos_buffer, ncbf_neg_buffer, key,
                                                                          self.ncbf_nr_minibatches)
-
-                    # no training, load pretrained encoder
-                    # encoder_state, decoder_state, predictor_metrics, key = train_next_step_predictor(
-                    #     encoder_state, decoder_state, ncbf_pos_buffer, ncbf_neg_buffer, key, self.next_step_predictor_nr_minibatches)
 
 
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
@@ -827,7 +830,7 @@ class PPO:
                         returns = advantages + values
                         return advantages, returns
 
-                    advantages, returns = calculate_gae_advantages(critic_state, next_states, rewards, values, terminations, history_stack)
+                    advantages, returns = calculate_gae_advantages(critic_state, next_states, rewards, values, terminations, history_stacks)
 
                     # Optimizing
                     def loss_fn(policy_params, critic_params, ncbf_state, state_b, action_b, log_prob_b, return_b, advantage_b, last_state_b, last_action_b, latent_b):
@@ -855,10 +858,8 @@ class PPO:
 
                         # anticipation loss
                         ncbf_params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in ncbf_state])
-                        safe_action_b, _, _ = self.ncbf_safety_layer(action_b, state_b, last_action_b, last_state_b, latent_b, ncbf_params_stack)
+                        safe_action_b, _, _ = self.ncbf_safety_layer(action_mean, state_b, last_action_b, last_state_b, latent_b, ncbf_params_stack)
 
-                        # for debugging:
-                        # anticipation_loss = 0.0
                         anticipation_loss = 0.5 * (action_mean - safe_action_b) ** 2
 
                         # Combine losses
@@ -885,7 +886,7 @@ class PPO:
                     batch_log_probs = log_probs.reshape(-1)
                     batch_last_states = last_state.reshape((-1,) + self.os_shape)
                     batch_last_actions = last_action.reshape((-1,) + self.as_shape)
-                    batch_history_stack = history_stack.reshape((-1,) + (self.nr_history_steps, ) + self.os_shape)
+                    batch_history_stack = history_stacks.reshape((-1,) + (self.nr_history_steps, ) + self.os_shape)
                     batch_latents = encoder_state.apply_fn(encoder_state.params, batch_history_stack)
 
                     vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
