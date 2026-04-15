@@ -51,8 +51,8 @@ def get_config(algorithm_name):
     config.ncbf.pretrain.nr_minibatches = 100
 
     config.ncbf_buffer = config_dict.ConfigDict()
-    config.ncbf_buffer.pos_buffer_size = 10 # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions
-    config.ncbf_buffer.neg_buffer_size = 10
+    config.ncbf_buffer.pos_buffer_size = 1 # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions
+    config.ncbf_buffer.neg_buffer_size = 2
     config.ncbf_buffer.neg_sampling_ratio = 0.5 # ratio of sampling from negative buffer
 
     config.next_step_predictor = config_dict.ConfigDict()
