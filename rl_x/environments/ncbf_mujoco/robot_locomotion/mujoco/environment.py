@@ -36,6 +36,7 @@ class LocomotionEnv(gym.Env):
         self.env_config = env_config
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.nr_envs = nr_envs
+        self.nr_history_steps = env_config["nr_history_steps"]
 
         self.np_rng = np.random.default_rng(seed)
 
@@ -406,6 +407,10 @@ class LocomotionEnv(gym.Env):
         self.handle_domain_randomization(is_episode_start=True)
 
         next_observation = self.get_observation(np.zeros(self.nr_actuator_joints))
+
+        history_stack = np.tile(next_observation[None, :], (self.nr_history_steps, 1))
+        self.internal_state["history_stack"] = history_stack
+
         self.internal_state["info_episode_store"] = {
             "episode_return": 0.0,
             "episode_step": 0,
@@ -413,7 +418,7 @@ class LocomotionEnv(gym.Env):
         }
         self.internal_state["safe_prediction"] = 1.0
 
-
+        self.internal_state["info"]["history_stack"] = history_stack
         return next_observation, self.internal_state["info"]
 
 
@@ -473,6 +478,10 @@ class LocomotionEnv(gym.Env):
         self.terrain_function.post_step()
         self.reward_function.step()
 
+        history_stack = self.internal_state["history_stack"]
+        history_stack_new = np.roll(history_stack, -1, axis=0)
+        history_stack_new[-1, :] = next_observation
+        self.internal_state["history_stack"] = history_stack_new
         self.internal_state["second_last_action"] = self.internal_state["last_action"].copy()
         self.internal_state["last_action"] = chosen_action.copy()
         self.internal_state["last_state"] = next_observation.copy()
@@ -486,6 +495,7 @@ class LocomotionEnv(gym.Env):
         self.internal_state["info"]["last_action"] = last_action
         if self.should_render:
             self.render()
+        self.internal_state["info"]["history_stack"] = history_stack
 
         return next_observation, reward, terminated, truncated, self.internal_state["info"]
 
@@ -634,6 +644,13 @@ class LocomotionEnv(gym.Env):
         self.ncbf_obs_in_dynamics_state_idx = np.concatenate([
             self.actuator_joint_mask_qpos,
             self.actuator_joint_mask_qvel + self.initial_mj_model.nq
+        ], dtype=int
+        )
+
+        self.next_state_indices = np.concatenate([
+            self.qvel_observation_idx[:3],
+            self.joint_positions_obs_idx,
+            self.joint_velocities_obs_idx,
         ], dtype=int
         )
 

@@ -72,7 +72,7 @@ class PPO:
         self.next_step_predictor_nr_minibatches = config.algorithm.next_step_predictor.nr_minibatches
         self.next_step_predictor_minibatch_size = config.algorithm.minibatch_size
 
-        self.ncbf_n_ensemble = config.algorithm.ncbf.n_enssemble
+        self.ncbf_n_ensemble = config.algorithm.ncbf.n_ensemble
         self.ncbf_H = config.algorithm.ncbf.H
         self.ncbf_gamma_c = config.algorithm.ncbf.gamma_c
         self.ncbf_w_clf = config.algorithm.ncbf.w_clf
@@ -113,6 +113,7 @@ class PPO:
 
         self.policy.apply = jax.jit(self.policy.apply)
         self.critic.apply = jax.jit(self.critic.apply)
+        self.encoder.apply = jax.jit(self.encoder.apply)
 
         def linear_schedule(count):
             fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates
@@ -160,7 +161,9 @@ class PPO:
             )
         )
 
-        dummy_h_input = (jnp.concatenate([state[..., self.env.ncbf_observation_indices], jnp.zeros((state.shape[0], self.as_shape[0]))], axis=-1), dummy_latent)
+        dummy_action = jnp.zeros((state.shape[0], self.as_shape[0]))
+
+        dummy_h_input = jnp.concatenate([state[..., env.ncbf_observation_indices], dummy_action, dummy_latent], axis=-1)
         ncbf_keys = jax.random.split(ncbf_key, self.ncbf_n_ensemble)
         self.ncbf_state = [
             TrainState.create(
@@ -994,8 +997,8 @@ class PPO:
         # return
 
         # @jax.jit
-        def get_action(policy_state: TrainState, state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray):
-            action_mean, action_logstd = self.policy.apply(policy_state.params, state)
+        def get_action(policy_state: TrainState, state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray, latent_z: np.ndarray):
+            action_mean, action_logstd = self.policy.apply(policy_state.params, state, latent_z)
             raw_processed_action = self.get_processed_action(action_mean)
 
             sampling_ratio = self.action_noise_sampling_ratio
@@ -1009,13 +1012,13 @@ class PPO:
 
             if last_action is not None:
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
-                safe_action, constraint_active, delta_u, x_next, h_u0 = self.batched_ncbf_safety_layer(raw_processed_action, state, last_action, last_state, params_stack)
+                safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, state, last_action, last_state, latent_z, params_stack)
             else:
                 safe_action = raw_processed_action
                 constraint_active = jnp.array([0])
                 delta_u = jnp.array([0])
                 h_u0 = jnp.array([0])
-            return safe_action, raw_processed_action, constraint_active, delta_u, h_u0
+            return safe_action, raw_processed_action, constraint_active, delta_u
 
         rollout_path = self.save_path.replace("models", "rollout")
         os.makedirs(rollout_path, exist_ok=True)
@@ -1026,6 +1029,7 @@ class PPO:
             done = False
             episode_return = 0
             state, info = self.env.reset()
+            history_stack = info["history_stack"][0]
             self.env.envs[0].internal_state["safe_prediction"] = 1
             last_state = np.stack(info["last_state"])
             last_action = np.stack(info["last_action"])
@@ -1036,10 +1040,11 @@ class PPO:
                                 delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[], h_u0=[], x_next_true=[], x_next_pred=[], ret=[])
 
             while not done:
-                processed_action, raw_action, constraint_active, delta_u, h_u0 = get_action(self.policy_state, state, last_state, last_action)
+                latent_z = self.encoder.apply(self.encoder_state.params, history_stack)[None, ...]
 
+                processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state, last_state, last_action, latent_z)
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
-                h_input = jnp.concatenate([state[:, self.env.envs[0].ncbf_observation_indices], processed_action], axis=-1)
+                h_input = jnp.concatenate([state[:, self.env.envs[0].ncbf_observation_indices], processed_action, latent_z], axis=-1)
                 prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, h_input)
 
                 # qpos = state[0, self.env.envs[0].qpos_observation_idx]
@@ -1050,6 +1055,7 @@ class PPO:
                 prediction_mean = nn.sigmoid(prediction_mean)
                 self.env.envs[0].internal_state["safe_prediction"] = prediction_mean
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
+                history_stack = info["history_stack"][0]
 
                 done = terminated | truncated
                 episode_return += reward
@@ -1072,7 +1078,6 @@ class PPO:
                 rollout_dict["constraint_active"].append(constraint_active)
                 rollout_dict["raw_action"].append(raw_action)
                 rollout_dict["safe_action"].append(processed_action)
-                rollout_dict["h_u0"].append(h_u0)
 
                 joint_pos = (state[0, self.env.envs[0].joint_positions_obs_idx] * 3.14) + self.env.envs[0].internal_state["actuator_joint_nominal_positions"]
                 rollout_dict["joint_position_obs"].append(joint_pos)

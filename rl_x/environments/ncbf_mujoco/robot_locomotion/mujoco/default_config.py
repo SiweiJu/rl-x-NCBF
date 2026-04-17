@@ -5,6 +5,7 @@ def get_config(environment_name):
     config = {
         "name": environment_name,
         "nr_envs": 1,
+        "nr_history_steps": 10,
         "seed": 1,
         "render": False,
         "train_robot": "unitree_go2",
