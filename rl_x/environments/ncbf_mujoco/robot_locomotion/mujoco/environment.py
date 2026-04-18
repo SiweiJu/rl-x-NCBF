@@ -495,7 +495,7 @@ class LocomotionEnv(gym.Env):
         self.internal_state["info"]["last_action"] = last_action
         if self.should_render:
             self.render()
-        self.internal_state["info"]["history_stack"] = history_stack
+        self.internal_state["info"]["history_stack"] = history_stack_new
 
         return next_observation, reward, terminated, truncated, self.internal_state["info"]
 

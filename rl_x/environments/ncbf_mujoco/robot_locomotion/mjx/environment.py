@@ -452,12 +452,13 @@ class LocomotionEnv:
         last_state = state.internal_state["last_state"]
         last_action = chosen_action
         history_stack = state.internal_state["history_stack"]
+        new_history_stack = jnp.roll(history_stack, -1, axis=0).at[-1].set(next_observation)
 
         new_internal_state = dict(state.internal_state)
         new_internal_state["second_last_action"] = state.internal_state["last_action"]
         new_internal_state["last_action"] = chosen_action
         new_internal_state["last_state"] = last_state
-        new_internal_state["history_stack"] = jnp.roll(history_stack, -1, axis=0).at[-1].set(next_observation)
+        new_internal_state["history_stack"] = new_history_stack
 
         new_info_episode_store = dict(state.info_episode_store)
         new_info_episode_store["episode_step"] += 1
@@ -481,7 +482,7 @@ class LocomotionEnv:
         def when_not_done(_):
             return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation,
                                  reward=reward, terminated=terminated, truncated=truncated,
-                                 last_state=last_state, last_action=last_action, history_stack=history_stack)
+                                 last_state=last_state, last_action=last_action, history_stack=new_history_stack)
         state = jax.lax.cond(done, when_done, when_not_done, None)
 
         return state
