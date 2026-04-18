@@ -506,7 +506,7 @@ class PPO:
 
                         # Remove the first observation in history and append the next observation
                         minib_history_stack_next = jnp.concatenate(
-                            [history_stacks[:, 1:, :], states[:, None, :]], axis=1)
+                            [history_stacks[:, 1:, :], next_states[:, None, :]], axis=1)
                         latent_next = encoder_state.apply_fn(encoder_state.params, minib_history_stack_next)
 
                         (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
