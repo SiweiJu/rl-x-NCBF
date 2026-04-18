@@ -1037,7 +1037,8 @@ class PPO:
             # hard coded load commands
             # self.env.envs[0].command_function._load_random_trajectory(i)
             rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[],
-                                delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[], h_u0=[], x_next_true=[], x_next_pred=[], ret=[])
+                                delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[],
+                                h_u0=[], x_next_true=[], x_next_pred=[], ret=[])
 
             while not done:
                 latent_z = self.encoder.apply(self.encoder_state.params, history_stack)[None, ...]
@@ -1047,10 +1048,7 @@ class PPO:
                 h_input = jnp.concatenate([state[:, self.env.envs[0].ncbf_observation_indices], processed_action, latent_z], axis=-1)
                 prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, h_input)
 
-                # qpos = state[0, self.env.envs[0].qpos_observation_idx]
-                # qvel = state[0, self.env.envs[0].qvel_observation_idx]
-                # x = np.concatenate([qpos, qvel], axis=-1)
-                # x_next_pred = self.system_dynamics_function(x, processed_action)
+                next_step_prediction = self.decoder.apply(self.decoder_state.params, h_input)
 
                 prediction_mean = nn.sigmoid(prediction_mean)
                 self.env.envs[0].internal_state["safe_prediction"] = prediction_mean
@@ -1063,14 +1061,6 @@ class PPO:
                 last_state = state
                 last_action = processed_action
 
-                # for debugging, check prediction error
-                # qpos = state[:, self.env.envs[0].qpos_observation_idx][:, self.env.envs[0].actuator_joint_mask_qpos]
-                # qvel = state[:, self.env.envs[0].qvel_observation_idx][:, self.env.envs[0].actuator_joint_mask_qvel]
-                # x_next_true = np.concatenate([qpos, qvel], axis=-1)
-                #
-                # pred_error = x_next_true - x_next_pred[0, self.env.envs[0].ncbf_obs_in_dynamics_state_idx]
-                # print("pred error: ", np.linalg.norm(pred_error))
-
                 rollout_dict["predictions"].append(predictions)
                 rollout_dict["dones"].append(done)
                 rollout_dict["safe_prediction"].append(prediction_mean)
@@ -1078,6 +1068,7 @@ class PPO:
                 rollout_dict["constraint_active"].append(constraint_active)
                 rollout_dict["raw_action"].append(raw_action)
                 rollout_dict["safe_action"].append(processed_action)
+                rollout_dict["next_state_pred"].append(next_step_prediction)
 
                 joint_pos = (state[0, self.env.envs[0].joint_positions_obs_idx] * 3.14) + self.env.envs[0].internal_state["actuator_joint_nominal_positions"]
                 rollout_dict["joint_position_obs"].append(joint_pos)
