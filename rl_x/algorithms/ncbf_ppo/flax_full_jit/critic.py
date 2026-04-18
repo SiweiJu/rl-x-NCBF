@@ -22,9 +22,10 @@ class Critic(nn.Module):
     def __call__(self, x, z):
         x = x[..., self.critic_observation_indices]
         x = jnp.concatenate([x, z], axis=-1)
-        critic = nn.Dense(512, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
-        critic = nn.LayerNorm()(critic)
-        critic = nn.elu(critic)
+        critic = x
+        # critic = nn.Dense(512, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(critic)
+        # critic = nn.LayerNorm()(critic)
+        # critic = nn.elu(critic)
         critic = nn.Dense(256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(critic)
         critic = nn.elu(critic)
         critic = nn.Dense(128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(critic)
