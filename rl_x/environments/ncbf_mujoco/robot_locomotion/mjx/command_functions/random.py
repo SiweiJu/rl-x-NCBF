@@ -28,7 +28,6 @@ class RandomCommands:
 
         max_command_velocity = self.velocity_ratio * internal_state["max_command_velocity"]
         goal_velocities = jax.random.uniform(velocity_sampling_key, (3,), minval=-max_command_velocity, maxval=max_command_velocity)
-        jax.debug.print("sampled goal vel: {x}", x=goal_velocities)
 
         goal_velocities = jnp.where(jnp.abs(goal_velocities) < (self.zero_clip_threshold_percentage * max_command_velocity), 0.0, goal_velocities)
         goal_velocities = jnp.where(jax.random.bernoulli(all_zeroing_key, self.all_zero_chance), jnp.zeros(3), goal_velocities)
