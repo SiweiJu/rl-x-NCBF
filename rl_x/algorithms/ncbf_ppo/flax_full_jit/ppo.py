@@ -776,7 +776,7 @@ class PPO:
 
                     # process the batch data to get mask and y_target
                     y_target, masks, indices_to_term = window_any_done_next_H(dones, terminations)
-                    next_step_prediction_mask = ~ dones
+                    next_state_mask = ~ dones
 
                     ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
                         ncbf_pos_buffer, ncbf_neg_buffer,
@@ -784,11 +784,6 @@ class PPO:
 
                     mean_indices_to_term_pos_rollout = jnp.sum(indices_to_term * masks * (y_target==1.0)) / (jnp.sum(masks * (y_target==1.0)) + 1e-8)
                     mean_indices_to_term_neg_rollout = jnp.sum(indices_to_term * masks * (y_target==0.0)) / (jnp.sum(masks * (y_target==0.0)) + 1e-8)
-
-                    # train predictor
-                    encoder_state, decoder_state, predictor_metrics, key = train_next_step_predictor(
-                        encoder_state, decoder_state, states, next_states, actions, next_step_prediction_mask, history_stacks, key, self.next_step_predictor_nr_minibatches)
-
 
                     # train ncbf
                     ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_pos_buffer, ncbf_neg_buffer, key,
@@ -806,7 +801,6 @@ class PPO:
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_target)
-                    ncbf_metrics.update(predictor_metrics)
 
                     # log number of pos and neg samples
                     ncbf_metrics["ncbf/pos_buffer_size"] = ncbf_pos_buffer["size"]
@@ -833,8 +827,9 @@ class PPO:
                     advantages, returns = calculate_gae_advantages(critic_state, next_states, rewards, values, terminations, history_stacks)
 
                     # Optimizing
-                    def loss_fn(policy_params, critic_params, ncbf_state, state_b, action_b, log_prob_b, return_b, advantage_b, last_state_b, last_action_b, latent_b):
+                    def loss_fn(policy_params, critic_params, encoder_params, ncbf_state, state_b, action_b, log_prob_b, return_b, advantage_b, last_state_b, last_action_b, history_stack_b):
                         # Policy loss
+                        latent_b = self.encoder.apply(encoder_params, history_stack_b)
                         action_mean, action_logstd = self.policy.apply(policy_params, state_b, latent_b)
                         action_std = jnp.exp(action_logstd)
                         new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
@@ -880,6 +875,7 @@ class PPO:
                         return loss, metrics
 
                     batch_states = states.reshape((-1,) + self.os_shape)
+                    batch_next_states = next_states.reshape((-1,) + self.os_shape)
                     batch_actions = actions.reshape((-1,) + self.as_shape)
                     batch_advantages = advantages.reshape(-1)
                     batch_returns = returns.reshape(-1)
@@ -887,12 +883,27 @@ class PPO:
                     batch_last_states = last_state.reshape((-1,) + self.os_shape)
                     batch_last_actions = last_action.reshape((-1,) + self.as_shape)
                     batch_history_stack = history_stacks.reshape((-1,) + (self.nr_history_steps, ) + self.os_shape)
-                    batch_latents = encoder_state.apply_fn(encoder_state.params, batch_history_stack)
+                    batch_next_state_masks = next_state_mask.reshape(-1)
 
-                    vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
+                    vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
                     safe_mean = lambda x: jnp.mean(x) if x is not None else x
                     mean_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
-                    grad_loss_fn = jax.value_and_grad(mean_loss_fn, argnums=(0, 1), has_aux=True)
+                    grad_loss_fn = jax.value_and_grad(mean_loss_fn, argnums=(0, 1, 2), has_aux=True)
+
+                    @jax.jit
+                    def predictor_loss_fn(encoder_params, decoder_params, minib_obs, minib_next_obs, minib_actions, minib_masks,
+                                minib_history_stack):
+                        latent = encoder_state.apply_fn(encoder_params, minib_history_stack)
+                        pred_next_obs = decoder_state.apply_fn(decoder_params, latent, minib_obs, minib_actions)
+
+                        # Reshape masks from (batch,) to (batch, 1) for proper broadcasting with obs differences
+                        minib_masks = minib_masks[..., None].astype(jnp.float32)
+                        mse_loss = jnp.sum(minib_masks * jnp.square(
+                            pred_next_obs - minib_next_obs[..., self.next_step_predictor_output_indices])) / (
+                                               jnp.sum(minib_masks) + 1e-8)
+                        return mse_loss
+
+                    grad_predictor_loss_fn = jax.value_and_grad(predictor_loss_fn, argnums=(0, 1))
 
                     key, subkey = jax.random.split(key)
                     batch_indices = jnp.tile(jnp.arange(self.batch_size), (self.nr_epochs, 1))
@@ -900,14 +911,16 @@ class PPO:
                     batch_indices = batch_indices.reshape((self.nr_epochs * self.nr_minibatches, self.minibatch_size))
 
                     def minibatch_update(carry, minibatch_indices):
-                        policy_state, critic_state = carry
+                        policy_state, critic_state, encoder_state, decoder_state = carry
 
                         minibatch_advantages = batch_advantages[minibatch_indices]
                         minibatch_advantages = (minibatch_advantages - jnp.mean(minibatch_advantages)) / (jnp.std(minibatch_advantages) + 1e-8)
 
-                        (loss, metrics), (policy_gradients, critic_gradients) = grad_loss_fn(
+                        minib_latent = encoder_state.apply_fn(encoder_state.params, batch_history_stack[minibatch_indices])
+                        (loss, metrics), (policy_gradients, critic_gradients, encoder_gradients) = grad_loss_fn(
                             policy_state.params,
                             critic_state.params,
+                            encoder_state.params,
                             ncbf_state,
                             batch_states[minibatch_indices],
                             batch_actions[minibatch_indices],
@@ -916,27 +929,40 @@ class PPO:
                             minibatch_advantages,
                             batch_last_states[minibatch_indices],
                             batch_last_actions[minibatch_indices],
-                            batch_latents[minibatch_indices],
+                            batch_history_stack[minibatch_indices],
                         )
 
                         policy_state = policy_state.apply_gradients(grads=policy_gradients)
                         critic_state = critic_state.apply_gradients(grads=critic_gradients)
+                        encoder_state = encoder_state.apply_gradients(grads=encoder_gradients)
 
+                        # update next step predictor
+                        predictor_loss, grads_predictor = grad_predictor_loss_fn(
+                            encoder_state.params,
+                            decoder_state.params,
+                            batch_states[minibatch_indices],
+                            batch_next_states[minibatch_indices],
+                            batch_actions[minibatch_indices],
+                            batch_next_state_masks[minibatch_indices],
+                            batch_history_stack[minibatch_indices],
+                        )
+                        encoder_state = encoder_state.apply_gradients(grads=grads_predictor[0])
+                        decoder_state = decoder_state.apply_gradients(grads=grads_predictor[1])
+
+                        metrics["next_step_predictor/loss"] = predictor_loss
                         metrics["gradients/policy_grad_norm"] = optax.global_norm(policy_gradients)
                         metrics["gradients/critic_grad_norm"] = optax.global_norm(critic_gradients)
 
-                        carry = (policy_state, critic_state)
-
+                        carry = (policy_state, critic_state, encoder_state, decoder_state)
                         return carry, metrics
 
-                    init_carry = (policy_state, critic_state)
+                    init_carry = (policy_state, critic_state, encoder_state, decoder_state)
                     carry, optimization_metrics = jax.lax.scan(minibatch_update, init_carry, batch_indices)
-                    policy_state, critic_state = carry
+                    policy_state, critic_state, encoder_state, decoder_state = carry
 
                     optimization_metrics["lr/learning_rate"] = policy_state.opt_state[1].hyperparams["learning_rate"]
                     optimization_metrics["v_value/explained_variance"] = 1 - jnp.var(returns - values) / (jnp.var(returns) + 1e-8)
                     optimization_metrics["policy/std_dev"] = jnp.mean(jnp.exp(policy_state.params["params"]["policy_logstd"]))
-
 
                     # Logging
                     combined_learning_iteration_step = (multi_learning_iteration_step * self.nr_updates_per_multi_learning_iteration) + learning_iteration_step + 1
