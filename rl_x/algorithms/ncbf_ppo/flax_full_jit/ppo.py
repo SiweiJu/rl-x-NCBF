@@ -55,6 +55,7 @@ class PPO:
         self.entropy_coef = config.algorithm.entropy_coef
         self.critic_coef = config.algorithm.critic_coef
         self.anticipation_coef = config.algorithm.ncbf.policy_loss_coef
+        self.aux_prediction_coef = config.algorithm.next_step_predictor.aux_loss_coef
         self.max_grad_norm = config.algorithm.max_grad_norm
         self.std_dev = config.algorithm.std_dev
         self.evaluation_and_save_frequency = config.algorithm.evaluation_and_save_frequency
@@ -432,9 +433,6 @@ class PPO:
                     )
                     return total, metrics
 
-                # vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, 0, 0), out_axes=0)
-                # safe_mean = lambda x: jnp.mean(x) if x is not None else x
-                # mean_vmapped_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
                 grad_ncbf_loss_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
 
                 def do_train(carry):
@@ -827,7 +825,8 @@ class PPO:
                     advantages, returns = calculate_gae_advantages(critic_state, next_states, rewards, values, terminations, history_stacks)
 
                     # Optimizing
-                    def loss_fn(policy_params, critic_params, encoder_params, ncbf_state, state_b, action_b, log_prob_b, return_b, advantage_b, last_state_b, last_action_b, history_stack_b):
+                    def loss_fn(policy_params, critic_params, encoder_params, decoder_params, ncbf_state,
+                                state_b, next_state_b, action_b, log_prob_b, return_b, advantage_b, last_state_b, last_action_b, history_stack_b, next_state_mask_b):
                         # Policy loss
                         latent_b = self.encoder.apply(encoder_params, history_stack_b)
                         action_mean, action_logstd = self.policy.apply(policy_params, state_b, latent_b)
@@ -857,10 +856,17 @@ class PPO:
 
                         anticipation_loss = 0.5 * (action_mean - safe_action_b) ** 2
 
+                        # auxiliary next step prediction loss
+                        pred_next_obs = self.decoder.apply(decoder_params, latent_b, state_b, action_b)
+                        next_state_target = next_state_b[..., self.next_step_predictor_output_indices]
+                        prediction_loss = jnp.sum(next_state_mask_b * jnp.square(pred_next_obs - next_state_target)) / (jnp.sum(next_state_mask_b) + 1e-8)
+
                         # Combine losses
                         loss = (pg_loss - self.entropy_coef * entropy_loss +
                                 self.critic_coef * critic_loss +
-                                self.anticipation_coef * anticipation_loss)
+                                self.anticipation_coef * anticipation_loss +
+                                self.aux_prediction_coef * prediction_loss
+                                )
 
                         # Create metrics
                         metrics = {
@@ -868,6 +874,7 @@ class PPO:
                             "loss/critic_loss": critic_loss,
                             "loss/entropy_loss": entropy_loss,
                             "loss/anticipation_loss": anticipation_loss,
+                            "loss/aux_prediction_loss": prediction_loss,
                             "policy_ratio/approx_kl": approx_kl_div,
                             "policy_ratio/clip_fraction": clip_fraction,
                         }
@@ -885,10 +892,10 @@ class PPO:
                     batch_history_stack = history_stacks.reshape((-1,) + (self.nr_history_steps, ) + self.os_shape)
                     batch_next_state_masks = next_state_mask.reshape(-1)
 
-                    vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
+                    vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
                     safe_mean = lambda x: jnp.mean(x) if x is not None else x
                     mean_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
-                    grad_loss_fn = jax.value_and_grad(mean_loss_fn, argnums=(0, 1, 2), has_aux=True)
+                    grad_loss_fn = jax.value_and_grad(mean_loss_fn, argnums=(0, 1, 2, 3), has_aux=True)
 
                     @jax.jit
                     def predictor_loss_fn(encoder_params, decoder_params, minib_obs, minib_next_obs, minib_actions, minib_masks,
@@ -917,12 +924,14 @@ class PPO:
                         minibatch_advantages = (minibatch_advantages - jnp.mean(minibatch_advantages)) / (jnp.std(minibatch_advantages) + 1e-8)
 
                         minib_latent = encoder_state.apply_fn(encoder_state.params, batch_history_stack[minibatch_indices])
-                        (loss, metrics), (policy_gradients, critic_gradients, encoder_gradients) = grad_loss_fn(
+                        (loss, metrics), (policy_gradients, critic_gradients, encoder_gradients, decoder_gradients) = grad_loss_fn(
                             policy_state.params,
                             critic_state.params,
                             encoder_state.params,
+                            decoder_state.params,
                             ncbf_state,
                             batch_states[minibatch_indices],
+                            batch_next_states[minibatch_indices],
                             batch_actions[minibatch_indices],
                             batch_log_probs[minibatch_indices],
                             batch_returns[minibatch_indices],
@@ -930,26 +939,28 @@ class PPO:
                             batch_last_states[minibatch_indices],
                             batch_last_actions[minibatch_indices],
                             batch_history_stack[minibatch_indices],
+                            batch_next_state_masks[minibatch_indices],
                         )
 
                         policy_state = policy_state.apply_gradients(grads=policy_gradients)
                         critic_state = critic_state.apply_gradients(grads=critic_gradients)
                         encoder_state = encoder_state.apply_gradients(grads=encoder_gradients)
+                        decoder_state = decoder_state.apply_gradients(grads=decoder_gradients)
 
                         # update next step predictor
-                        predictor_loss, grads_predictor = grad_predictor_loss_fn(
-                            encoder_state.params,
-                            decoder_state.params,
-                            batch_states[minibatch_indices],
-                            batch_next_states[minibatch_indices],
-                            batch_actions[minibatch_indices],
-                            batch_next_state_masks[minibatch_indices],
-                            batch_history_stack[minibatch_indices],
-                        )
-                        encoder_state = encoder_state.apply_gradients(grads=grads_predictor[0])
-                        decoder_state = decoder_state.apply_gradients(grads=grads_predictor[1])
+                        # predictor_loss, grads_predictor = grad_predictor_loss_fn(
+                        #     encoder_state.params,
+                        #     decoder_state.params,
+                        #     batch_states[minibatch_indices],
+                        #     batch_next_states[minibatch_indices],
+                        #     batch_actions[minibatch_indices],
+                        #     batch_next_state_masks[minibatch_indices],
+                        #     batch_history_stack[minibatch_indices],
+                        # )
+                        # encoder_state = encoder_state.apply_gradients(grads=grads_predictor[0])
+                        # decoder_state = decoder_state.apply_gradients(grads=grads_predictor[1])
 
-                        metrics["next_step_predictor/loss"] = predictor_loss
+                        # metrics["next_step_predictor/loss"] = predictor_loss
                         metrics["gradients/policy_grad_norm"] = optax.global_norm(policy_gradients)
                         metrics["gradients/critic_grad_norm"] = optax.global_norm(critic_gradients)
 

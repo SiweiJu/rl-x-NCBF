@@ -63,5 +63,6 @@ def get_config(algorithm_name):
     config.next_step_predictor.history_encoder_type = 'FFNN'  # 'FFNN' or 'GRU'
     config.next_step_predictor.history_encoder_hidden_size = 64
     config.next_step_predictor.decoder_output_dim = None  # Will be set to observation_dim at runtime
+    config.next_step_predictor.aux_loss_coef = 0.0
 
     return config
