@@ -357,10 +357,13 @@ class LocomotionEnv:
                 -1
             )
         )
-        new_internal_state["env_curriculum_coeff"] =  jnp.clip(new_internal_state["env_curriculum_coeff"] + new_state.internal_state["env_curriculum_levels_in_a_row"] / self.env_curriculum_nr_levels, 0.0, 1.0)
-        new_internal_state["env_curriculum_coeff"] = jnp.where(new_internal_state["in_eval_mode"], 1.0, new_state.internal_state["env_curriculum_coeff"])
+        new_internal_state["env_curriculum_coeff"] =  jnp.clip(
+            new_internal_state["env_curriculum_coeff"] +
+            new_internal_state["env_curriculum_levels_in_a_row"] / self.env_curriculum_nr_levels, 0.0, 1.0)
+        new_internal_state["env_curriculum_coeff"] = jnp.where(
+            new_internal_state["in_eval_mode"], 1.0, new_internal_state["env_curriculum_coeff"])
         new_internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
-        new_internal_state["imu_orientation_rotation_inverse"] = new_state.internal_state["imu_orientation_rotation"].inv()
+        new_internal_state["imu_orientation_rotation_inverse"] = new_internal_state["imu_orientation_rotation"].inv()
         new_internal_state["imu_orientation_euler"] = new_internal_state["imu_orientation_rotation"].as_euler("xyz")
         new_internal_state["last_action"] = last_action
         new_internal_state["second_last_action"] = jnp.zeros(self.nr_actuator_joints)
@@ -368,9 +371,9 @@ class LocomotionEnv:
 
         self.reward_function.setup(new_internal_state)
         self.domain_randomization_action_delay_function.setup(new_internal_state)
-        data, mjx_model = self.handle_domain_randomization(new_state.internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
+        data, mjx_model = self.handle_domain_randomization(new_internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
 
-        next_observation = self.get_observation(data, mjx_model, new_state.internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
+        next_observation = self.get_observation(data, mjx_model, new_internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
         reward = 0.0
         terminated = False
         truncated = False
@@ -440,7 +443,7 @@ class LocomotionEnv:
 
         should_sample_commands = self.command_sampling_function.step(command_sampling_key)
         self.command_function.get_next_command(state.internal_state, should_sample_commands, command_key)
-        
+
         next_observation = self.get_observation(data, mjx_model, state.internal_state, observation_key, chosen_action)
         terminated = self.termination_function.should_terminate(state.internal_state) | jnp.any(jnp.abs(data.qvel[:3]) == 100.0)
         truncated = state.info_episode_store["episode_step"] >= (self.horizon - 1)
@@ -449,7 +452,7 @@ class LocomotionEnv:
         data = self.terrain_function.post_step(data, mjx_model, state.internal_state, terrain_key)
         self.reward_function.step(data, state.internal_state)
 
-        last_state = state.internal_state["last_state"]
+        previous_obs = state.internal_state["last_state"]
         last_action = chosen_action
         history_stack = state.internal_state["history_stack"]
         new_history_stack = jnp.roll(history_stack, -1, axis=0).at[-1].set(next_observation)
@@ -457,7 +460,7 @@ class LocomotionEnv:
         new_internal_state = dict(state.internal_state)
         new_internal_state["second_last_action"] = state.internal_state["last_action"]
         new_internal_state["last_action"] = chosen_action
-        new_internal_state["last_state"] = last_state
+        new_internal_state["last_state"] = next_observation
         new_internal_state["history_stack"] = new_history_stack
 
         new_info_episode_store = dict(state.info_episode_store)
@@ -466,9 +469,9 @@ class LocomotionEnv:
         new_info_episode_store["episode_total_xy_velocity_diff_abs"] = state.info["env_info/xy_vel_diff_abs"]
 
         new_info = dict(state.info)
-        new_info["rollout/episode_return"] = jnp.where(done, state.info_episode_store["episode_return"],
+        new_info["rollout/episode_return"] = jnp.where(done, new_info_episode_store["episode_return"],
                                                          state.info["rollout/episode_return"])
-        new_info["rollout/episode_length"] = jnp.where(done, state.info_episode_store["episode_step"],
+        new_info["rollout/episode_length"] = jnp.where(done, new_info_episode_store["episode_step"],
                                                          state.info["rollout/episode_length"])
         new_info["env_curriculum/coefficient"] = state.internal_state["env_curriculum_coeff"]
 
@@ -482,7 +485,7 @@ class LocomotionEnv:
         def when_not_done(_):
             return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation,
                                  reward=reward, terminated=terminated, truncated=truncated,
-                                 last_state=last_state, last_action=last_action, history_stack=new_history_stack)
+                                 last_state=previous_obs, last_action=last_action, history_stack=new_history_stack)
         state = jax.lax.cond(done, when_done, when_not_done, None)
 
         return state
