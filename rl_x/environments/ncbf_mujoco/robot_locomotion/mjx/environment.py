@@ -499,6 +499,16 @@ class LocomotionEnv:
         qpos = jnp.concatenate([data.qpos[:7], data.qpos[self.actuator_joint_mask_qpos]], axis=0)
         qvel = jnp.concatenate([data.qvel[:6], data.qvel[self.actuator_joint_mask_qvel]], axis=0)
 
+        robot_height = internal_state["robot_imu_height_over_ground"]
+        robot_height_threshold = self.env_config["termination"]["height_percentage_threshold"] * internal_state["robot_nominal_imu_height_over_ground"]
+        robot_height_normed = jnp.clip((robot_height - robot_height_threshold) / robot_height_threshold, -1, 1)
+
+        body_roll = internal_state["imu_orientation_euler"][0]
+        body_pitch = internal_state["imu_orientation_euler"][1]
+        body_tilt = jnp.sqrt(body_roll ** 2 + body_pitch ** 2)
+        tilt_threshold = 0.4
+        body_tilt_normed = jnp.clip((tilt_threshold - body_tilt) / tilt_threshold, -1, 1)
+
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
             data.qvel[self.actuator_joint_mask_qvel],
@@ -514,7 +524,9 @@ class LocomotionEnv:
             jnp.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             qpos, # qpos all not normalized, base pose can be dummy for deployment
             qvel, # qvel all not normalized
-            feet_ground_contact
+            feet_ground_contact,
+            jnp.array([robot_height_normed]),
+            jnp.array([body_tilt_normed]),
         ])
 
         # Add noise
@@ -596,8 +608,15 @@ class LocomotionEnv:
         self.qvel_observation_idx = jnp.array([current_observation_idx + i for i in range(self.nr_actuator_joints + 6)])
         current_observation_idx += self.nr_actuator_joints + 6
 
+        # contact is limited to feet right now
         self.contact_obs_idx = jnp.array([current_observation_idx + i for i in range(self.nr_feet)])
         current_observation_idx += self.nr_feet
+
+        self.body_height_obs_idx = jnp.array([current_observation_idx])
+        current_observation_idx += 1
+
+        self.body_tilt_obs_idx = jnp.array([current_observation_idx])
+        current_observation_idx += 1
 
         self.policy_observation_indices = jnp.concatenate([
             self.joint_positions_obs_idx,
@@ -653,6 +672,12 @@ class LocomotionEnv:
             self.joint_velocities_obs_idx,
         ], dtype=int
         )
+
+        # target value for the predictor
+        self.ncbf_target_indices = jnp.concatenate([
+            self.body_height_obs_idx,
+            self.body_tilt_obs_idx,
+        ])
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
 
 

@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax.linen.initializers import constant, orthogonal
+from jax.scipy.special import logsumexp
 from flax.training.train_state import TrainState
 from mujoco import mjx
 
@@ -14,6 +15,7 @@ Array = jnp.ndarray
 
 def get_ncbf(config, env):
     n_ncbf_ensemble = config.algorithm.ncbf.n_ensemble
+    n_ncbf_output = len(env.ncbf_target_indices)
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
     ncbf_observation_indices = env.ncbf_observation_indices
     gamma_c = config.algorithm.ncbf.gamma_c
@@ -24,7 +26,7 @@ def get_ncbf(config, env):
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 
-    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units) for _ in range(n_ncbf_ensemble)]
+    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, n_ncbf_output) for _ in range(n_ncbf_ensemble)]
     NCBF_apply = get_ensemble_forward_pass(NCBF[0].apply)
 
 
@@ -68,6 +70,7 @@ def get_ensemble_forward_pass(apply_fn):
     alpha = 0.4
     E = 5  # number of ensemble members, hardcoded for now
     k = max(1, int(np.ceil((1.0 - alpha) * E)))
+    softmin_beta = 10
 
     @jax.jit
     def ensemble_forward_pass(params_stack, input):
@@ -85,12 +88,26 @@ def get_ensemble_forward_pass(apply_fn):
             #     tail = jnp.maximum(losses - eta, 0.0)
             #     return eta + jnp.mean(tail) / (1 - alpha)
             #
-            def cvar_topk(preds):
+            def cvar_bottomk(preds):
                 # losses: (E,) or (E, ...) , larger = worse
                 tail = jnp.sort(preds, axis=0)[:k, ...]
                 return jnp.mean(tail, axis=0)
             #
-            return cvar_topk(preds)
+
+            def component_softmin(preds):
+                """
+                preds: (E, ..., K)
+                softmin over the last dimension K for each ensemble member
+                returns: (E, ...)
+                """
+                beta = softmin_beta
+                weights = jax.nn.softmax(-beta * preds, axis=-1)
+                preds_softmin = jnp.sum(weights * preds, axis=-1)
+                return preds_softmin
+
+            preds_softmin = component_softmin(preds)
+            aggregated = cvar_bottomk(preds_softmin)
+            return aggregated
 
         return aggregate_predictions(predictions), jnp.std(predictions), predictions
     return ensemble_forward_pass
@@ -98,6 +115,9 @@ def get_ensemble_forward_pass(apply_fn):
 
 class NCBF_FFNN(nn.Module):
     nr_hidden_units: int
+    n_outputs: int
+    softmin_beta: int = 10
+    # beta might need to be tuned, larger beta goes to a min
 
     @nn.compact
     def __call__(self, x):
@@ -107,14 +127,15 @@ class NCBF_FFNN(nn.Module):
         x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.tanh(x)
         # Scalar CBF output h(x)
-        h1 = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+        h = nn.Dense(self.n_outputs, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+
 
         # clip the output to be in [0, 1]
         # h1 = nn.sigmoid(h1)
         # to get the gradient without the sigmoid, we do not use sigmoid here, add a sigmoid function when preedicting
 
-        h1 = jnp.squeeze(h1, -1)  # shape ()
-        return h1
+        # h = jnp.squeeze(h, -1)  # shape ()
+        return h
 
 
 def make_get_safe_action(
