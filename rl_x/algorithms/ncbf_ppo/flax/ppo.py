@@ -143,12 +143,18 @@ class PPO:
             )
         )
 
+        def encoder_linear_schedule(count):
+            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates
+            return self.next_step_predictor_lr * fraction
+
+        next_step_predictor_lr = encoder_linear_schedule
+
         self.encoder_state = TrainState.create(
             apply_fn=self.encoder.apply,
             params=self.encoder.init(encoder_key, dummy_history_stack),
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
-                optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
+                optax.inject_hyperparams(optax.adam)(learning_rate=next_step_predictor_lr),
             )
         )
 
@@ -176,6 +182,7 @@ class PPO:
             )
             for i in range(self.ncbf_n_ensemble)
         ]
+        self.ncbf_state = self.ncbf_state[0]
 
         if self.save_model:
             os.makedirs(self.save_path)
@@ -306,6 +313,7 @@ class PPO:
                 loss = pg_loss - self.entropy_coef * entropy_loss + self.critic_coef * critic_loss + self.anticipation_coef * anticipation_loss
 
                 # Create metrics
+
                 metrics = {
                     "loss/policy_gradient_loss": pg_loss,
                     "loss/critic_loss": critic_loss,
@@ -989,9 +997,6 @@ class PPO:
                 h_input[:-1]
             )
 
-
-
-
     def test(self, episodes):
         # self.validate_dynamics_model_on_the_real_robot()
         # return
@@ -1010,14 +1015,18 @@ class PPO:
             raw_processed_action = raw_processed_action + jax.random.normal(action_offset_key,
                                                                     raw_processed_action.shape) * 1 * if_sampling
 
-            if last_action is not None:
-                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
-                safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, state, last_action, last_state, latent_z, params_stack)
-            else:
-                safe_action = raw_processed_action
-                constraint_active = jnp.array([0])
-                delta_u = jnp.array([0])
-                h_u0 = jnp.array([0])
+            # if last_action is not None:
+            #     params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+            #     safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, state, last_action, last_state, latent_z, params_stack)
+            # else:
+            #     safe_action = raw_processed_action
+            #     constraint_active = jnp.array([0])
+            #     delta_u = jnp.array([0])
+            #     h_u0 = jnp.array([0])
+            # temporarily disabled
+            safe_action = raw_processed_action
+            constraint_active = 0
+            delta_u = 0
             return safe_action, raw_processed_action, constraint_active, delta_u
 
         rollout_path = self.save_path.replace("models", "rollout")
@@ -1031,34 +1040,50 @@ class PPO:
             state, info = self.env.reset()
             history_stack = info["history_stack"][0]
             self.env.envs[0].internal_state["safe_prediction"] = 1
-            last_state = np.stack(info["last_state"])
+            previous_state = np.stack(info["last_state"])
             last_action = np.stack(info["last_action"])
 
             # hard coded load commands
             # self.env.envs[0].command_function._load_random_trajectory(i)
             rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[],
                                 delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[],
-                                h_u0=[], x_next_true=[], x_next_pred=[], ret=[])
+                                h_u0=[], x_next_true=[], next_step_pred=[], ret=[])
 
             while not done:
-                latent_z = self.encoder.apply(self.encoder_state.params, history_stack)[None, ...]
+                latent_z = self.encoder.apply(self.encoder_state.params, history_stack[None, ...])
 
-                processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state, last_state, last_action, latent_z)
-                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
+                processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state, previous_state, last_action, latent_z)
+                # params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                 h_input = jnp.concatenate([state[:, self.env.envs[0].ncbf_observation_indices], processed_action, latent_z], axis=-1)
-                prediction_mean, prediction_std, predictions = self.ncbf_apply(params_stack, h_input)
+                # prediction_mean, prediction_std, predictions = self.ncbf_state.apply_fn(self.ncbf_state.params, h_input)
+                prediction_mean = self.ncbf_state.apply_fn(self.ncbf_state.params, h_input)
 
-                next_step_prediction = self.decoder.apply(self.decoder_state.params, h_input)
+                def component_softmin(preds):
+                    """
+                    preds: (E, ..., K)
+                    softmin over the last dimension K for each ensemble member
+                    returns: (E, ...)
+                    """
+                    beta = 10
+                    weights = jax.nn.softmax(-beta * preds, axis=-1)
+                    preds_softmin = jnp.sum(weights * preds, axis=-1)
+                    return preds_softmin
 
-                prediction_mean = nn.sigmoid(prediction_mean)
-                self.env.envs[0].internal_state["safe_prediction"] = prediction_mean
+
+
+                predictions = 0
+
+                next_step_prediction = self.decoder.apply(self.decoder_state.params, latent_z, state, processed_action)
+                print("ncbf prediction: ", prediction_mean)
+
+                self.env.envs[0].internal_state["safe_prediction"] = component_softmin(prediction_mean) # prediction_mean
+                previous_state = state
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
                 history_stack = info["history_stack"][0]
 
                 done = terminated | truncated
                 episode_return += reward
 
-                last_state = state
                 last_action = processed_action
 
                 rollout_dict["predictions"].append(predictions)
@@ -1068,7 +1093,7 @@ class PPO:
                 rollout_dict["constraint_active"].append(constraint_active)
                 rollout_dict["raw_action"].append(raw_action)
                 rollout_dict["safe_action"].append(processed_action)
-                rollout_dict["next_state_pred"].append(next_step_prediction)
+                rollout_dict["next_step_pred"].append(next_step_prediction)
 
                 joint_pos = (state[0, self.env.envs[0].joint_positions_obs_idx] * 3.14) + self.env.envs[0].internal_state["actuator_joint_nominal_positions"]
                 rollout_dict["joint_position_obs"].append(joint_pos)

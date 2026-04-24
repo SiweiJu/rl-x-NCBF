@@ -106,13 +106,13 @@ class NCBF_FFNN(nn.Module):
         x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.tanh(x)
         # Scalar CBF output h(x)
-        h1 = nn.Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+        h1 = nn.Dense(2, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
         # clip the output to be in [0, 1]
         # h1 = nn.sigmoid(h1)
         # to get the gradient without the sigmoid, we do not use sigmoid here, add a sigmoid function when preedicting
 
-        h1 = jnp.squeeze(h1, -1)  # shape ()
+        # h1 = jnp.squeeze(h1, -1)  # shape ()
         return h1
 
 

@@ -13,13 +13,13 @@ def get_config(environment_name):
         "ncbf_use_policy_observations": False,
         "command": {
             "type": "random",
-            "sampling_type": "step_probability",
+            "sampling_type": "step_probability_and_reset",
             "max_velocity_per_m_factor": 2.0,
             "clip_max_velocity": 1.0,
             "zero_clip_threshold_percentage": 0.1,
             "all_zero_chance": 0.04,
             "single_zero_chance": 0.005,
-
+            "velocity_ratio": [1, 0.5, 0.2],
             # configs for test mode with type "random_trajectory"
             "trajectory_length_in_seconds": 10.0,
 

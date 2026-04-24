@@ -183,7 +183,7 @@ class LocomotionEnv(gym.Env):
 
         self.observation_noise_function.init_attributes()
 
-        eval_mode = True
+        eval_mode = False
         self.internal_state = {
             "mj_model": deepcopy(self.initial_mj_model),
             "data": mujoco.MjData(self.initial_mj_model),
@@ -355,9 +355,9 @@ class LocomotionEnv(gym.Env):
 
             # add safety light
         safety = self.internal_state["safe_prediction"]
-        if safety < 0.2:
+        if safety < -0.05:
             safety_color = np.array([1.0, 0.0, 0.0, 1.0])  # red
-        elif safety < 0.5:
+        elif safety < 0.05:
             safety_color = np.array([1.0, 1.0, 0.0, 1.0])  # yellow
         else:
             safety_color = np.array([0.0, 1.0, 0.0, 1.0])  # green
@@ -406,6 +406,10 @@ class LocomotionEnv(gym.Env):
         self.domain_randomization_action_delay_function.setup()
         self.handle_domain_randomization(is_episode_start=True)
 
+        should_sample_commands = self.command_sampling_function.setup()
+        if should_sample_commands:
+            self.command_function.get_next_command()
+
         next_observation = self.get_observation(np.zeros(self.nr_actuator_joints))
 
         history_stack = np.tile(next_observation[None, :], (self.nr_history_steps, 1))
@@ -430,6 +434,12 @@ class LocomotionEnv(gym.Env):
 
         self.internal_state["data"].ctrl = target_joint_positions
         mujoco.mj_step(self.internal_state["mj_model"], self.internal_state["data"], self.nr_substeps)
+
+        # debug only
+        body_roll = self.internal_state["imu_orientation_euler"][0]
+        body_pitch = self.internal_state["imu_orientation_euler"][1]
+        tilt = np.sqrt(body_roll ** 2 + body_pitch ** 2)
+        print("body_tilt: ", tilt)
 
         # for debugging
         # copy data to avoid modifying it in-place
@@ -505,6 +515,17 @@ class LocomotionEnv(gym.Env):
         qvel = np.concatenate([self.internal_state["data"].qvel[:6], self.internal_state["data"].qvel[self.actuator_joint_mask_qvel]], axis=0)
 
         feet_ground_contact = self.terrain_function.check_feet_floor_contact()
+
+        robot_height = self.internal_state["robot_imu_height_over_ground"]
+        robot_height_threshold = self.env_config["termination"]["height_percentage_threshold"] * self.internal_state["robot_nominal_imu_height_over_ground"]
+        robot_height_normed = np.clip((robot_height - robot_height_threshold) / robot_height_threshold, -1, 1)
+
+        body_roll = self.internal_state["imu_orientation_euler"][0]
+        body_pitch = self.internal_state["imu_orientation_euler"][1]
+        body_tilt = np.sqrt(body_roll ** 2 + body_pitch ** 2)
+        tilt_threshold = 0.4
+        body_tilt_normed = np.clip((tilt_threshold - body_tilt) / tilt_threshold, -1, 1)
+
         observation = np.concatenate([
             self.internal_state["data"].qpos[self.actuator_joint_mask_qpos],
             self.internal_state["data"].qvel[self.actuator_joint_mask_qvel],
@@ -521,6 +542,8 @@ class LocomotionEnv(gym.Env):
             qpos,    # qpos all
             qvel,    # qvel all
             feet_ground_contact,
+            np.array([robot_height_normed]),
+            np.array([body_tilt_normed]),
         ])
 
         # Add noise
@@ -603,6 +626,12 @@ class LocomotionEnv(gym.Env):
         self.contact_obs_idx = np.array([current_observation_idx + i for i in range(self.nr_feet)])
         current_observation_idx += self.nr_feet
 
+        self.body_height_obs_idx = np.array([current_observation_idx], dtype=int)
+        current_observation_idx += 1
+
+        self.body_tilt_obs_idx = np.array([current_observation_idx], dtype=int)
+        current_observation_idx += 1
+
         self.policy_observation_indices = np.concatenate([
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
@@ -651,6 +680,12 @@ class LocomotionEnv(gym.Env):
             self.qvel_observation_idx[:3],
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
+        ], dtype=int
+        )
+
+        self.ncbf_target_indices = np.concatenate([
+            self.body_height_obs_idx,
+            self.body_tilt_obs_idx,
         ], dtype=int
         )
 
