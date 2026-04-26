@@ -9,7 +9,7 @@ class DefaultG1Reward(DefaultReward):
 
         reward_config = env.env_config["reward"]
         self.critical_initial_coeff = reward_config.get("critical_initial_coeff", 0.5)
-        self.style_initial_coeff = reward_config.get("style_initial_coeff", 0.1)
+        self.style_initial_coeff = reward_config.get("style_initial_coeff", 0.0)
 
 
     def reward_and_info(self, data, mjx_model, internal_state, action, info):
@@ -47,8 +47,9 @@ class DefaultG1Reward(DefaultReward):
         roll_pitch_position_norm = jnp.sum(jnp.square(internal_state["imu_orientation_euler"][:2]))
         angular_position_reward = critical_coeff * self.roll_pitch_pos_coeff * -roll_pitch_position_norm
 
-        joint_outside_limits = jnp.maximum(data.qpos[self.env.actuator_joint_mask_qpos] - internal_state["joint_position_limits"][:, 1], 0.0) + \
-                               jnp.maximum(internal_state["joint_position_limits"][:, 0] - data.qpos[self.env.actuator_joint_mask_qpos], 0.0)
+        actuator_joint_position_limits = internal_state["joint_position_limits"][self.env.actuator_joint_mask_joints - 1]
+        joint_outside_limits = jnp.maximum(data.qpos[self.env.actuator_joint_mask_qpos] - actuator_joint_position_limits[:, 1], 0.0) + \
+                               jnp.maximum(actuator_joint_position_limits[:, 0] - data.qpos[self.env.actuator_joint_mask_qpos], 0.0)
         joint_position_limit_reward = critical_coeff * self.joint_position_limit_coeff * -jnp.mean(joint_outside_limits)
 
         actuator_joint_velocity_limit = internal_state["actuator_joint_max_velocities"] * self.soft_actuator_joint_velocity_limit
@@ -82,6 +83,8 @@ class DefaultG1Reward(DefaultReward):
         missing_lower_feet_contacts = self.env.terrain_function.check_flat_feet_floor_missing_contacts(data, mjx_model, internal_state)
         contact_filtered_missing_lower_feet_contacts = jnp.mean(feet_floor_contacts * missing_lower_feet_contacts)
         foot_flat_contact_reward = critical_coeff * self.foot_flat_contact_coeff * -contact_filtered_missing_lower_feet_contacts
+
+        ball_plate_alive_reward, ball_plate_on_plate_reward, ball_plate_penalty = self.ball_plate_reward_terms(data, internal_state, critical_coeff, info)
 
         # Style and efficiency penalties can ramp in later.
         actuator_joint_nominal_diff_norm = jnp.mean(jnp.square((data.qpos[self.env.actuator_joint_mask_qpos] * internal_state["actuator_joint_keep_nominal"]) - (internal_state["actuator_joint_nominal_positions"] * internal_state["actuator_joint_keep_nominal"])))
@@ -117,10 +120,11 @@ class DefaultG1Reward(DefaultReward):
         tracking_reward = tracking_xy_velocity_command_reward + tracking_yaw_velocity_command_reward
         critical_penalty = z_velocity_reward + imu_acceleration_reward + angular_velocity_reward + angular_position_reward + \
                            joint_position_limit_reward + joint_velocity_limit_reward + collision_reward + base_height_reward + \
-                           all_feet_off_ground_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward
+                           all_feet_off_ground_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward + \
+                           ball_plate_penalty
         style_penalty = actuator_joint_nominal_diff_reward + joint_velocity_reward + acceleration_reward + torque_reward + \
                         power_draw_penalty_reward + action_rate_reward + action_smoothness_reward + foot_air_time_reward + symmetry_air_reward
-        reward = tracking_reward + critical_penalty + style_penalty + alive_clipped_reward
+        reward = tracking_reward + critical_penalty + style_penalty + alive_clipped_reward + ball_plate_alive_reward + ball_plate_on_plate_reward
         reward = jnp.maximum(reward, 0.0) + alive_unclipped_reward
         reward = jnp.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 

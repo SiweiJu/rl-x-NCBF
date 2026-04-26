@@ -7,5 +7,6 @@ class BelowHeightTermination:
 
     def should_terminate(self, internal_state):
         below_height = internal_state["robot_imu_height_over_ground"] < ((1 - internal_state["env_curriculum_coeff"]) * self.height_percentage_threshold * internal_state["robot_nominal_imu_height_over_ground"])
+        ball_dropped = self.env.use_ball_plate and self.env.ball_plate_has_dropped(internal_state)
 
-        return below_height
+        return below_height | ball_dropped

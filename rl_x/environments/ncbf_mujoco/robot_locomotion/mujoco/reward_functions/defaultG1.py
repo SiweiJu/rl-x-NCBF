@@ -9,7 +9,7 @@ class DefaultG1Reward(DefaultReward):
 
         reward_config = env.env_config["reward"]
         self.critical_initial_coeff = reward_config.get("critical_initial_coeff", 0.5)
-        self.style_initial_coeff = reward_config.get("style_initial_coeff", 0.1)
+        self.style_initial_coeff = reward_config.get("style_initial_coeff", 0.0)
 
 
     def reward_and_info(self, action):
@@ -48,8 +48,9 @@ class DefaultG1Reward(DefaultReward):
         roll_pitch_position_norm = np.sum(np.square(self.env.internal_state["imu_orientation_euler"][:2]))
         angular_position_reward = critical_coeff * self.roll_pitch_pos_coeff * -roll_pitch_position_norm
 
-        joint_outside_limits = np.maximum(self.env.internal_state["data"].qpos[self.env.actuator_joint_mask_qpos] - self.env.internal_state["joint_position_limits"][:, 1], 0.0) + \
-                               np.maximum(self.env.internal_state["joint_position_limits"][:, 0] - self.env.internal_state["data"].qpos[self.env.actuator_joint_mask_qpos], 0.0)
+        actuator_joint_position_limits = self.env.internal_state["joint_position_limits"][self.env.actuator_joint_mask_joints - 1]
+        joint_outside_limits = np.maximum(self.env.internal_state["data"].qpos[self.env.actuator_joint_mask_qpos] - actuator_joint_position_limits[:, 1], 0.0) + \
+                               np.maximum(actuator_joint_position_limits[:, 0] - self.env.internal_state["data"].qpos[self.env.actuator_joint_mask_qpos], 0.0)
         joint_position_limit_reward = critical_coeff * self.joint_position_limit_coeff * -np.mean(joint_outside_limits)
 
         actuator_joint_velocity_limit = self.env.internal_state["actuator_joint_max_velocities"] * self.soft_actuator_joint_velocity_limit
@@ -83,6 +84,23 @@ class DefaultG1Reward(DefaultReward):
         missing_lower_feet_contacts = self.env.terrain_function.check_flat_feet_floor_missing_contacts()
         contact_filtered_missing_lower_feet_contacts = np.mean(feet_floor_contacts * missing_lower_feet_contacts)
         foot_flat_contact_reward = critical_coeff * self.foot_flat_contact_coeff * -contact_filtered_missing_lower_feet_contacts
+
+        if self.env.use_ball_plate:
+            ball_plate_metrics = self.env.get_ball_plate_metrics()
+            ball_plate_centering_norm = np.sum(np.square(ball_plate_metrics["relative_position"][:2]))
+            ball_plate_velocity_norm = np.sum(np.square(ball_plate_metrics["relative_velocity"][:2]))
+            ball_plate_centering_reward = critical_coeff * self.ball_plate_centering_coeff * -ball_plate_centering_norm
+            ball_plate_velocity_reward = critical_coeff * self.ball_plate_velocity_coeff * -ball_plate_velocity_norm
+            ball_plate_on_plate_reward = critical_coeff * self.ball_plate_on_plate_coeff * float(ball_plate_metrics["on_plate"])
+            ball_plate_alive_reward = critical_coeff * self.ball_plate_alive_coeff * (1.0 - float(ball_plate_metrics["dropped"]))
+            ball_plate_drop_penalty_reward = critical_coeff * self.ball_plate_drop_penalty_coeff * -float(ball_plate_metrics["dropped"])
+        else:
+            ball_plate_centering_reward = 0.0
+            ball_plate_velocity_reward = 0.0
+            ball_plate_on_plate_reward = 0.0
+            ball_plate_alive_reward = 0.0
+            ball_plate_drop_penalty_reward = 0.0
+            ball_plate_metrics = {"radial_distance": 0.0, "on_plate": False, "dropped": False}
 
         # Style and efficiency penalties can ramp in later.
         actuator_joint_nominal_diff_norm = np.mean(np.square((self.env.internal_state["data"].qpos[self.env.actuator_joint_mask_qpos] * self.env.internal_state["actuator_joint_keep_nominal"]) - (self.env.internal_state["actuator_joint_nominal_positions"] * self.env.internal_state["actuator_joint_keep_nominal"])))
@@ -118,10 +136,11 @@ class DefaultG1Reward(DefaultReward):
         tracking_reward = tracking_xy_velocity_command_reward + tracking_yaw_velocity_command_reward
         critical_penalty = z_velocity_reward + imu_acceleration_reward + angular_velocity_reward + angular_position_reward + \
                            joint_position_limit_reward + joint_velocity_limit_reward + collision_reward + base_height_reward + \
-                           all_feet_off_ground_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward
+                           all_feet_off_ground_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward + \
+                           ball_plate_centering_reward + ball_plate_velocity_reward + ball_plate_drop_penalty_reward
         style_penalty = actuator_joint_nominal_diff_reward + joint_velocity_reward + acceleration_reward + torque_reward + \
                         power_draw_penalty_reward + action_rate_reward + action_smoothness_reward + foot_air_time_reward + symmetry_air_reward
-        reward = tracking_reward + critical_penalty + style_penalty + alive_clipped_reward
+        reward = tracking_reward + critical_penalty + style_penalty + alive_clipped_reward + ball_plate_alive_reward + ball_plate_on_plate_reward
         reward = np.maximum(reward, 0.0) + alive_unclipped_reward
         reward = np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -150,11 +169,19 @@ class DefaultG1Reward(DefaultReward):
         self.env.internal_state["info"][f"reward/foot_slip"] = foot_slip_reward
         self.env.internal_state["info"][f"reward/foot_z_velocity"] = foot_z_velocity_reward
         self.env.internal_state["info"][f"reward/foot_flat_contact"] = foot_flat_contact_reward
+        self.env.internal_state["info"][f"reward/ball_plate_centering"] = ball_plate_centering_reward
+        self.env.internal_state["info"][f"reward/ball_plate_velocity"] = ball_plate_velocity_reward
+        self.env.internal_state["info"][f"reward/ball_plate_on_plate"] = ball_plate_on_plate_reward
+        self.env.internal_state["info"][f"reward/ball_plate_alive"] = ball_plate_alive_reward
+        self.env.internal_state["info"][f"reward/ball_plate_drop_penalty"] = ball_plate_drop_penalty_reward
         self.env.internal_state["info"][f"reward/critical_coeff"] = critical_coeff
         self.env.internal_state["info"][f"reward/style_coeff"] = style_coeff
         self.env.internal_state["info"][f"reward/critical_penalty_total"] = critical_penalty
         self.env.internal_state["info"][f"reward/style_penalty_total"] = style_penalty
         self.env.internal_state["info"][f"reward/total"] = reward
         self.env.internal_state["info"][f"env_info/xy_vel_diff_abs"] = np.nan_to_num(np.mean(np.minimum(np.abs(xy_difference), 2 * self.env.internal_state["max_command_velocity"])), nan=2 * self.env.internal_state["max_command_velocity"], posinf=2 * self.env.internal_state["max_command_velocity"], neginf=2 * self.env.internal_state["max_command_velocity"])
+        self.env.internal_state["info"][f"env_info/ball_plate_radial_distance"] = ball_plate_metrics["radial_distance"]
+        self.env.internal_state["info"][f"env_info/ball_plate_on_plate"] = float(ball_plate_metrics["on_plate"])
+        self.env.internal_state["info"][f"env_info/ball_plate_dropped"] = float(ball_plate_metrics["dropped"])
 
         return reward
