@@ -147,6 +147,7 @@ def get_config(environment_name):
             "action_smoothness_coeff": 0.1,
             "collision_coeff": 2.0,
             "base_height_coeff": 30.0,
+            "all_feet_off_ground_coeff": 2.0,
             "foot_air_time_coeff": 3.0,
             "foot_air_time_per_robot_size_m": 0.4,
             "symmetry_air_coeff": 1.0,

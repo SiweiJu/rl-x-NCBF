@@ -52,6 +52,7 @@ class PPO:
         self.gamma = config.algorithm.gamma
         self.gae_lambda = config.algorithm.gae_lambda
         self.clip_range = config.algorithm.clip_range
+        self.target_kl = config.algorithm.target_kl
         self.entropy_coef = config.algorithm.entropy_coef
         self.critic_coef = config.algorithm.critic_coef
         self.anticipation_coef = config.algorithm.ncbf.policy_loss_coef
@@ -80,6 +81,8 @@ class PPO:
         self.ncbf_w_wd = config.algorithm.ncbf.w_wd
         self.ncbf_eta_cbf = config.algorithm.ncbf.eta_cbf
         self.ncbf_L_target = config.algorithm.ncbf.L_max
+        self.ncbf_loss_coef = config.algorithm.ncbf.loss_coef
+        self.ncbf_stop_encoder_gradient = config.algorithm.ncbf.stop_encoder_gradient
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
@@ -1030,13 +1033,25 @@ class PPO:
                         prediction_loss = jnp.sum(next_state_mask_b * jnp.mean(jnp.square(pred_next_obs - next_state_target), axis=-1)) / (jnp.sum(next_state_mask_b) + 1e-8)
 
                         # ncbf_loss
+                        ncbf_latent_b = jax.lax.cond(
+                            self.ncbf_stop_encoder_gradient,
+                            jax.lax.stop_gradient,
+                            lambda x: x,
+                            latent_b,
+                        )
+                        ncbf_next_latent_b = jax.lax.cond(
+                            self.ncbf_stop_encoder_gradient,
+                            jax.lax.stop_gradient,
+                            lambda x: x,
+                            next_latent_b,
+                        )
                         h_input = jnp.concatenate([state_b[..., self.ncbf_observation_indices], last_action_b],
                                                   axis=-1)
                         h_input_next = jnp.concatenate([next_state_b[..., self.ncbf_observation_indices], action_b],
                                                        axis=-1)
 
-                        h_input = jnp.concatenate((h_input, latent_b), axis=-1)
-                        h_input_next = jnp.concatenate((h_input_next, next_latent_b), axis=-1)
+                        h_input = jnp.concatenate((h_input, ncbf_latent_b), axis=-1)
+                        h_input_next = jnp.concatenate((h_input_next, ncbf_next_latent_b), axis=-1)
 
                         h_x = ncbf_state.apply_fn(ncbf_params, h_input)  # [B]
                         h_xn = ncbf_state.apply_fn(ncbf_params, h_input_next)  # [B]
@@ -1073,7 +1088,7 @@ class PPO:
                                 self.critic_coef * critic_loss +
                                 self.anticipation_coef * anticipation_loss +
                                 self.aux_prediction_coef * prediction_loss +
-                                ncbf_loss
+                                self.ncbf_loss_coef * ncbf_loss
                                 )
 
                         # Create metrics
@@ -1084,6 +1099,7 @@ class PPO:
                             "loss/anticipation_loss": anticipation_loss,
                             "loss/aux_prediction_loss": prediction_loss,
                             "loss/ncbf_loss": ncbf_loss,
+                            "loss/weighted_ncbf_loss": self.ncbf_loss_coef * ncbf_loss,
                             "policy_ratio/approx_kl": approx_kl_div,
                             "policy_ratio/clip_fraction": clip_fraction,
                         }
@@ -1158,6 +1174,19 @@ class PPO:
                             batch_ncbf_masks[minibatch_indices],
                         )
 
+                        ppo_update_enabled = jnp.logical_or(
+                            self.target_kl <= 0.0,
+                            metrics["policy_ratio/approx_kl"] <= self.target_kl,
+                        )
+                        policy_gradients = jax.tree_util.tree_map(
+                            lambda g: jnp.where(ppo_update_enabled, g, jnp.zeros_like(g)),
+                            policy_gradients,
+                        )
+                        encoder_gradients = jax.tree_util.tree_map(
+                            lambda g: jnp.where(ppo_update_enabled, g, jnp.zeros_like(g)),
+                            encoder_gradients,
+                        )
+
                         policy_state = policy_state.apply_gradients(grads=policy_gradients)
                         critic_state = critic_state.apply_gradients(grads=critic_gradients)
                         encoder_state = encoder_state.apply_gradients(grads=encoder_gradients)
@@ -1181,6 +1210,7 @@ class PPO:
                         # metrics["next_step_predictor/loss"] = predictor_loss
                         metrics["gradients/policy_grad_norm"] = optax.global_norm(policy_gradients)
                         metrics["gradients/critic_grad_norm"] = optax.global_norm(critic_gradients)
+                        metrics["policy_ratio/update_enabled"] = ppo_update_enabled.astype(jnp.float32)
 
                         carry = (policy_state, critic_state, encoder_state, decoder_state, ncbf_state)
                         return carry, metrics

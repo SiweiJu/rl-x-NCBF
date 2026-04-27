@@ -17,6 +17,7 @@ def get_config(algorithm_name):
     config.gamma = 0.99
     config.gae_lambda = 0.9
     config.clip_range = 0.1
+    config.target_kl = 0.03  # <= 0 disables PPO update gating
     config.entropy_coef = 0.0
     config.critic_coef = 1.0
     config.max_grad_norm = 5.0
@@ -38,6 +39,8 @@ def get_config(algorithm_name):
     config.ncbf.w_wd = 0.0     # weight for weight decay loss
     config.ncbf.L_max = 0.0    # lipschitz target, set to 0.0 if just want small gradient
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
+    config.ncbf.loss_coef = 0.1
+    config.ncbf.stop_encoder_gradient = False
     config.ncbf.use_safety_layer = False
     config.ncbf.nr_minibatches = 50
     config.ncbf.nr_hidden_units = 512
