@@ -78,7 +78,7 @@ class ReplayBuffer():
         self.size = min(self.size + 1, self.capacity)
 
     def add_batch(self, states, next_states, actions, rewards, terminations, masks, y_targets):
-        assert states.ndim == 2, "States should only have batch dimension when adding a batch of transitions."
+        assert states.ndim == 2 + len(self.os_shape), "States should have time/env batch dimensions when adding rollout transitions."
 
         batch_size = states.shape[0]
 

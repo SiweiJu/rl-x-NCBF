@@ -259,6 +259,9 @@ class PPO:
                     optimization_metrics["lr/learning_rate"] = policy_state.opt_state[1].hyperparams["learning_rate"]
                     optimization_metrics["v_value/explained_variance"] = 1 - jnp.var(returns - values) / (jnp.var(returns) + 1e-8)
                     optimization_metrics["policy/std_dev"] = jnp.mean(jnp.exp(policy_state.params["params"]["policy_logstd"]))
+                    rollout_metrics = {
+                        "rollout/nr_terminations": jnp.sum(terminations.astype(jnp.float32)),
+                    }
 
 
                     # Logging
@@ -268,7 +271,7 @@ class PPO:
                         "steps/nr_updates": combined_learning_iteration_step * self.nr_epochs * self.nr_minibatches,
                     }
 
-                    combined_metrics = {**infos, **steps_metrics, **optimization_metrics}
+                    combined_metrics = {**infos, **steps_metrics, **optimization_metrics, **rollout_metrics}
                     combined_metrics = tree.map_structure(lambda x: jnp.mean(x), combined_metrics)
 
                     def callback(carry):

@@ -28,6 +28,7 @@ class DefaultReward:
         self.action_smoothness_coeff = env.env_config["reward"]["action_smoothness_coeff"] * env.dt
         self.collision_coeff = env.env_config["reward"]["collision_coeff"] * env.dt
         self.base_height_coeff = env.env_config["reward"]["base_height_coeff"] * env.dt
+        self.all_feet_off_ground_coeff = env.env_config["reward"].get("all_feet_off_ground_coeff", 2.0) * env.dt
         self.foot_air_time_coeff = env.env_config["reward"]["foot_air_time_coeff"] * env.dt
         self.foot_air_time_per_robot_size_m = env.env_config["reward"]["foot_air_time_per_robot_size_m"]
         self.all_feet_off_ground_coeff = env.env_config["reward"]["all_feet_off_ground_coeff"] * env.dt
@@ -65,6 +66,7 @@ class DefaultReward:
     def setup(self, internal_state):
         internal_state["feet_time_on_ground"] = jnp.zeros(self.env.nr_feet)
         internal_state["feet_time_in_air"] = jnp.zeros(self.env.nr_feet)
+        internal_state["previous_feet_floor_contacts"] = jnp.ones(self.env.nr_feet, dtype=bool)
         internal_state["previous_actuator_joint_velocities"] = jnp.zeros(self.env.nr_actuator_joints)
         internal_state["previous_imu_linear_velocity"] = jnp.zeros(self.env.imu_linear_velocity_sensor_dim)
         internal_state["sum_tracking_performance_percentage"] = 0.0
@@ -74,6 +76,7 @@ class DefaultReward:
         feet_floor_contacts = self.env.terrain_function.check_feet_floor_contact(data)
         internal_state["feet_time_on_ground"] = jnp.where(feet_floor_contacts, internal_state["feet_time_on_ground"] + self.env.dt, 0.0)
         internal_state["feet_time_in_air"] = jnp.where(feet_floor_contacts, 0.0, internal_state["feet_time_in_air"] + self.env.dt)
+        internal_state["previous_feet_floor_contacts"] = feet_floor_contacts
         internal_state["previous_actuator_joint_velocities"] = data.qvel[self.env.actuator_joint_mask_qvel]
         internal_state["previous_imu_linear_velocity"] = data.sensordata[self.env.imu_linear_velocity_sensor_adr:self.env.imu_linear_velocity_sensor_adr + self.env.imu_linear_velocity_sensor_dim]
 

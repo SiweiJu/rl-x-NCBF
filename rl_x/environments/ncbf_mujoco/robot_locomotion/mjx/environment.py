@@ -389,6 +389,7 @@ class LocomotionEnv:
             "last_state": last_observation,
             "joint_dropout_mask": jnp.ones(self.nr_actuator_joints, dtype=bool),
             "robot_dimensions_mean": self.robot_dimensions_mean,
+            "body_tilt_threshold": self.env_config["termination"]["body_tilt_threshold"],
             "max_command_velocity": jnp.minimum(self.robot_dimensions_mean * self.command_function.max_velocity_per_m_factor, self.command_function.clip_max_velocity),
             "ball_plate_ball_radius": self.ball_plate_ball_radius if self.use_ball_plate else 0.0,
             "ball_plate_ball_mass": self.ball_plate_ball_mass if self.use_ball_plate else 0.0,
@@ -465,7 +466,6 @@ class LocomotionEnv:
         new_internal_state["imu_orientation_euler"] = new_internal_state["imu_orientation_rotation"].as_euler("xyz")
         new_internal_state["last_action"] = last_action
         new_internal_state["second_last_action"] = jnp.zeros(self.nr_actuator_joints)
-        new_internal_state["last_state"] = last_state
 
         self.reward_function.setup(new_internal_state)
         self.domain_randomization_action_delay_function.setup(new_internal_state)
@@ -473,6 +473,8 @@ class LocomotionEnv:
         data, mjx_model = self._reset_ball_plate_state(data, mjx_model, new_internal_state, ball_plate_key)
 
         next_observation = self.get_observation(data, mjx_model, new_internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
+        last_state = next_observation
+        new_internal_state["last_state"] = last_state
         reward = 0.0
         terminated = False
         truncated = False
@@ -600,13 +602,12 @@ class LocomotionEnv:
 
         robot_height = internal_state["robot_imu_height_over_ground"]
         robot_height_threshold = self.env_config["termination"]["height_percentage_threshold"] * internal_state["robot_nominal_imu_height_over_ground"]
-        robot_height_normed = jnp.clip((robot_height - robot_height_threshold) / robot_height_threshold, -1, 1)
+        robot_height_safe = (robot_height >= robot_height_threshold).astype(jnp.float32)
 
         body_roll = internal_state["imu_orientation_euler"][0]
         body_pitch = internal_state["imu_orientation_euler"][1]
         body_tilt = jnp.sqrt(body_roll ** 2 + body_pitch ** 2)
-        tilt_threshold = 0.4
-        body_tilt_normed = jnp.clip((tilt_threshold - body_tilt) / tilt_threshold, -1, 1)
+        body_tilt_safe = (body_tilt <= internal_state["body_tilt_threshold"]).astype(jnp.float32)
 
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
@@ -625,8 +626,8 @@ class LocomotionEnv:
             qpos, # qpos all not normalized, base pose can be dummy for deployment
             qvel, # qvel all not normalized
             feet_ground_contact,
-            jnp.array([robot_height_normed]),
-            jnp.array([body_tilt_normed]),
+            jnp.array([robot_height_safe]),
+            jnp.array([body_tilt_safe]),
         ])
 
         # Add noise

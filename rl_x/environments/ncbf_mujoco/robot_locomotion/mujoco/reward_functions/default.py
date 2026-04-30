@@ -65,6 +65,7 @@ class DefaultReward:
     def setup(self):
         self.env.internal_state["feet_time_on_ground"] = np.zeros(self.env.nr_feet)
         self.env.internal_state["feet_time_in_air"] = np.zeros(self.env.nr_feet)
+        self.env.internal_state["previous_feet_floor_contacts"] = np.ones(self.env.nr_feet, dtype=bool)
         self.env.internal_state["previous_actuator_joint_velocities"] = np.zeros(self.env.nr_actuator_joints)
         self.env.internal_state["previous_imu_linear_velocity"] = np.zeros(self.env.imu_linear_velocity_sensor_dim)
         self.env.internal_state["sum_tracking_performance_percentage"] = 0.0
@@ -74,6 +75,7 @@ class DefaultReward:
         feet_floor_contacts = self.env.terrain_function.check_feet_floor_contact()
         self.env.internal_state["feet_time_on_ground"] = np.where(feet_floor_contacts, self.env.internal_state["feet_time_on_ground"] + self.env.dt, 0.0)
         self.env.internal_state["feet_time_in_air"] = np.where(feet_floor_contacts, 0.0, self.env.internal_state["feet_time_in_air"] + self.env.dt)
+        self.env.internal_state["previous_feet_floor_contacts"] = feet_floor_contacts
         self.env.internal_state["previous_actuator_joint_velocities"] = self.env.internal_state["data"].qvel[self.env.actuator_joint_mask_qvel]
         self.env.internal_state["previous_imu_linear_velocity"] = self.env.internal_state["data"].sensordata[self.env.imu_linear_velocity_sensor_adr:self.env.imu_linear_velocity_sensor_adr + self.env.imu_linear_velocity_sensor_dim]
 
