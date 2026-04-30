@@ -200,6 +200,7 @@ class LocomotionEnv(gym.Env):
             "second_last_action": np.zeros(self.nr_actuator_joints),
             "joint_dropout_mask": np.ones(self.nr_actuator_joints, dtype=bool),
             "robot_dimensions_mean": self.robot_dimensions_mean,
+            "body_tilt_threshold": env_config["termination"]["body_tilt_threshold"],
             "max_command_velocity": np.minimum(self.robot_dimensions_mean * self.command_function.max_velocity_per_m_factor, self.command_function.clip_max_velocity),
             "nr_collisions_in_nominal": 0,
             "info": {
@@ -517,8 +518,7 @@ class LocomotionEnv(gym.Env):
         body_roll = self.internal_state["imu_orientation_euler"][0]
         body_pitch = self.internal_state["imu_orientation_euler"][1]
         body_tilt = np.sqrt(body_roll ** 2 + body_pitch ** 2)
-        tilt_threshold = 0.4
-        body_tilt_safe = np.float32(body_tilt <= tilt_threshold)
+        body_tilt_safe = np.float32(body_tilt <= self.internal_state["body_tilt_threshold"])
 
         observation = np.concatenate([
             self.internal_state["data"].qpos[self.actuator_joint_mask_qpos],

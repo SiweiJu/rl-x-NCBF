@@ -320,17 +320,17 @@ class PPO:
                 return y, mask, dists_to_next_term
 
             @jax.jit
-            def get_receding_min_target(states: jnp.ndarray,
+            def get_receding_min_target(future_states: jnp.ndarray,
                                         dones: jnp.ndarray,
                                         terminates: jnp.ndarray):
                 """
-                states:      [T, N, D]
-                dones:       [T, N] bool
-                terminates:  [T, N] bool
+                future_states: [T, N, D], actual next observations for each sampled transition
+                dones:         [T, N] bool
+                terminates:    [T, N] bool
 
                 Returns:
-                  target: [T, N]      receding-horizon min target
-                  safe_y: [T] if state is receiding-horizon-safe
+                  target: [T, N, K]   receding-horizon min target
+                  safe_y: [T, N] if state is receding-horizon-safe
                   y:      [T, N] bool same as your current y
                   mask:   [T, N] bool same as your current mask
                 """
@@ -338,7 +338,7 @@ class PPO:
                 idx = jnp.asarray(self.env.ncbf_target_indices)
 
                 # [T, N, K], where K = number of target state dims
-                vals = states[..., idx]
+                vals = future_states[..., idx]
 
                 y, mask, dists_to_next_term = window_any_done_next_H(dones, terminates)
 
@@ -365,7 +365,7 @@ class PPO:
                 # Mask invalid entries with +inf so min ignores them
                 windows = jnp.where(valid[..., None], windows, jnp.inf)
 
-                # Min over time -> [T, N]
+                # Min over time -> [T, N, K]
                 target = jnp.min(windows, axis=(1))
 
                 return target, y, mask, dists_to_next_term
@@ -380,11 +380,11 @@ class PPO:
                 h_input = jnp.concatenate((h_input, minib_latent), axis=-1)
                 h_input_next = jnp.concatenate((h_input_next, minib_latent_next), axis=-1)
 
-                h_x = ncbf_state[0].apply_fn(params, h_input)  # [B]
-                h_xn = ncbf_state[0].apply_fn(params, h_input_next)  # [B]
+                h_x_logits = ncbf_state[0].apply_fn(params, h_input)  # [B]
+                h_xn_logits = ncbf_state[0].apply_fn(params, h_input_next)  # [B]
 
-                h_x = nn.sigmoid(h_x)
-                h_xn = nn.sigmoid(h_xn)
+                h_x = nn.sigmoid(h_x_logits)
+                h_xn = nn.sigmoid(h_xn_logits)
                 
                 minib_y = minib_y.astype(h_x.dtype)
                 minib_mask_head = minib_mask[..., None].astype(h_x.dtype)
@@ -395,7 +395,7 @@ class PPO:
                 # use the decaying coef only for negtive samples
                 coef = jnp.where(minib_y < 0.5, coef[..., None], 1.0)
 
-                bce = optax.sigmoid_binary_cross_entropy(h_x, minib_y)
+                bce = optax.sigmoid_binary_cross_entropy(h_x_logits, minib_y)
                 head_loss = jnp.mean(coef * bce, axis=-1)
                 num = jnp.sum(minib_mask * head_loss, axis=-1)
                 den = jnp.sum(minib_mask) + 1e-8
@@ -442,7 +442,7 @@ class PPO:
 
                 # calculate mse of ncbf prediction for logging, also calculate mse for y is true or false separately
                 valid = minib_mask_head.astype(jnp.float32)
-                p_safe = nn.sigmoid(h_x)
+                p_safe = h_x
                 sq_err = jnp.square(p_safe - minib_y)
                 mse_all = jnp.sum(valid * sq_err) / (jnp.sum(valid) + 1e-8)
 
@@ -717,14 +717,27 @@ class PPO:
                     states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks = batch
 
                     # process the batch data to get mask and y_target
-                    y_target, safe_y, masks, indices_to_term = get_receding_min_target(states, dones, terminations)
+                    y_target, safe_y, masks, indices_to_term = get_receding_min_target(next_states, dones, terminations)
                     next_state_mask = ~ dones
 
                     ncbf_metrics = {}
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_target)
+                    ncbf_metrics["ncbf/mask_rate"] = jnp.mean(masks.astype(jnp.float32))
+                    ncbf_metrics["ncbf/safe_y_rate"] = jnp.mean(safe_y.astype(jnp.float32))
                     ncbf_metrics["ncbf/nr_rollout_neg_samples"] = jnp.sum(~safe_y)
+                    ncbf_metrics["rollout/done_rate"] = jnp.mean(dones.astype(jnp.float32))
+                    ncbf_metrics["rollout/termination_rate"] = jnp.mean(terminations.astype(jnp.float32))
+                    ncbf_metrics["rollout/truncation_rate"] = jnp.mean((dones & ~terminations).astype(jnp.float32))
+                    ncbf_metrics["rollout/reward_mean"] = jnp.mean(rewards)
+                    action_low = jnp.asarray(self.env.single_action_space.low)
+                    action_high = jnp.asarray(self.env.single_action_space.high)
+                    ncbf_metrics["policy/raw_action_abs_mean"] = jnp.mean(jnp.abs(actions))
+                    ncbf_metrics["policy/raw_action_abs_max"] = jnp.max(jnp.abs(actions))
+                    ncbf_metrics["policy/raw_action_out_of_bounds_fraction"] = jnp.mean(
+                        ((actions < action_low) | (actions > action_high)).astype(jnp.float32)
+                    )
 
                     @jax.jit
                     def append_to_buffer(buffer,
@@ -1005,6 +1018,16 @@ class PPO:
                     batch_ncbf_masks = masks.reshape(-1)
                     batch_indices_to_term = indices_to_term.reshape(-1)
 
+                    initial_action_mean, initial_action_logstd = self.policy.apply(policy_state.params, batch_states)
+                    initial_action_logstd = jnp.clip(initial_action_logstd, -5.0, 2.0)
+                    initial_action_std = jnp.exp(initial_action_logstd)
+                    initial_new_log_probs = -0.5 * ((batch_actions - initial_action_mean) / initial_action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - initial_action_logstd
+                    initial_new_log_probs = initial_new_log_probs.sum(1)
+                    initial_logratio = initial_new_log_probs - batch_log_probs
+                    initial_ratio = jnp.exp(initial_logratio)
+                    initial_approx_kl = jnp.mean((initial_ratio - 1.0) - initial_logratio)
+                    initial_abs_logratio = jnp.mean(jnp.abs(initial_logratio))
+
                     # vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
                     # safe_mean = lambda x: jnp.mean(x) if x is not None else x
                     # mean_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
@@ -1063,18 +1086,23 @@ class PPO:
                             self.target_kl <= 0.0,
                             metrics["policy_ratio/approx_kl"] <= self.target_kl,
                         )
-                        policy_gradients = jax.tree_util.tree_map(
-                            lambda g: jnp.where(ppo_update_enabled, g, jnp.zeros_like(g)),
-                            policy_gradients,
-                        )
-                        encoder_gradients = jax.tree_util.tree_map(
-                            lambda g: jnp.where(ppo_update_enabled, g, jnp.zeros_like(g)),
-                            encoder_gradients,
-                        )
 
-                        policy_state = policy_state.apply_gradients(grads=policy_gradients)
+                        policy_raw_grad_norm = optax.global_norm(policy_gradients)
+                        encoder_raw_grad_norm = optax.global_norm(encoder_gradients)
+
+                        policy_state = jax.lax.cond(
+                            ppo_update_enabled,
+                            lambda state: state.apply_gradients(grads=policy_gradients),
+                            lambda state: state,
+                            policy_state,
+                        )
                         critic_state = critic_state.apply_gradients(grads=critic_gradients)
-                        encoder_state = encoder_state.apply_gradients(grads=encoder_gradients)
+                        encoder_state = jax.lax.cond(
+                            ppo_update_enabled,
+                            lambda state: state.apply_gradients(grads=encoder_gradients),
+                            lambda state: state,
+                            encoder_state,
+                        )
                         decoder_state = decoder_state.apply_gradients(grads=decoder_gradients)
                         # temporarily not updating ncbf
                         ncbf_state = ncbf_state.apply_gradients(grads=ncbf_gradients)
@@ -1093,8 +1121,11 @@ class PPO:
                         # decoder_state = decoder_state.apply_gradients(grads=grads_predictor[1])
 
                         # metrics["next_step_predictor/loss"] = predictor_loss
-                        metrics["gradients/policy_grad_norm"] = optax.global_norm(policy_gradients)
+                        metrics["gradients/policy_grad_norm"] = jnp.where(ppo_update_enabled, policy_raw_grad_norm, 0.0)
+                        metrics["gradients/policy_raw_grad_norm"] = policy_raw_grad_norm
                         metrics["gradients/critic_grad_norm"] = optax.global_norm(critic_gradients)
+                        metrics["gradients/encoder_grad_norm"] = jnp.where(ppo_update_enabled, encoder_raw_grad_norm, 0.0)
+                        metrics["gradients/encoder_raw_grad_norm"] = encoder_raw_grad_norm
                         metrics["policy_ratio/update_enabled"] = ppo_update_enabled.astype(jnp.float32)
 
                         carry = (policy_state, critic_state, encoder_state, decoder_state, ncbf_state)
@@ -1107,6 +1138,12 @@ class PPO:
                     optimization_metrics["lr/learning_rate"] = policy_state.opt_state[1].hyperparams["learning_rate"]
                     optimization_metrics["v_value/explained_variance"] = 1 - jnp.var(returns - values) / (jnp.var(returns) + 1e-8)
                     optimization_metrics["policy/std_dev"] = jnp.mean(jnp.exp(jnp.clip(policy_state.params["params"]["policy_logstd"], -5.0, 2.0)))
+                    optimization_metrics["policy_ratio/initial_approx_kl"] = initial_approx_kl
+                    optimization_metrics["policy_ratio/initial_abs_logratio"] = initial_abs_logratio
+                    optimization_metrics["rollout/advantages_mean"] = jnp.mean(advantages)
+                    optimization_metrics["rollout/advantages_std"] = jnp.std(advantages)
+                    optimization_metrics["rollout/returns_mean"] = jnp.mean(returns)
+                    optimization_metrics["rollout/returns_std"] = jnp.std(returns)
 
                     # Logging
                     combined_learning_iteration_step = (multi_learning_iteration_step * self.nr_updates_per_multi_learning_iteration) + learning_iteration_step + 1

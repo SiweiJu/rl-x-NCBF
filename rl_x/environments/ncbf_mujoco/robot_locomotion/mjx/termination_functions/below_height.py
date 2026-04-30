@@ -1,3 +1,6 @@
+import jax.numpy as jnp
+
+
 class BelowHeightTermination:
     def __init__(self, env):
         self.env = env
@@ -10,5 +13,9 @@ class BelowHeightTermination:
             self.height_percentage_threshold * internal_state["robot_nominal_imu_height_over_ground"]
         )
 
-        body_tilt
-        return below_height
+        body_roll = internal_state["imu_orientation_euler"][0]
+        body_pitch = internal_state["imu_orientation_euler"][1]
+        body_tilt_angle = jnp.sqrt(body_roll ** 2 + body_pitch ** 2)
+        body_tilt = body_tilt_angle > internal_state["body_tilt_threshold"]
+
+        return below_height | body_tilt

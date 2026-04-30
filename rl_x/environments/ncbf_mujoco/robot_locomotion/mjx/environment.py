@@ -294,6 +294,7 @@ class LocomotionEnv:
             "last_state": last_observation,
             "joint_dropout_mask": jnp.ones(self.nr_actuator_joints, dtype=bool),
             "robot_dimensions_mean": self.robot_dimensions_mean,
+            "body_tilt_threshold": self.env_config["termination"]["body_tilt_threshold"],
             "max_command_velocity": jnp.minimum(self.robot_dimensions_mean * self.command_function.max_velocity_per_m_factor, self.command_function.clip_max_velocity),
             "nr_collisions_in_nominal": 0,
             "history_stack": history_stack,
@@ -507,8 +508,7 @@ class LocomotionEnv:
         body_roll = internal_state["imu_orientation_euler"][0]
         body_pitch = internal_state["imu_orientation_euler"][1]
         body_tilt = jnp.sqrt(body_roll ** 2 + body_pitch ** 2)
-        tilt_threshold = 0.4
-        body_tilt_safe = (body_tilt <= tilt_threshold).astype(jnp.float32)
+        body_tilt_safe = (body_tilt <= internal_state["body_tilt_threshold"]).astype(jnp.float32)
 
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
