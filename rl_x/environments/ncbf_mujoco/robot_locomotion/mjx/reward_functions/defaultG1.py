@@ -47,8 +47,10 @@ class DefaultG1Reward(DefaultReward):
         roll_pitch_position_norm = jnp.sum(jnp.square(internal_state["imu_orientation_euler"][:2]))
         angular_position_reward = critical_coeff * self.roll_pitch_pos_coeff * -roll_pitch_position_norm
 
-        joint_outside_limits = jnp.maximum(data.qpos[self.env.actuator_joint_mask_qpos] - internal_state["joint_position_limits"][:, 1], 0.0) + \
-                               jnp.maximum(internal_state["joint_position_limits"][:, 0] - data.qpos[self.env.actuator_joint_mask_qpos], 0.0)
+        joint_positions = data.qpos[self.env.actuator_joint_mask_qpos]
+        actuator_joint_position_limits = internal_state["joint_position_limits"][self.env.actuator_joint_mask_joints - 1]
+        joint_outside_limits = jnp.maximum(joint_positions - actuator_joint_position_limits[:, 1], 0.0) + \
+                               jnp.maximum(actuator_joint_position_limits[:, 0] - joint_positions, 0.0)
         joint_position_limit_reward = critical_coeff * self.joint_position_limit_coeff * -jnp.mean(joint_outside_limits)
 
         actuator_joint_velocity_limit = internal_state["actuator_joint_max_velocities"] * self.soft_actuator_joint_velocity_limit
