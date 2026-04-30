@@ -28,9 +28,8 @@ class Policy(nn.Module):
     policy_observation_indices: Sequence[int]
 
     @nn.compact
-    def __call__(self, x, latent_z):
+    def __call__(self, x):
         x = x[..., self.policy_observation_indices]
-        x = jnp.concatenate([x, latent_z], axis=-1)
         policy_mean = x
         # policy_mean = nn.Dense(512, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(policy_mean)
         # policy_mean = nn.LayerNorm()(policy_mean)

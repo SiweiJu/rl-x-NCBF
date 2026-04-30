@@ -378,7 +378,7 @@ class LocomotionEnv(gym.Env):
         self.internal_state["data"].ctrl = np.zeros(self.nr_actuator_joints)
         mujoco.mj_forward(self.internal_state["mj_model"], self.internal_state["data"])
 
-        episode_success = self.internal_state["info_episode_store"]["episode_return"] >= 10.0
+        episode_success = self.internal_state["info_episode_store"]["episode_return"] >= self.env_curriculum_level_success_episode_return
         self.internal_state["env_curriculum_levels_in_a_row"] = np.where(episode_success,
             np.where(self.internal_state["env_curriculum_levels_in_a_row"] >= 0,
                 self.internal_state["env_curriculum_levels_in_a_row"] + 1,
@@ -396,9 +396,7 @@ class LocomotionEnv(gym.Env):
         self.internal_state["imu_orientation_rotation_inverse"] = self.internal_state["imu_orientation_rotation"].inv()
         self.internal_state["imu_orientation_euler"] = self.internal_state["imu_orientation_rotation"].as_euler("xyz")
         self.internal_state["last_action"] = np.zeros(self.nr_actuator_joints)
-        self.internal_state["last_state"] = np.zeros(self.policy_observation_indices.shape[0])
-
-        self.internal_state["info"]["last_state"] = self.internal_state["last_state"].copy()
+        self.internal_state["last_state"] = np.zeros(self.observation_space.shape)
         self.internal_state["info"]["last_action"] = self.internal_state["last_action"].copy()
 
         self.internal_state["second_last_action"] = np.zeros(self.nr_actuator_joints)
@@ -411,6 +409,8 @@ class LocomotionEnv(gym.Env):
             self.command_function.get_next_command()
 
         next_observation = self.get_observation(np.zeros(self.nr_actuator_joints))
+        self.internal_state["last_state"] = next_observation.copy()
+        self.internal_state["info"]["last_state"] = self.internal_state["last_state"].copy()
 
         history_stack = np.tile(next_observation[None, :], (self.nr_history_steps, 1))
         self.internal_state["history_stack"] = history_stack
@@ -434,12 +434,6 @@ class LocomotionEnv(gym.Env):
 
         self.internal_state["data"].ctrl = target_joint_positions
         mujoco.mj_step(self.internal_state["mj_model"], self.internal_state["data"], self.nr_substeps)
-
-        # debug only
-        body_roll = self.internal_state["imu_orientation_euler"][0]
-        body_pitch = self.internal_state["imu_orientation_euler"][1]
-        tilt = np.sqrt(body_roll ** 2 + body_pitch ** 2)
-        print("body_tilt: ", tilt)
 
         # for debugging
         # copy data to avoid modifying it in-place
@@ -518,13 +512,13 @@ class LocomotionEnv(gym.Env):
 
         robot_height = self.internal_state["robot_imu_height_over_ground"]
         robot_height_threshold = self.env_config["termination"]["height_percentage_threshold"] * self.internal_state["robot_nominal_imu_height_over_ground"]
-        robot_height_normed = np.clip((robot_height - robot_height_threshold) / robot_height_threshold, -1, 1)
+        robot_height_safe = np.float32(robot_height >= robot_height_threshold)
 
         body_roll = self.internal_state["imu_orientation_euler"][0]
         body_pitch = self.internal_state["imu_orientation_euler"][1]
         body_tilt = np.sqrt(body_roll ** 2 + body_pitch ** 2)
         tilt_threshold = 0.4
-        body_tilt_normed = np.clip((tilt_threshold - body_tilt) / tilt_threshold, -1, 1)
+        body_tilt_safe = np.float32(body_tilt <= tilt_threshold)
 
         observation = np.concatenate([
             self.internal_state["data"].qpos[self.actuator_joint_mask_qpos],
@@ -542,8 +536,8 @@ class LocomotionEnv(gym.Env):
             qpos,    # qpos all
             qvel,    # qvel all
             feet_ground_contact,
-            np.array([robot_height_normed]),
-            np.array([body_tilt_normed]),
+            np.array([robot_height_safe]),
+            np.array([body_tilt_safe]),
         ])
 
         # Add noise
