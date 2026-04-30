@@ -729,6 +729,7 @@ class PPO:
                     ncbf_metrics["ncbf/nr_rollout_neg_samples"] = jnp.sum(~safe_y)
                     ncbf_metrics["rollout/done_rate"] = jnp.mean(dones.astype(jnp.float32))
                     ncbf_metrics["rollout/termination_rate"] = jnp.mean(terminations.astype(jnp.float32))
+                    ncbf_metrics["rollout/nr_terminations"] = jnp.sum(terminations.astype(jnp.float32))
                     ncbf_metrics["rollout/truncation_rate"] = jnp.mean((dones & ~terminations).astype(jnp.float32))
                     ncbf_metrics["rollout/reward_mean"] = jnp.mean(rewards)
                     action_low = jnp.asarray(self.env.single_action_space.low)

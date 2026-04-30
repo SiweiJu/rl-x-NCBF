@@ -61,6 +61,10 @@ class LocomotionEnv(gym.Env):
                          dclass="visual", rgba="0.1 0.45 1.0 1")
             dir_base.add("geom", name="dir_arrow", type="cylinder", size=".012 .001", pos="0 0 0",
                          dclass="visual", rgba="0.1 0.45 1.0 1")
+            dir_base.add("geom", name="yaw_arrow", type="cylinder", size=".018 .001", pos="0 0 0",
+                         dclass="visual", rgba="1.0 0.55 0.05 1")
+            dir_base.add("geom", name="yaw_arrow_ball", type="sphere", size=".045", pos="0 0 0",
+                         dclass="visual", rgba="1.0 0.55 0.05 1")
 
         if self.should_render:
             # add the safety light
@@ -229,6 +233,8 @@ class LocomotionEnv(gym.Env):
             if self.add_goal_arrow:
                 self.dir_arrow_geom_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "dir_arrow")
                 self.dir_arrow_ball_geom_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "dir_arrow_ball")
+                self.yaw_arrow_geom_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "yaw_arrow")
+                self.yaw_arrow_ball_geom_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "yaw_arrow_ball")
             self.uses_hfield = self.initial_mj_model.hfield_data.shape[0] != 0
             self.light_xdir = self.c_data.light_xdir
             self.light_xpos = self.c_data.light_xpos
@@ -311,9 +317,14 @@ class LocomotionEnv(gym.Env):
     def _update_goal_arrow(self):
         data = self.internal_state["data"]
         model = self.viewer.model
-        goal_xy_local = np.asarray(self.internal_state["goal_velocities"][:2], dtype=np.float64)
+        goal_velocities = np.asarray(self.internal_state["goal_velocities"], dtype=np.float64)
+        goal_xy_local = goal_velocities[:2]
         goal_speed = np.linalg.norm(goal_xy_local)
         arrow_base_pos = data.body("trunk").xpos + np.array([0.0, 0.0, 0.5], dtype=np.float64)
+        trunk_yaw = self.internal_state["imu_orientation_euler"][2]
+        cos_yaw = np.cos(trunk_yaw)
+        sin_yaw = np.sin(trunk_yaw)
+        yaw_offset_dir = np.array([-sin_yaw, cos_yaw, 0.0], dtype=np.float64)
 
         data.geom_xpos[self.dir_arrow_ball_geom_id] = arrow_base_pos
 
@@ -322,27 +333,51 @@ class LocomotionEnv(gym.Env):
             data.geom_xpos[self.dir_arrow_geom_id] = arrow_base_pos
             model.geom_rgba[self.dir_arrow_geom_id, 3] = 0.0
             model.geom_rgba[self.dir_arrow_ball_geom_id, 3] = 0.25
+        else:
+            goal_xy_world = np.array([
+                cos_yaw * goal_xy_local[0] - sin_yaw * goal_xy_local[1],
+                sin_yaw * goal_xy_local[0] + cos_yaw * goal_xy_local[1],
+            ], dtype=np.float64)
+            goal_xy_world /= np.linalg.norm(goal_xy_world)
+            arrow_dir = np.array([goal_xy_world[0], goal_xy_world[1], 0.0], dtype=np.float64)
+            yaw_offset_dir = np.array([-arrow_dir[1], arrow_dir[0], 0.0], dtype=np.float64)
+
+            max_command_velocity = max(float(self.internal_state["max_command_velocity"]), 1e-6)
+            normalized_speed = min(goal_speed / max_command_velocity, 1.0)
+            arrow_half_length = 0.05 + 0.20 * normalized_speed
+
+            model.geom_size[self.dir_arrow_geom_id, 1] = arrow_half_length
+            model.geom_rgba[self.dir_arrow_geom_id, 3] = 1.0
+            model.geom_rgba[self.dir_arrow_ball_geom_id, 3] = 1.0
+            data.geom_xmat[self.dir_arrow_geom_id] = self._xmat_with_z_axis(arrow_dir).reshape((9,))
+            data.geom_xpos[self.dir_arrow_geom_id] = arrow_base_pos + arrow_dir * arrow_half_length
+
+        goal_yaw_velocity = goal_velocities[2]
+        yaw_base_pos = arrow_base_pos + 0.22 * yaw_offset_dir
+
+        if np.abs(goal_yaw_velocity) < 1e-6:
+            data.geom_xpos[self.yaw_arrow_geom_id] = yaw_base_pos
+            data.geom_xpos[self.yaw_arrow_ball_geom_id] = yaw_base_pos
+            model.geom_size[self.yaw_arrow_geom_id, 1] = 1e-6
+            model.geom_rgba[self.yaw_arrow_geom_id, 3] = 0.0
+            model.geom_rgba[self.yaw_arrow_ball_geom_id, 3] = 0.25
             return
 
-        trunk_yaw = self.internal_state["imu_orientation_euler"][2]
-        cos_yaw = np.cos(trunk_yaw)
-        sin_yaw = np.sin(trunk_yaw)
-        goal_xy_world = np.array([
-            cos_yaw * goal_xy_local[0] - sin_yaw * goal_xy_local[1],
-            sin_yaw * goal_xy_local[0] + cos_yaw * goal_xy_local[1],
-        ], dtype=np.float64)
-        goal_xy_world /= np.linalg.norm(goal_xy_world)
-        arrow_dir = np.array([goal_xy_world[0], goal_xy_world[1], 0.0], dtype=np.float64)
-
         max_command_velocity = max(float(self.internal_state["max_command_velocity"]), 1e-6)
-        normalized_speed = min(goal_speed / max_command_velocity, 1.0)
-        arrow_half_length = 0.05 + 0.20 * normalized_speed
+        yaw_velocity_scale = max_command_velocity
+        if hasattr(self.command_function, "velocity_ratio"):
+            yaw_velocity_scale *= max(float(self.command_function.velocity_ratio[2]), 1e-6)
+        normalized_yaw_speed = min(np.abs(goal_yaw_velocity) / max(yaw_velocity_scale, 1e-6), 1.0)
+        yaw_dir = np.array([0.0, 0.0, np.sign(goal_yaw_velocity)], dtype=np.float64)
+        yaw_length = 0.08 + 0.42 * normalized_yaw_speed
+        yaw_half_length = 0.5 * yaw_length
 
-        model.geom_size[self.dir_arrow_geom_id, 1] = arrow_half_length
-        model.geom_rgba[self.dir_arrow_geom_id, 3] = 1.0
-        model.geom_rgba[self.dir_arrow_ball_geom_id, 3] = 1.0
-        data.geom_xmat[self.dir_arrow_geom_id] = self._xmat_with_z_axis(arrow_dir).reshape((9,))
-        data.geom_xpos[self.dir_arrow_geom_id] = arrow_base_pos + arrow_dir * arrow_half_length
+        model.geom_size[self.yaw_arrow_geom_id, 1] = yaw_half_length
+        model.geom_rgba[self.yaw_arrow_geom_id, 3] = 1.0
+        model.geom_rgba[self.yaw_arrow_ball_geom_id, 3] = 1.0
+        data.geom_xmat[self.yaw_arrow_geom_id] = self._xmat_with_z_axis(yaw_dir).reshape((9,))
+        data.geom_xpos[self.yaw_arrow_geom_id] = yaw_base_pos + yaw_dir * yaw_half_length
+        data.geom_xpos[self.yaw_arrow_ball_geom_id] = yaw_base_pos + yaw_dir * yaw_length
 
 
     def render(self):

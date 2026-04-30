@@ -9,13 +9,35 @@ class DefaultG1Reward(DefaultReward):
 
         reward_config = env.env_config["reward"]
         self.critical_initial_coeff = reward_config.get("critical_initial_coeff", 0.5)
-        self.style_initial_coeff = reward_config.get("style_initial_coeff", 0.1)
+        self.critical_final_coeff = reward_config.get("critical_final_coeff", 1.0)
+        self.critical_fixed_coeff = reward_config.get("critical_fixed_coeff", -1.0)
+        self.style_initial_coeff = reward_config.get("style_initial_coeff", 0.0)
+        self.style_final_coeff = reward_config.get("style_final_coeff", 1.0)
+        self.style_fixed_coeff = reward_config.get("style_fixed_coeff", -1.0)
+        self.gait_initial_coeff = reward_config.get("gait_initial_coeff", 1.0)
+        self.gait_final_coeff = reward_config.get("gait_final_coeff", 1.0)
+        self.gait_fixed_coeff = reward_config.get("gait_fixed_coeff", 1.0)
+        self.moving_command_threshold = reward_config.get("moving_command_threshold", 0.05)
+        self.contact_count_coeff = reward_config.get("contact_count_coeff", 2.0) * env.dt
+        self.foot_stance_time_coeff = reward_config.get("foot_stance_time_coeff", 1.0) * env.dt
+        self.foot_stance_time_per_robot_size_m = reward_config.get("foot_stance_time_per_robot_size_m", 0.6)
+        self.foot_clearance_coeff = reward_config.get("foot_clearance_coeff", 1.0) * env.dt
+        self.foot_clearance_per_robot_size_m = reward_config.get("foot_clearance_per_robot_size_m", 0.08)
+        self.foot_lift_bonus_coeff = reward_config.get("foot_lift_bonus_coeff", 1.0) * env.dt
+        self.foot_lift_bonus_per_robot_size_m = reward_config.get("foot_lift_bonus_per_robot_size_m", 0.10)
+
+
+    def _scheduled_coeff(self, fixed_coeff, initial_coeff, final_coeff, curriculum_progress):
+        if fixed_coeff >= 0.0:
+            return fixed_coeff
+        return initial_coeff + (final_coeff - initial_coeff) * curriculum_progress
 
 
     def reward_and_info(self, action):
         curriculum_progress = self.env.internal_state["env_curriculum_coeff"]
-        critical_coeff = self.critical_initial_coeff + (1.0 - self.critical_initial_coeff) * curriculum_progress
-        style_coeff = self.style_initial_coeff + (1.0 - self.style_initial_coeff) * curriculum_progress
+        critical_coeff = self._scheduled_coeff(self.critical_fixed_coeff, self.critical_initial_coeff, self.critical_final_coeff, curriculum_progress)
+        style_coeff = self._scheduled_coeff(self.style_fixed_coeff, self.style_initial_coeff, self.style_final_coeff, curriculum_progress)
+        gait_coeff = self._scheduled_coeff(self.gait_fixed_coeff, self.gait_initial_coeff, self.gait_final_coeff, curriculum_progress)
         
         # Tracking velocity command reward
         current_imu_linear_velocity = self.env.internal_state["data"].sensordata[self.env.imu_linear_velocity_sensor_adr:self.env.imu_linear_velocity_sensor_adr + self.env.imu_linear_velocity_sensor_dim]
@@ -106,22 +128,49 @@ class DefaultG1Reward(DefaultReward):
         action_smoothness_norm = np.mean(np.square(action - 2 * self.env.internal_state["last_action"] + self.env.internal_state["second_last_action"]))
         action_smoothness_reward = style_coeff * self.action_smoothness_coeff * -action_smoothness_norm
 
-        is_standing_command = np.all(self.env.internal_state["goal_velocities"] == 0.0)
+        command_norm = np.linalg.norm(self.env.internal_state["goal_velocities"])
+        is_moving_command = command_norm > self.moving_command_threshold
+
+        feet_first_contact = feet_floor_contacts & (~self.env.internal_state["previous_feet_floor_contacts"])
         target_foot_air_time = self.foot_air_time_per_robot_size_m * self.env.internal_state["robot_dimensions_mean"]
-        target_foot_air_time = (~is_standing_command) * target_foot_air_time
-        air_time_reward = np.mean(feet_floor_contacts * np.minimum(self.env.internal_state["feet_time_in_air"] - target_foot_air_time, 0.0))
-        foot_air_time_reward = style_coeff * self.foot_air_time_coeff * air_time_reward
+        target_foot_air_time = is_moving_command * target_foot_air_time
+        air_time_reward = np.mean(feet_first_contact * np.minimum(self.env.internal_state["feet_time_in_air"] - target_foot_air_time, 0.0))
+        foot_air_time_reward = gait_coeff * self.foot_air_time_coeff * air_time_reward
 
         symmetry_air_violations = np.mean(np.where((~feet_floor_contacts[self.feet_symmetry_pairs[:, 0]]) & (~feet_floor_contacts[self.feet_symmetry_pairs[:, 1]]), 1, 0))
-        symmetry_air_reward = style_coeff * self.symmetry_air_coeff * -symmetry_air_violations
+        symmetry_air_reward = gait_coeff * self.symmetry_air_coeff * -symmetry_air_violations
+
+        nr_feet = float(self.env.nr_feet)
+        nr_feet_in_contact = np.sum(feet_floor_contacts.astype(np.float32))
+        moving_contact_target = float(max(self.env.nr_feet - 1, 1))
+        target_nr_contacts = moving_contact_target if is_moving_command else nr_feet
+        contact_count_error = (nr_feet_in_contact - target_nr_contacts) / nr_feet
+        contact_count_reward = gait_coeff * self.contact_count_coeff * -np.square(contact_count_error)
+
+        target_stance_time = self.foot_stance_time_per_robot_size_m * self.env.internal_state["robot_dimensions_mean"]
+        long_stance_time = np.maximum(self.env.internal_state["feet_time_on_ground"] - target_stance_time, 0.0)
+        foot_stance_time_reward = gait_coeff * self.foot_stance_time_coeff * -float(is_moving_command) * np.mean(long_stance_time)
+
+        feet_xpos = self.env.internal_state["data"].geom_xpos[self.env.foot_geom_indices]
+        feet_height_over_ground = feet_xpos[:, 2] - self.env.terrain_function.ground_height_at(feet_xpos[:, 0], feet_xpos[:, 1])
+        target_foot_clearance = self.foot_clearance_per_robot_size_m * self.env.internal_state["robot_dimensions_mean"]
+        foot_clearance_error = np.maximum(target_foot_clearance - feet_height_over_ground, 0.0)
+        swing_feet = (~feet_floor_contacts).astype(np.float32)
+        foot_clearance_reward = gait_coeff * self.foot_clearance_coeff * -float(is_moving_command) * np.mean(swing_feet * foot_clearance_error)
+
+        target_foot_lift_bonus = self.foot_lift_bonus_per_robot_size_m * self.env.internal_state["robot_dimensions_mean"]
+        foot_lift_fraction = np.clip(feet_height_over_ground / target_foot_lift_bonus, 0.0, 1.0)
+        foot_lift_bonus_reward = gait_coeff * self.foot_lift_bonus_coeff * float(is_moving_command) * np.mean(swing_feet * foot_lift_fraction)
 
         tracking_reward = tracking_xy_velocity_command_reward + tracking_yaw_velocity_command_reward
         critical_penalty = z_velocity_reward + imu_acceleration_reward + angular_velocity_reward + angular_position_reward + \
                            joint_position_limit_reward + joint_velocity_limit_reward + collision_reward + base_height_reward + \
                            all_feet_off_ground_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward
         style_penalty = actuator_joint_nominal_diff_reward + joint_velocity_reward + acceleration_reward + torque_reward + \
-                        power_draw_penalty_reward + action_rate_reward + action_smoothness_reward + foot_air_time_reward + symmetry_air_reward
-        reward = tracking_reward + critical_penalty + style_penalty + alive_clipped_reward
+                        power_draw_penalty_reward + action_rate_reward + action_smoothness_reward
+        gait_reward = foot_lift_bonus_reward
+        gait_penalty = foot_air_time_reward + symmetry_air_reward + contact_count_reward + foot_stance_time_reward + foot_clearance_reward
+        reward = tracking_reward + critical_penalty + style_penalty + gait_penalty + gait_reward + alive_clipped_reward
         reward = np.maximum(reward, 0.0) + alive_unclipped_reward
         reward = np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -145,6 +194,10 @@ class DefaultG1Reward(DefaultReward):
         self.env.internal_state["info"][f"reward/collision"] = collision_reward
         self.env.internal_state["info"][f"reward/base_height"] = base_height_reward
         self.env.internal_state["info"][f"reward/foot_air_time"] = foot_air_time_reward
+        self.env.internal_state["info"][f"reward/contact_count"] = contact_count_reward
+        self.env.internal_state["info"][f"reward/foot_stance_time"] = foot_stance_time_reward
+        self.env.internal_state["info"][f"reward/foot_clearance"] = foot_clearance_reward
+        self.env.internal_state["info"][f"reward/foot_lift_bonus"] = foot_lift_bonus_reward
         self.env.internal_state["info"][f"reward/all_feet_off_ground"] = all_feet_off_ground_reward
         self.env.internal_state["info"][f"reward/symmetry_air"] = symmetry_air_reward
         self.env.internal_state["info"][f"reward/foot_slip"] = foot_slip_reward
@@ -152,8 +205,11 @@ class DefaultG1Reward(DefaultReward):
         self.env.internal_state["info"][f"reward/foot_flat_contact"] = foot_flat_contact_reward
         self.env.internal_state["info"][f"reward/critical_coeff"] = critical_coeff
         self.env.internal_state["info"][f"reward/style_coeff"] = style_coeff
+        self.env.internal_state["info"][f"reward/gait_coeff"] = gait_coeff
         self.env.internal_state["info"][f"reward/critical_penalty_total"] = critical_penalty
         self.env.internal_state["info"][f"reward/style_penalty_total"] = style_penalty
+        self.env.internal_state["info"][f"reward/gait_penalty_total"] = gait_penalty
+        self.env.internal_state["info"][f"reward/gait_reward_total"] = gait_reward
         self.env.internal_state["info"][f"reward/total"] = reward
         self.env.internal_state["info"][f"env_info/xy_vel_diff_abs"] = np.nan_to_num(np.mean(np.minimum(np.abs(xy_difference), 2 * self.env.internal_state["max_command_velocity"])), nan=2 * self.env.internal_state["max_command_velocity"], posinf=2 * self.env.internal_state["max_command_velocity"], neginf=2 * self.env.internal_state["max_command_velocity"])
 
