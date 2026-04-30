@@ -187,7 +187,7 @@ class LocomotionEnv(gym.Env):
 
         self.observation_noise_function.init_attributes()
 
-        eval_mode = True
+        eval_mode = False
         self.internal_state = {
             "mj_model": deepcopy(self.initial_mj_model),
             "data": mujoco.MjData(self.initial_mj_model),

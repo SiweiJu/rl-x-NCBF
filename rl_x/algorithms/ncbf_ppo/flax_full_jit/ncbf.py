@@ -27,7 +27,7 @@ def get_ncbf(config, env):
     act_high = jnp.array(env.single_action_space.high)
 
     NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, n_ncbf_output) for _ in range(n_ncbf_ensemble)]
-    NCBF_apply = get_ensemble_forward_pass(NCBF[0].apply)
+    NCBF_apply = get_ensemble_forward_pass(NCBF[0].apply, n_ncbf_ensemble)
 
 
     if config.algorithm.ncbf.use_safety_layer:
@@ -66,9 +66,9 @@ def get_ncbf(config, env):
     return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function_for_batch
 
 
-def get_ensemble_forward_pass(apply_fn):
+def get_ensemble_forward_pass(apply_fn, n_ensemble):
     alpha = 0.4
-    E = 5  # number of ensemble members, hardcoded for now
+    E = n_ensemble
     k = max(1, int(np.ceil((1.0 - alpha) * E)))
     softmin_beta = 10
 

@@ -1146,7 +1146,7 @@ class PPO:
 
                 next_step_prediction = self.decoder.apply(self.decoder_state.params, latent_z, state, processed_action)
                 prediction_denormed = next_step_prediction / (1 + next_step_prediction)
-                print("ncbf prediction: ", prediction_mean)
+
 
                 self.env.envs[0].internal_state["safe_prediction"] = component_softmin(prediction_mean) # prediction_mean
                 previous_state = state
@@ -1155,6 +1155,9 @@ class PPO:
 
                 done = terminated | truncated
                 episode_return += reward
+
+                if terminated:
+                    print("ncbf prediction: ", prediction_mean)
 
                 last_action = processed_action
 

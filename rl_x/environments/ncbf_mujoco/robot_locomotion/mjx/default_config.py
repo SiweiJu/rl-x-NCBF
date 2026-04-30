@@ -10,7 +10,7 @@ def get_config(environment_name):
         "device": "gpu",
         "train_robot": "unitree_go2",
         "control_type": "pd",
-        "ncbf_use_policy_observations": False,
+        "ncbf_use_policy_observations": True,
         "nr_history_steps": 10,
         "command": {
             "type": "random",
@@ -20,7 +20,10 @@ def get_config(environment_name):
             "zero_clip_threshold_percentage": 0.1,
             "all_zero_chance": 0.04,
             "single_zero_chance": 0.005,
-            "velocity_ratio": [1, 0.5, 0.2]
+            "velocity_ratio": [1, 0.5, 0.2],
+            "curriculum_initial_scale": 1.0,
+            "curriculum_final_scale": 1.0,
+            "curriculum_fixed_scale": -1.0,
         },
         "env_curriculum_nr_levels": 100,
         "env_curriculum_level_success_episode_return": 8.0,

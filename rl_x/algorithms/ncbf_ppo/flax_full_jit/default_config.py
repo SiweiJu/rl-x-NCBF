@@ -30,7 +30,7 @@ def get_config(algorithm_name):
     config.ncbf = config_dict.ConfigDict()
     config.ncbf.n_ensemble = 5  # number of networks to assemble for ncbf prediction
     config.ncbf.type = 'FFNN'
-    config.ncbf.H = 10  # prediction horizon
+    config.ncbf.H = 25  # prediction horizon
     config.ncbf.lr = 1e-3
     config.ncbf.gamma_c = 1.0     # safety threshold
     config.ncbf.w_clf = 1.0    # weight for classification loss
@@ -46,26 +46,26 @@ def get_config(algorithm_name):
     config.ncbf.nr_hidden_units = 512
     config.ncbf.policy_loss_coef = 0.01  # weight for policy loss when training ncbf
     config.ncbf.coef_decay_lambda = 0.95  # decay lambda for ncbf loss coefficients < 1
-    config.ncbf.action_clipping = True
+    config.ncbf.action_clipping = False
     config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
 
     config.ncbf.pretrain = config_dict.ConfigDict()
-    config.ncbf.pretrain.nr_steps = 2    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
+    config.ncbf.pretrain.nr_steps = 0    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)
     config.ncbf.pretrain.nr_minibatches = 100
 
     config.ncbf_buffer = config_dict.ConfigDict()
     config.ncbf_buffer.pos_buffer_size = 1 # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions
-    config.ncbf_buffer.neg_buffer_size = 2
+    config.ncbf_buffer.neg_buffer_size = 1
     config.ncbf_buffer.neg_sampling_ratio = 0.5 # ratio of sampling from negative buffer
 
     config.next_step_predictor = config_dict.ConfigDict()
     config.next_step_predictor.lr = 1e-3
     config.next_step_predictor.nr_minibatches = 50
-    config.next_step_predictor.pretrain_nr_steps = 2
+    config.next_step_predictor.pretrain_nr_steps = 0
     config.next_step_predictor.pretrain_nr_minibatches = 100
     config.next_step_predictor.history_encoder_type = 'FFNN'  # 'FFNN' or 'GRU'
     config.next_step_predictor.history_encoder_hidden_size = 64
     config.next_step_predictor.decoder_output_dim = None  # Will be set to observation_dim at runtime
-    config.next_step_predictor.aux_loss_coef = 0.0
+    config.next_step_predictor.aux_loss_coef = 1.0
 
     return config

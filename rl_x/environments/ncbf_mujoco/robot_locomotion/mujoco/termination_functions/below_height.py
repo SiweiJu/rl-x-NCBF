@@ -16,7 +16,6 @@ class BelowHeightTermination:
         body_pitch = self.env.internal_state["imu_orientation_euler"][1]
         body_tilt_angle = np.sqrt(body_roll ** 2 + body_pitch ** 2)
 
-        print("body_tilt: ", body_tilt_angle)
         body_tilt = body_tilt_angle > self.env.internal_state["body_tilt_threshold"]
 
         if below_height:

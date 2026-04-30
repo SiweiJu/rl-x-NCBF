@@ -83,6 +83,7 @@ class PPO:
         self.ncbf_L_target = config.algorithm.ncbf.L_max
         self.ncbf_loss_coef = config.algorithm.ncbf.loss_coef
         self.ncbf_stop_encoder_gradient = config.algorithm.ncbf.stop_encoder_gradient
+        self.ncbf_use_safety_layer = bool(config.algorithm.ncbf.use_safety_layer)
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
@@ -244,9 +245,10 @@ class PPO:
                 # delta_u = 0
                 value = self.critic.apply(critic_state.params, observation).squeeze(-1)
 
-                env_state = self.env.step(env_state, processed_action)
+                env_action = processed_action
+                env_state = self.env.step(env_state, env_action)
                 done = env_state.terminated | env_state.truncated
-                transition = (observation, env_state.actual_next_observation, action, env_state.reward, value,
+                transition = (observation, env_state.actual_next_observation, action, env_action, env_state.reward, value,
                               env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, last_state, last_action, history_stack)
 
                 if self.render:
@@ -678,7 +680,7 @@ class PPO:
 
             policy_state = self.policy_state
             critic_state = self.critic_state
-            ncbf_state = self.ncbf_state[0]
+            ncbf_state = self.ncbf_state[0] if isinstance(self.ncbf_state, list) else self.ncbf_state
             encoder_state = self.encoder_state
             decoder_state = self.decoder_state
 
@@ -715,19 +717,24 @@ class PPO:
                     rollout_carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key)
                     single_rollout_carry, batch = jax.lax.scan(single_rollout, rollout_carry, None, self.nr_steps)
                     policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key = single_rollout_carry
-                    states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks = batch
+                    states, next_states, actions, env_actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks = batch
 
                     # process the batch data to get mask and y_target
                     y_target, safe_y, masks, indices_to_term = get_receding_min_target(next_states, dones, terminations)
                     next_state_mask = ~ dones
 
                     ncbf_metrics = {}
+                    ncbf_metrics["ncbf/safety_layer_enabled"] = jnp.asarray(self.ncbf_use_safety_layer, dtype=jnp.float32)
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_target)
                     ncbf_metrics["ncbf/mask_rate"] = jnp.mean(masks.astype(jnp.float32))
                     ncbf_metrics["ncbf/safe_y_rate"] = jnp.mean(safe_y.astype(jnp.float32))
                     ncbf_metrics["ncbf/nr_rollout_neg_samples"] = jnp.sum(~safe_y)
+                    ncbf_metrics["ncbf/target_height_safe_rate"] = jnp.mean(y_target[..., 0])
+                    ncbf_metrics["ncbf/target_tilt_safe_rate"] = jnp.mean(y_target[..., 1])
+                    ncbf_metrics["ncbf/nr_height_unsafe_targets"] = jnp.sum((masks & (y_target[..., 0] < 0.5)).astype(jnp.float32))
+                    ncbf_metrics["ncbf/nr_tilt_unsafe_targets"] = jnp.sum((masks & (y_target[..., 1] < 0.5)).astype(jnp.float32))
                     ncbf_metrics["rollout/done_rate"] = jnp.mean(dones.astype(jnp.float32))
                     ncbf_metrics["rollout/termination_rate"] = jnp.mean(terminations.astype(jnp.float32))
                     ncbf_metrics["rollout/nr_terminations"] = jnp.sum(terminations.astype(jnp.float32))
@@ -740,6 +747,7 @@ class PPO:
                     ncbf_metrics["policy/raw_action_out_of_bounds_fraction"] = jnp.mean(
                         ((actions < action_low) | (actions > action_high)).astype(jnp.float32)
                     )
+                    ncbf_metrics["policy/executed_action_abs_mean"] = jnp.mean(jnp.abs(env_actions))
 
                     @jax.jit
                     def append_to_buffer(buffer,
@@ -863,7 +871,7 @@ class PPO:
                     # write negative and valid data samples to the buffer
                     neg_masks = jnp.logical_and(masks, ~safe_y)
                     ncbf_neg_buffer = append_to_buffer(ncbf_neg_buffer,
-                        states, next_states, actions, dones, terminations, y_target, neg_masks, indices_to_term, last_states, last_actions, history_stacks)
+                        states, next_states, env_actions, dones, terminations, y_target, neg_masks, indices_to_term, last_states, last_actions, history_stacks)
                     ncbf_metrics["ncbf/current_neg_samples"] = jnp.sum(neg_masks.astype(jnp.float32))
                     ncbf_metrics["ncbf/neg_buffer_size"] = ncbf_neg_buffer["size"].astype(jnp.float32)
                     ncbf_metrics["ncbf/replay_neg_target_batch_size"] = jnp.asarray(self.ncbf_replay_neg_minibatch_size, dtype=jnp.float32)
@@ -892,7 +900,7 @@ class PPO:
 
                     # Optimizing
                     def loss_fn(policy_params, critic_params, encoder_params, decoder_params, ncbf_params,
-                                state_b, next_state_b, action_b, log_prob_b,
+                                state_b, next_state_b, action_b, env_action_b, log_prob_b,
                                 return_b, advantage_b,
                                 last_state_b, last_action_b, history_stack_b, next_state_mask_b,
                                 y_target_b, indices_to_term_b, ncbf_masks_b,
@@ -937,7 +945,7 @@ class PPO:
                         anticipation_loss = 0
 
                         # auxiliary next step prediction loss
-                        pred_next_obs = self.decoder.apply(decoder_params, latent_b, state_b, action_b)
+                        pred_next_obs = self.decoder.apply(decoder_params, latent_b, state_b, env_action_b)
                         next_state_target = next_state_b[..., self.next_step_predictor_output_indices]
                         prediction_loss = jnp.sum(next_state_mask_b * jnp.mean(jnp.square(pred_next_obs - next_state_target), axis=-1)) / (jnp.sum(next_state_mask_b) + 1e-8)
 
@@ -972,7 +980,7 @@ class PPO:
                             replay_next_latent_b,
                         )
                         current_h_input = jnp.concatenate([state_b[..., self.ncbf_observation_indices], last_action_b], axis=-1)
-                        current_h_input_next = jnp.concatenate([next_state_b[..., self.ncbf_observation_indices], action_b], axis=-1)
+                        current_h_input_next = jnp.concatenate([next_state_b[..., self.ncbf_observation_indices], env_action_b], axis=-1)
                         replay_h_input = jnp.concatenate([replay_state_b[..., self.ncbf_observation_indices], replay_last_action_b], axis=-1)
                         replay_h_input_next = jnp.concatenate([replay_next_state_b[..., self.ncbf_observation_indices], replay_action_b], axis=-1)
 
@@ -1011,6 +1019,7 @@ class PPO:
                         den = jnp.sum(ncbf_masks) + 1e-8
                         cls_loss = num / den
                         ncbf_loss = cls_loss
+                        h_prob = nn.sigmoid(h_x)
 
                         # Combine losses
                         loss = (pg_loss -
@@ -1032,6 +1041,12 @@ class PPO:
                             "loss/weighted_ncbf_loss": self.ncbf_loss_coef * ncbf_loss,
                             "ncbf/current_samples_per_minibatch": jnp.sum(ncbf_masks_b.astype(jnp.float32)),
                             "ncbf/replay_neg_samples_per_minibatch": jnp.sum(replay_ncbf_masks_b.astype(jnp.float32)),
+                            "ncbf/height_bce": jnp.sum(ncbf_masks * bce[..., 0]) / den,
+                            "ncbf/tilt_bce": jnp.sum(ncbf_masks * bce[..., 1]) / den,
+                            "ncbf/pred_height_safe_prob": jnp.sum(ncbf_masks * h_prob[..., 0]) / den,
+                            "ncbf/pred_tilt_safe_prob": jnp.sum(ncbf_masks * h_prob[..., 1]) / den,
+                            "ncbf/minibatch_target_height_safe_rate": jnp.sum(ncbf_masks * ncbf_y_target[..., 0]) / den,
+                            "ncbf/minibatch_target_tilt_safe_rate": jnp.sum(ncbf_masks * ncbf_y_target[..., 1]) / den,
                             "policy_ratio/approx_kl": approx_kl_div,
                             "policy_ratio/clip_fraction": clip_fraction,
                         }
@@ -1041,6 +1056,7 @@ class PPO:
                     batch_states = states.reshape((-1,) + self.os_shape)
                     batch_next_states = next_states.reshape((-1,) + self.os_shape)
                     batch_actions = actions.reshape((-1,) + self.as_shape)
+                    batch_env_actions = env_actions.reshape((-1,) + self.as_shape)
                     batch_advantages = advantages.reshape(-1)
                     batch_returns = returns.reshape(-1)
                     batch_log_probs = log_probs.reshape(-1)
@@ -1127,6 +1143,7 @@ class PPO:
                             batch_states[minibatch_indices],
                             batch_next_states[minibatch_indices],
                             batch_actions[minibatch_indices],
+                            batch_env_actions[minibatch_indices],
                             batch_log_probs[minibatch_indices],
                             batch_returns[minibatch_indices],
                             minibatch_advantages,
@@ -1362,14 +1379,26 @@ class PPO:
 
         loaded_algorithm_config = json.load(open(f"{checkpoint_dir}/config_algorithm.json", "r"))
         for key, value in loaded_algorithm_config.items():
+            if isinstance(value, dict):
+                if key not in config.algorithm:
+                    continue
+                parent = config.algorithm[key]
+                for sub_key, sub_value in value.items():
+                    full_param = f"algorithm.{key}.{sub_key}"
+                    if full_param in explicitly_set_algorithm_params:
+                        continue
+                    if sub_key in parent:
+                        parent[sub_key] = sub_value
+                continue
             if f"algorithm.{key}" not in explicitly_set_algorithm_params and key in config.algorithm:
                 config.algorithm[key] = value
         model = PPO(config, env, run_path, writer)
 
+        target_ncbf = model.ncbf_state[0] if isinstance(model.ncbf_state, list) else model.ncbf_state
         target = {
             "policy": model.policy_state,
             "critic": model.critic_state,
-            "ncbf": model.ncbf_state,
+            "ncbf": target_ncbf,
             "encoder": model.encoder_state,
             "decoder": model.decoder_state,
         }
