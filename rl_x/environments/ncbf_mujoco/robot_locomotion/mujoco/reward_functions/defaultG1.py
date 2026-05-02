@@ -170,8 +170,10 @@ class DefaultG1Reward(DefaultReward):
                         power_draw_penalty_reward + action_rate_reward + action_smoothness_reward
         gait_reward = foot_lift_bonus_reward
         gait_penalty = foot_air_time_reward + symmetry_air_reward + contact_count_reward + foot_stance_time_reward + foot_clearance_reward
-        reward = tracking_reward + critical_penalty + style_penalty + gait_penalty + gait_reward + alive_clipped_reward
-        reward = np.maximum(reward, 0.0) + alive_unclipped_reward
+        penalty_total = critical_penalty + style_penalty + gait_penalty
+        alive_total = alive_clipped_reward + alive_unclipped_reward
+        pre_clip_total = tracking_reward + penalty_total + gait_reward + alive_clipped_reward
+        reward = np.maximum(pre_clip_total, 0.0) + alive_unclipped_reward
         reward = np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
         self.env.internal_state["info"][f"reward/track_xy_vel_cmd"] = tracking_xy_velocity_command_reward
@@ -206,6 +208,10 @@ class DefaultG1Reward(DefaultReward):
         self.env.internal_state["info"][f"reward/critical_coeff"] = critical_coeff
         self.env.internal_state["info"][f"reward/style_coeff"] = style_coeff
         self.env.internal_state["info"][f"reward/gait_coeff"] = gait_coeff
+        self.env.internal_state["info"][f"reward/tracking_total"] = tracking_reward
+        self.env.internal_state["info"][f"reward/alive_total"] = alive_total
+        self.env.internal_state["info"][f"reward/penalty_total"] = penalty_total
+        self.env.internal_state["info"][f"reward/pre_clip_total"] = pre_clip_total
         self.env.internal_state["info"][f"reward/critical_penalty_total"] = critical_penalty
         self.env.internal_state["info"][f"reward/style_penalty_total"] = style_penalty
         self.env.internal_state["info"][f"reward/gait_penalty_total"] = gait_penalty

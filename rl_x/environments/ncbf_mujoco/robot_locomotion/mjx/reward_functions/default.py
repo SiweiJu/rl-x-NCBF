@@ -201,8 +201,9 @@ class DefaultReward:
                          actuator_joint_nominal_diff_reward +  joint_position_limit_reward + joint_velocity_limit_reward + joint_velocity_reward + \
                          acceleration_reward + torque_reward + power_draw_penalty_reward + action_rate_reward + action_smoothness_reward + \
                          collision_reward + base_height_reward + foot_air_time_reward + symmetry_air_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward
-        reward = tracking_reward + reward_penalty + alive_clipped_reward
-        reward = jnp.maximum(reward, 0.0) + alive_unclipped_reward
+        alive_total = alive_clipped_reward + alive_unclipped_reward
+        pre_clip_total = tracking_reward + reward_penalty + alive_clipped_reward
+        reward = jnp.maximum(pre_clip_total, 0.0) + alive_unclipped_reward
         reward = jnp.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Info
@@ -230,6 +231,10 @@ class DefaultReward:
         info[f"reward/foot_slip"] = foot_slip_reward
         info[f"reward/foot_z_velocity"] = foot_z_velocity_reward
         info[f"reward/foot_flat_contact"] = foot_flat_contact_reward
+        info[f"reward/tracking_total"] = tracking_reward
+        info[f"reward/alive_total"] = alive_total
+        info[f"reward/penalty_total"] = reward_penalty
+        info[f"reward/pre_clip_total"] = pre_clip_total
         info[f"reward/total"] = reward
         info[f"env_info/xy_vel_diff_abs"] = jnp.nan_to_num(jnp.mean(jnp.minimum(jnp.abs(xy_difference), 2*internal_state["max_command_velocity"])), nan=2*internal_state["max_command_velocity"], posinf=2*internal_state["max_command_velocity"], neginf=2*internal_state["max_command_velocity"])
 
