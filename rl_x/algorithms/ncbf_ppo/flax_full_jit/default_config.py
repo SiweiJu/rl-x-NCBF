@@ -32,7 +32,7 @@ def get_config(algorithm_name):
     config.ncbf.type = 'FFNN'
     config.ncbf.H = 25  # prediction horizon
     config.ncbf.lr = 1e-3
-    config.ncbf.gamma_c = 1.0     # safety threshold
+    config.ncbf.gamma_c = 0.0     # raw-logit safety threshold for full-jit BCE training
     config.ncbf.w_clf = 1.0    # weight for classification loss
     config.ncbf.w_cbf = 1.0    # weight for CBF loss
     config.ncbf.w_lip = 0.0    # weight for lipschitz loss
@@ -48,6 +48,7 @@ def get_config(algorithm_name):
     config.ncbf.coef_decay_lambda = 0.95  # decay lambda for ncbf loss coefficients < 1
     config.ncbf.action_clipping = False
     config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
+    config.ncbf.max_delta_u = 0.5  # max L2 action correction from the safety layer; <=0 disables
 
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_steps = 0    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)

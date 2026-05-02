@@ -1378,6 +1378,14 @@ class PPO:
         checkpoint_dir = f"{checkpoint_dir}/tmp"
 
         loaded_algorithm_config = json.load(open(f"{checkpoint_dir}/config_algorithm.json", "r"))
+        runtime_ncbf_params = {
+            "use_safety_layer",
+            "gamma_c",
+            "eta_cbf",
+            "lambda_slack",
+            "action_clipping",
+            "max_delta_u",
+        }
         for key, value in loaded_algorithm_config.items():
             if isinstance(value, dict):
                 if key not in config.algorithm:
@@ -1386,6 +1394,8 @@ class PPO:
                 for sub_key, sub_value in value.items():
                     full_param = f"algorithm.{key}.{sub_key}"
                     if full_param in explicitly_set_algorithm_params:
+                        continue
+                    if key == "ncbf" and sub_key in runtime_ncbf_params:
                         continue
                     if sub_key in parent:
                         parent[sub_key] = sub_value

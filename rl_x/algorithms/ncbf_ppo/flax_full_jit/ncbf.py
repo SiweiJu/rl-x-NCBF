@@ -22,6 +22,7 @@ def get_ncbf(config, env):
     ncbf_clipping = config.algorithm.ncbf.action_clipping
     eta_cbf = config.algorithm.ncbf.eta_cbf
     lambda_s = config.algorithm.ncbf.lambda_slack
+    max_delta_u = config.algorithm.ncbf.max_delta_u
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
@@ -41,6 +42,7 @@ def get_ncbf(config, env):
             gamma_c=gamma_c,
             eta_cbf=eta_cbf,
             lambda_s=lambda_s,
+            max_delta_u=max_delta_u,
             action_clipping=ncbf_clipping,
         )
 
@@ -147,6 +149,7 @@ def make_get_safe_action(
     gamma_c: float,
     eta_cbf: float,      # \tilde alpha(s) = eta_cbf * s
     lambda_s: float,     # slack penalty
+    max_delta_u: float,
     action_clipping: bool
     ):
     """
@@ -224,7 +227,15 @@ def make_get_safe_action(
         sigma = jnp.maximum(h_u0_std, 1)
         sigma = jnp.minimum(sigma, 10.0)
         gain = delta / (aTa + (1.0 * sigma ** 2 / lambda_s))
-        u_safe = action_raw + gain * a
+        correction = gain * a
+        correction_norm = jnp.linalg.norm(correction) + 1e-8
+        max_delta = jnp.asarray(max_delta_u, dtype=action_raw.dtype)
+        correction_scale = jnp.where(
+            max_delta > 0.0,
+            jnp.minimum(1.0, max_delta / correction_norm),
+            1.0,
+        )
+        u_safe = action_raw + correction_scale * correction
 
         # eps_star = delta / (1.0 + lambda_s * aTa)
 
