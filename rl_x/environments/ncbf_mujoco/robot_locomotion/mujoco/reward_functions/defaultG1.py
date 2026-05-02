@@ -33,6 +33,10 @@ class DefaultG1Reward(DefaultReward):
         return initial_coeff + (final_coeff - initial_coeff) * curriculum_progress
 
 
+    def extra_reward_terms(self, action):
+        return 0.0, 0.0, 0.0
+
+
     def reward_and_info(self, action):
         curriculum_progress = self.env.internal_state["env_curriculum_coeff"]
         critical_coeff = self._scheduled_coeff(self.critical_fixed_coeff, self.critical_initial_coeff, self.critical_final_coeff, curriculum_progress)
@@ -70,8 +74,10 @@ class DefaultG1Reward(DefaultReward):
         roll_pitch_position_norm = np.sum(np.square(self.env.internal_state["imu_orientation_euler"][:2]))
         angular_position_reward = critical_coeff * self.roll_pitch_pos_coeff * -roll_pitch_position_norm
 
-        joint_outside_limits = np.maximum(self.env.internal_state["data"].qpos[self.env.actuator_joint_mask_qpos] - self.env.internal_state["joint_position_limits"][:, 1], 0.0) + \
-                               np.maximum(self.env.internal_state["joint_position_limits"][:, 0] - self.env.internal_state["data"].qpos[self.env.actuator_joint_mask_qpos], 0.0)
+        joint_positions = self.env.internal_state["data"].qpos[self.env.actuator_joint_mask_qpos]
+        actuator_joint_position_limits = self.env.internal_state["joint_position_limits"][self.env.actuator_joint_mask_joints - 1]
+        joint_outside_limits = np.maximum(joint_positions - actuator_joint_position_limits[:, 1], 0.0) + \
+                               np.maximum(actuator_joint_position_limits[:, 0] - joint_positions, 0.0)
         joint_position_limit_reward = critical_coeff * self.joint_position_limit_coeff * -np.mean(joint_outside_limits)
 
         actuator_joint_velocity_limit = self.env.internal_state["actuator_joint_max_velocities"] * self.soft_actuator_joint_velocity_limit
@@ -162,6 +168,8 @@ class DefaultG1Reward(DefaultReward):
         foot_lift_fraction = np.clip(feet_height_over_ground / target_foot_lift_bonus, 0.0, 1.0)
         foot_lift_bonus_reward = gait_coeff * self.foot_lift_bonus_coeff * float(is_moving_command) * np.mean(swing_feet * foot_lift_fraction)
 
+        extra_alive_reward, extra_positive_reward, extra_penalty = self.extra_reward_terms(action)
+
         tracking_reward = tracking_xy_velocity_command_reward + tracking_yaw_velocity_command_reward
         critical_penalty = z_velocity_reward + imu_acceleration_reward + angular_velocity_reward + angular_position_reward + \
                            joint_position_limit_reward + joint_velocity_limit_reward + collision_reward + base_height_reward + \
@@ -170,7 +178,8 @@ class DefaultG1Reward(DefaultReward):
                         power_draw_penalty_reward + action_rate_reward + action_smoothness_reward
         gait_reward = foot_lift_bonus_reward
         gait_penalty = foot_air_time_reward + symmetry_air_reward + contact_count_reward + foot_stance_time_reward + foot_clearance_reward
-        reward = tracking_reward + critical_penalty + style_penalty + gait_penalty + gait_reward + alive_clipped_reward
+        reward = tracking_reward + critical_penalty + style_penalty + gait_penalty + gait_reward + extra_penalty + alive_clipped_reward
+        reward = reward + extra_alive_reward + extra_positive_reward
         reward = np.maximum(reward, 0.0) + alive_unclipped_reward
         reward = np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 

@@ -15,6 +15,7 @@ Array = jnp.ndarray
 def get_ncbf(config, env):
     # ...existing imports and comments...
     n_ncbf_ensemble = config.algorithm.ncbf.n_ensemble
+    n_ncbf_output = len(env.ncbf_target_indices)
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
     ncbf_observation_indices = env.ncbf_observation_indices
     gamma_c = config.algorithm.ncbf.gamma_c
@@ -25,7 +26,7 @@ def get_ncbf(config, env):
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 
-    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units) for _ in range(n_ncbf_ensemble)]
+    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units, n_ncbf_output) for _ in range(n_ncbf_ensemble)]
     NCBF_apply = get_ensemble_forward_pass(NCBF[0].apply)
 
 
@@ -97,6 +98,7 @@ def get_ensemble_forward_pass(apply_fn):
 
 class NCBF_FFNN(nn.Module):
     nr_hidden_units: int
+    n_outputs: int
 
     @nn.compact
     def __call__(self, x):
@@ -105,8 +107,8 @@ class NCBF_FFNN(nn.Module):
         x = nn.tanh(x)
         x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.tanh(x)
-        # Scalar CBF output h(x)
-        h1 = nn.Dense(2, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+        # One CBF output per configured safety target.
+        h1 = nn.Dense(self.n_outputs, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
         # clip the output to be in [0, 1]
         # h1 = nn.sigmoid(h1)

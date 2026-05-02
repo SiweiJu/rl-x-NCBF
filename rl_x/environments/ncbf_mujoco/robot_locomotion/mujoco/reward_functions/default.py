@@ -30,16 +30,11 @@ class DefaultReward:
         self.base_height_coeff = env.env_config["reward"]["base_height_coeff"] * env.dt
         self.foot_air_time_coeff = env.env_config["reward"]["foot_air_time_coeff"] * env.dt
         self.foot_air_time_per_robot_size_m = env.env_config["reward"]["foot_air_time_per_robot_size_m"]
-        self.all_feet_off_ground_coeff = env.env_config["reward"]["all_feet_off_ground_coeff"] * env.dt
+        self.all_feet_off_ground_coeff = env.env_config["reward"].get("all_feet_off_ground_coeff", 2.0) * env.dt
         self.symmetry_air_coeff = env.env_config["reward"]["symmetry_air_coeff"] * env.dt
         self.foot_slip_coeff = env.env_config["reward"]["foot_slip_coeff"] * env.dt
         self.foot_z_velocity_coeff = env.env_config["reward"]["foot_z_velocity_coeff"] * env.dt
         self.foot_flat_contact_coeff = env.env_config["reward"]["foot_flat_contact_coeff"] * env.dt
-        self.ball_plate_centering_coeff = env.env_config["reward"].get("ball_plate_centering_coeff", 0.0) * env.dt
-        self.ball_plate_velocity_coeff = env.env_config["reward"].get("ball_plate_velocity_coeff", 0.0) * env.dt
-        self.ball_plate_on_plate_coeff = env.env_config["reward"].get("ball_plate_on_plate_coeff", 0.0) * env.dt
-        self.ball_plate_alive_coeff = env.env_config["reward"].get("ball_plate_alive_coeff", 0.0) * env.dt
-        self.ball_plate_drop_penalty_coeff = env.env_config["reward"].get("ball_plate_drop_penalty_coeff", 0.0) * env.dt
 
         self.feet_symmetry_pairs = env.feet_symmetry_pairs
 
@@ -179,9 +174,6 @@ class DefaultReward:
         air_time_reward = np.mean(feet_floor_contacts * np.minimum(self.env.internal_state["feet_time_in_air"] - target_foot_air_time, 0.0))
         foot_air_time_reward = curriculum_coeff * self.foot_air_time_coeff * air_time_reward
 
-        # Jumping is a cheap way to match the velocity command unless full flight is penalized explicitly.
-        all_feet_off_ground_reward = curriculum_coeff * self.all_feet_off_ground_coeff * -float(np.all(~feet_floor_contacts))
-
         # Symmetry reward
         symmetry_air_violations = np.mean(np.where((~feet_floor_contacts[self.feet_symmetry_pairs[:, 0]]) & (~feet_floor_contacts[self.feet_symmetry_pairs[:, 1]]), 1, 0))
         symmetry_air_reward = curriculum_coeff * self.symmetry_air_coeff * -symmetry_air_violations
@@ -203,33 +195,13 @@ class DefaultReward:
         contact_filtered_missing_lower_feet_contacts = np.mean(feet_floor_contacts * missing_lower_feet_contacts)
         foot_flat_contact_reward = curriculum_coeff * self.foot_flat_contact_coeff * -contact_filtered_missing_lower_feet_contacts
 
-        # Ball-on-plate reward
-        if self.env.use_ball_plate:
-            ball_plate_metrics = self.env.get_ball_plate_metrics()
-            ball_plate_centering_norm = np.sum(np.square(ball_plate_metrics["relative_position"][:2]))
-            ball_plate_velocity_norm = np.sum(np.square(ball_plate_metrics["relative_velocity"][:2]))
-            ball_plate_centering_reward = curriculum_coeff * self.ball_plate_centering_coeff * -ball_plate_centering_norm
-            ball_plate_velocity_reward = curriculum_coeff * self.ball_plate_velocity_coeff * -ball_plate_velocity_norm
-            ball_plate_on_plate_reward = curriculum_coeff * self.ball_plate_on_plate_coeff * float(ball_plate_metrics["on_plate"])
-            ball_plate_alive_reward = curriculum_coeff * self.ball_plate_alive_coeff * (1.0 - float(ball_plate_metrics["dropped"]))
-            ball_plate_drop_penalty_reward = curriculum_coeff * self.ball_plate_drop_penalty_coeff * -float(ball_plate_metrics["dropped"])
-        else:
-            ball_plate_centering_reward = 0.0
-            ball_plate_velocity_reward = 0.0
-            ball_plate_on_plate_reward = 0.0
-            ball_plate_alive_reward = 0.0
-            ball_plate_drop_penalty_reward = 0.0
-            ball_plate_metrics = {"radial_distance": 0.0, "on_plate": False, "dropped": False}
-
         # Total reward
         tracking_reward = tracking_xy_velocity_command_reward + tracking_yaw_velocity_command_reward
         reward_penalty = z_velocity_reward + imu_acceleration_reward + angular_velocity_reward + angular_position_reward + \
                          actuator_joint_nominal_diff_reward +  joint_position_limit_reward + joint_velocity_limit_reward + joint_velocity_reward + \
                          acceleration_reward + torque_reward + power_draw_penalty_reward + action_rate_reward + action_smoothness_reward + \
-                         collision_reward + base_height_reward + foot_air_time_reward + all_feet_off_ground_reward + symmetry_air_reward + \
-                         foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward + ball_plate_centering_reward + \
-                         ball_plate_velocity_reward + ball_plate_drop_penalty_reward
-        reward = tracking_reward + reward_penalty + alive_clipped_reward + ball_plate_alive_reward + ball_plate_on_plate_reward
+                         collision_reward + base_height_reward + foot_air_time_reward + symmetry_air_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward
+        reward = tracking_reward + reward_penalty + alive_clipped_reward
         reward = np.maximum(reward, 0.0) + alive_unclipped_reward
         reward = np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -254,20 +226,11 @@ class DefaultReward:
         self.env.internal_state["info"][f"reward/collision"] = collision_reward
         self.env.internal_state["info"][f"reward/base_height"] = base_height_reward
         self.env.internal_state["info"][f"reward/foot_air_time"] = foot_air_time_reward
-        self.env.internal_state["info"][f"reward/all_feet_off_ground"] = all_feet_off_ground_reward
         self.env.internal_state["info"][f"reward/symmetry_air"] = symmetry_air_reward
         self.env.internal_state["info"][f"reward/foot_slip"] = foot_slip_reward
         self.env.internal_state["info"][f"reward/foot_z_velocity"] = foot_z_velocity_reward
         self.env.internal_state["info"][f"reward/foot_flat_contact"] = foot_flat_contact_reward
-        self.env.internal_state["info"][f"reward/ball_plate_centering"] = ball_plate_centering_reward
-        self.env.internal_state["info"][f"reward/ball_plate_velocity"] = ball_plate_velocity_reward
-        self.env.internal_state["info"][f"reward/ball_plate_on_plate"] = ball_plate_on_plate_reward
-        self.env.internal_state["info"][f"reward/ball_plate_alive"] = ball_plate_alive_reward
-        self.env.internal_state["info"][f"reward/ball_plate_drop_penalty"] = ball_plate_drop_penalty_reward
         self.env.internal_state["info"][f"reward/total"] = reward
         self.env.internal_state["info"][f"env_info/xy_vel_diff_abs"] = np.nan_to_num(np.mean(np.minimum(np.abs(xy_difference), 2*self.env.internal_state["max_command_velocity"])), nan=2*self.env.internal_state["max_command_velocity"], posinf=2*self.env.internal_state["max_command_velocity"], neginf=2*self.env.internal_state["max_command_velocity"])
-        self.env.internal_state["info"][f"env_info/ball_plate_radial_distance"] = ball_plate_metrics["radial_distance"]
-        self.env.internal_state["info"][f"env_info/ball_plate_on_plate"] = float(ball_plate_metrics["on_plate"])
-        self.env.internal_state["info"][f"env_info/ball_plate_dropped"] = float(ball_plate_metrics["dropped"])
 
         return reward
