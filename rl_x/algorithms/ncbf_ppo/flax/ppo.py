@@ -517,6 +517,12 @@ class PPO:
             action_mean, action_logstd = self.policy.apply(policy_state.params, state)
             return self.get_processed_action(action_mean)
 
+        def get_safety_layer_curriculum_coeff(step):
+            if not self.ncbf_use_safety_layer:
+                return np.float32(0.0)
+            denominator = max(float(self.total_timesteps) - float(self.nr_envs), 1.0)
+            return np.float32(np.clip(float(step) / denominator, 0.0, 1.0))
+
         self.set_train_mode()
 
         batch = Batch(
@@ -578,6 +584,7 @@ class PPO:
                     pretrain_last_actions,
                     pretrain_last_states,
                     latent_z,
+                    np.float32(0.0),
                     params_stack,
                 )
                 processed_action = jax.device_get(processed_action)
@@ -705,17 +712,20 @@ class PPO:
             # Acting
             dones_this_rollout = 0
             step_info_collection = {}
+            safety_layer_curriculum_coeffs = np.zeros(self.nr_steps, dtype=np.float32)
             for step in range(self.nr_steps):
                 _, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
 
                 latent_z = self.encoder.apply(self.encoder_state.params, history_stacks)
+                safety_layer_curriculum_coeff = get_safety_layer_curriculum_coeff(global_step)
                 safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
                     action,
                     state,
                     last_actions,
                     last_states,
                     latent_z,
+                    safety_layer_curriculum_coeff,
                     params_stack,
                 )
                 processed_action = safe_action
@@ -742,6 +752,7 @@ class PPO:
                 batch.constraint_violated[step] = constraint_active
                 batch.delta_u[step] = delta_u
                 batch.dones[step] = done
+                safety_layer_curriculum_coeffs[step] = safety_layer_curriculum_coeff
 
                 next_history_stacks = np.roll(history_stacks, shift=-1, axis=1)
                 next_history_stacks[:, -1] = next_state
@@ -799,6 +810,7 @@ class PPO:
             ncbf_metrics['ncbf/mean_y'] = mean_y.item()
             ncbf_metrics['ncbf/mean_constraint_violated'] = batch_mean_constraint_violated.item()
             ncbf_metrics['ncbf/mean_delta_u'] = batch_mean_delta_u.item()
+            ncbf_metrics['ncbf/safety_layer_curriculum_coeff'] = float(np.mean(safety_layer_curriculum_coeffs))
 
             # Optimizing
             self.policy_state, self.critic_state, optimization_metrics, self.key = update(
@@ -835,6 +847,7 @@ class PPO:
                         eval_last_actions,
                         eval_last_states,
                         latent_z,
+                        np.float32(1.0),
                         params_stack,
                     )
                     processed_action = safe_action

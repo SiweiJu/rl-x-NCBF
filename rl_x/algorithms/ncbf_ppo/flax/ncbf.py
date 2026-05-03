@@ -43,9 +43,9 @@ def get_ncbf(config, env):
 
     # dummy
     if ncbf_clipping:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
     else:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi: (action_raw, jnp.array(False), jnp.array(0.0))
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -56,7 +56,7 @@ def get_ncbf(config, env):
     batched_get_safe_action = jax.jit(
         jax.vmap(
             safety_layer_function_for_batch,
-            in_axes=(0, 0, 0, 0, 0, None),  # action_raw[env], obs_t[env], same phi for items in the batch
+            in_axes=(0, 0, 0, 0, 0, None, None),  # action_raw[env], obs_t[env], same coeff/phi for items in the batch
             out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
         )
     )
@@ -129,7 +129,7 @@ def make_get_safe_action(
     ):
     """
     Returns a JIT-able safety layer:
-        get_safe_action(action_raw, x_t, t, contact, phi) -> (u_safe, info)
+        get_safe_action(action_raw, x_t, t, contact, safety_layer_curriculum_coeff, phi) -> (u_safe, info)
 
     Args:
       ncbf_apply: flax apply function h_phi(obs)
@@ -185,6 +185,7 @@ def make_get_safe_action(
         last_action: Array,
         last_obs: Array,
         latent_z: Array,
+        safety_layer_curriculum_coeff: Array,
         phis: dict
     ) -> Tuple[Array, Array, Array]:
 
@@ -202,7 +203,12 @@ def make_get_safe_action(
         sigma = jnp.maximum(h_u0_std, 1)
         sigma = jnp.minimum(sigma, 10.0)
         gain = delta / (aTa + (1.0 * sigma ** 2 / lambda_s))
-        u_safe = action_raw + gain * a
+        curriculum_coeff = jnp.clip(
+            jnp.asarray(safety_layer_curriculum_coeff, dtype=action_raw.dtype),
+            0.0,
+            1.0,
+        )
+        u_safe = action_raw + curriculum_coeff * gain * a
 
         # eps_star = delta / (1.0 + lambda_s * aTa)
 

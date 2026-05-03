@@ -221,7 +221,7 @@ class PPO:
 
             # Single step rollout, used for training and ncbf pretraining, therefore defined at first
             def single_rollout(single_rollout_carry, _):
-                policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key = single_rollout_carry
+                policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff = single_rollout_carry
 
                 key, subkey = jax.random.split(key)
                 observation = env_state.next_observation
@@ -240,6 +240,7 @@ class PPO:
                 params_stack = repeat_ncbf_params(ncbf_state)
 
                 processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, observation, last_action, last_state, latent_z,
+                                                                                      safety_layer_curriculum_coeff,
                                                                                       params_stack)
                 # contraint_active = 0
                 # delta_u = 0
@@ -257,7 +258,7 @@ class PPO:
 
                     env_state = jax.experimental.io_callback(render, env_state, env_state)
 
-                return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key), transition
+                return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff), transition
 
             @jax.jit
             def window_any_done_next_H(dones: jnp.ndarray, terminates: jnp.ndarray):
@@ -714,9 +715,21 @@ class PPO:
                 def learning_iteration(learning_iteration_carry, learning_iteration_step):
                     policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
                     ncbf_pos_buffer, ncbf_neg_buffer = ncbf_replay_buffer
-                    rollout_carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key)
+                    current_learning_update = (multi_learning_iteration_step * self.nr_updates_per_multi_learning_iteration) + learning_iteration_step
+                    curriculum_denominator = jnp.maximum(jnp.asarray(self.nr_updates - 1, dtype=jnp.float32), 1.0)
+                    safety_layer_curriculum_coeff = jnp.clip(
+                        jnp.asarray(current_learning_update, dtype=jnp.float32) / curriculum_denominator,
+                        0.0,
+                        1.0,
+                    )
+                    safety_layer_curriculum_coeff = jnp.where(
+                        self.ncbf_use_safety_layer,
+                        safety_layer_curriculum_coeff,
+                        jnp.asarray(0.0, dtype=jnp.float32),
+                    )
+                    rollout_carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff)
                     single_rollout_carry, batch = jax.lax.scan(single_rollout, rollout_carry, None, self.nr_steps)
-                    policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key = single_rollout_carry
+                    policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, _ = single_rollout_carry
                     states, next_states, actions, env_actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks = batch
 
                     # process the batch data to get mask and y_target
@@ -725,6 +738,7 @@ class PPO:
 
                     ncbf_metrics = {}
                     ncbf_metrics["ncbf/safety_layer_enabled"] = jnp.asarray(self.ncbf_use_safety_layer, dtype=jnp.float32)
+                    ncbf_metrics["ncbf/safety_layer_curriculum_coeff"] = safety_layer_curriculum_coeff
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_target)
@@ -1273,6 +1287,7 @@ class PPO:
                             eval_env_state.last_action,
                             eval_env_state.last_state,
                             latent_z,
+                            jnp.asarray(1.0, dtype=raw_processed_action.dtype),
                             params_stack,
                         )
                         eval_env_state = self.env.step(eval_env_state, processed_action)
@@ -1453,6 +1468,7 @@ class PPO:
                 env_state.last_action,
                 env_state.last_state,
                 latent_z,
+                jnp.asarray(1.0, dtype=raw_processed_action.dtype),
                 params_stack,
             )
             env_state = self.env.step(env_state, processed_action)
