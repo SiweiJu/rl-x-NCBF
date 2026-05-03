@@ -20,7 +20,12 @@ import wandb
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.general_properties import GeneralProperties
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.policy import get_policy
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.critic import get_critic
-from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf import get_ncbf
+from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf import (
+    get_ncbf,
+    logistic_normal_binary_cross_entropy,
+    logistic_normal_safe_probability,
+    split_ncbf_output,
+)
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.history_encoder import get_history_encoder
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.decoder import get_decoder
 
@@ -84,6 +89,9 @@ class PPO:
         self.ncbf_loss_coef = config.algorithm.ncbf.loss_coef
         self.ncbf_stop_encoder_gradient = config.algorithm.ncbf.stop_encoder_gradient
         self.ncbf_use_safety_layer = bool(config.algorithm.ncbf.use_safety_layer)
+        self.ncbf_output_distribution = getattr(config.algorithm.ncbf, "output_distribution", "deterministic")
+        self.ncbf_min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
+        self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
@@ -384,11 +392,29 @@ class PPO:
                 h_input = jnp.concatenate((h_input, minib_latent), axis=-1)
                 h_input_next = jnp.concatenate((h_input_next, minib_latent_next), axis=-1)
 
-                h_x_logits = ncbf_state[0].apply_fn(params, h_input)  # [B]
-                h_xn_logits = ncbf_state[0].apply_fn(params, h_input_next)  # [B]
+                h_x_raw = ncbf_state[0].apply_fn(params, h_input)  # [B]
+                h_xn_raw = ncbf_state[0].apply_fn(params, h_input_next)  # [B]
+                h_x_logits, h_x_log_std = split_ncbf_output(
+                    h_x_raw,
+                    self.ncbf_output_distribution,
+                    self.ncbf_min_log_std,
+                    self.ncbf_max_log_std,
+                )
+                h_xn_logits, h_xn_log_std = split_ncbf_output(
+                    h_xn_raw,
+                    self.ncbf_output_distribution,
+                    self.ncbf_min_log_std,
+                    self.ncbf_max_log_std,
+                )
 
-                h_x = nn.sigmoid(h_x_logits)
-                h_xn = nn.sigmoid(h_xn_logits)
+                if self.ncbf_output_distribution == "logistic_normal":
+                    h_x = logistic_normal_safe_probability(h_x_logits, h_x_log_std)
+                    h_xn = logistic_normal_safe_probability(h_xn_logits, h_xn_log_std)
+                    mean_std = jnp.mean(jnp.exp(h_x_log_std))
+                else:
+                    h_x = nn.sigmoid(h_x_logits)
+                    h_xn = nn.sigmoid(h_xn_logits)
+                    mean_std = jnp.array(0.0, dtype=h_x.dtype)
                 
                 minib_y = minib_y.astype(h_x.dtype)
                 minib_mask_head = minib_mask[..., None].astype(h_x.dtype)
@@ -399,7 +425,10 @@ class PPO:
                 # use the decaying coef only for negtive samples
                 coef = jnp.where(minib_y < 0.5, coef[..., None], 1.0)
 
-                bce = optax.sigmoid_binary_cross_entropy(h_x_logits, minib_y)
+                if self.ncbf_output_distribution == "logistic_normal":
+                    bce = logistic_normal_binary_cross_entropy(h_x_logits, h_x_log_std, minib_y)
+                else:
+                    bce = optax.sigmoid_binary_cross_entropy(h_x_logits, minib_y)
                 head_loss = jnp.mean(coef * bce, axis=-1)
                 num = jnp.sum(minib_mask * head_loss, axis=-1)
                 den = jnp.sum(minib_mask) + 1e-8
@@ -426,7 +455,13 @@ class PPO:
                 def f_single(x_single):
                     # shape (output_dim,) -> reduce to scalar
                     x_single = x_single[None, ...]
-                    y = ncbf_state[0].apply_fn(params, x_single)
+                    y_raw = ncbf_state[0].apply_fn(params, x_single)
+                    y, _ = split_ncbf_output(
+                        y_raw,
+                        self.ncbf_output_distribution,
+                        self.ncbf_min_log_std,
+                        self.ncbf_max_log_std,
+                    )
                     return jnp.sum(y)
 
                 # Vectorize grad over batch
@@ -480,6 +515,7 @@ class PPO:
                     max_neg_coef=max_coef_neg,
                     min_neg_coef=min_coef_neg,
                     n_neg_samples=jnp.sum(minib_y),
+                    mean_std=mean_std,
                 )
                 return total, metrics
 
@@ -1008,8 +1044,13 @@ class PPO:
                         ncbf_y_target = jnp.concatenate((y_target_b, replay_y_target_b), axis=0)
                         ncbf_masks = jnp.concatenate((ncbf_masks_b, replay_ncbf_masks_b), axis=0).astype(jnp.float32)
 
-                        h_x = ncbf_state.apply_fn(ncbf_params, h_input)  # [B]
-                        h_xn = ncbf_state.apply_fn(ncbf_params, h_input_next)  # [B]
+                        h_x_raw = ncbf_state.apply_fn(ncbf_params, h_input)  # [B]
+                        h_x, h_x_log_std = split_ncbf_output(
+                            h_x_raw,
+                            self.ncbf_output_distribution,
+                            self.ncbf_min_log_std,
+                            self.ncbf_max_log_std,
+                        )
                         ncbf_y_target = ncbf_y_target.astype(h_x.dtype)
 
                         # decaying coefficient disabled
@@ -1027,13 +1068,19 @@ class PPO:
                         # den = jnp.sum(minib_mask) + 1e-8
                         # clf_loss = num / den
 
-                        bce = optax.sigmoid_binary_cross_entropy(h_x, ncbf_y_target)
+                        if self.ncbf_output_distribution == "logistic_normal":
+                            bce = logistic_normal_binary_cross_entropy(h_x, h_x_log_std, ncbf_y_target)
+                            h_prob = logistic_normal_safe_probability(h_x, h_x_log_std)
+                            ncbf_mean_std = jnp.mean(jnp.exp(h_x_log_std))
+                        else:
+                            bce = optax.sigmoid_binary_cross_entropy(h_x, ncbf_y_target)
+                            h_prob = nn.sigmoid(h_x)
+                            ncbf_mean_std = jnp.array(0.0, dtype=h_x.dtype)
                         head_loss = jnp.mean(bce, axis=-1)
                         num = jnp.sum(ncbf_masks * head_loss, axis=-1)
                         den = jnp.sum(ncbf_masks) + 1e-8
                         cls_loss = num / den
                         ncbf_loss = cls_loss
-                        h_prob = nn.sigmoid(h_x)
 
                         # Combine losses
                         loss = (pg_loss -
@@ -1057,6 +1104,7 @@ class PPO:
                             "ncbf/replay_neg_samples_per_minibatch": jnp.sum(replay_ncbf_masks_b.astype(jnp.float32)),
                             "ncbf/height_bce": jnp.sum(ncbf_masks * bce[..., 0]) / den,
                             "ncbf/tilt_bce": jnp.sum(ncbf_masks * bce[..., 1]) / den,
+                            "ncbf/mean_std": ncbf_mean_std,
                             "ncbf/pred_height_safe_prob": jnp.sum(ncbf_masks * h_prob[..., 0]) / den,
                             "ncbf/pred_tilt_safe_prob": jnp.sum(ncbf_masks * h_prob[..., 1]) / den,
                             "ncbf/minibatch_target_height_safe_rate": jnp.sum(ncbf_masks * ncbf_y_target[..., 0]) / den,

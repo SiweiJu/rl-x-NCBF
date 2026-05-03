@@ -7,9 +7,57 @@ import jax.numpy as jnp
 import flax.linen as nn
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
+from jax.scipy.special import logsumexp
 from mujoco import mjx
 
 Array = jnp.ndarray
+
+_LOGISTIC_NORMAL_GH_NODES, _LOGISTIC_NORMAL_GH_WEIGHTS = np.polynomial.hermite.hermgauss(9)
+_LOGISTIC_NORMAL_GH_PROB_WEIGHTS = _LOGISTIC_NORMAL_GH_WEIGHTS / np.sqrt(np.pi)
+
+
+def split_ncbf_output(
+    output: Array,
+    output_distribution: str,
+    min_log_std: float,
+    max_log_std: float,
+) -> Tuple[Array, Array]:
+    if output_distribution == "logistic_normal":
+        mean, raw_log_std = jnp.split(output, 2, axis=-1)
+        log_std = jnp.clip(raw_log_std, min_log_std, max_log_std)
+        return mean, log_std
+    return output, jnp.zeros_like(output)
+
+
+def _reshape_quadrature_values(values: Array, reference: Array) -> Array:
+    shape = (1,) * (reference.ndim - 1) + (values.shape[0], 1)
+    return values.reshape(shape)
+
+
+def logistic_normal_binary_cross_entropy(mean_logits: Array, log_std: Array, targets: Array) -> Array:
+    nodes = jnp.asarray(_LOGISTIC_NORMAL_GH_NODES, dtype=mean_logits.dtype)
+    log_weights = jnp.log(jnp.asarray(_LOGISTIC_NORMAL_GH_PROB_WEIGHTS, dtype=mean_logits.dtype))
+    nodes = _reshape_quadrature_values(nodes, mean_logits)
+    log_weights = _reshape_quadrature_values(log_weights, mean_logits)
+
+    logits = mean_logits[..., None, :] + jnp.sqrt(jnp.asarray(2.0, dtype=mean_logits.dtype)) * jnp.exp(log_std[..., None, :]) * nodes
+    targets = targets[..., None, :]
+    log_likelihood = jnp.where(
+        targets > 0.5,
+        -jax.nn.softplus(-logits),
+        -jax.nn.softplus(logits),
+    )
+    return -logsumexp(log_weights + log_likelihood, axis=-2)
+
+
+def logistic_normal_safe_probability(mean_logits: Array, log_std: Array) -> Array:
+    nodes = jnp.asarray(_LOGISTIC_NORMAL_GH_NODES, dtype=mean_logits.dtype)
+    weights = jnp.asarray(_LOGISTIC_NORMAL_GH_PROB_WEIGHTS, dtype=mean_logits.dtype)
+    nodes = _reshape_quadrature_values(nodes, mean_logits)
+    weights = _reshape_quadrature_values(weights, mean_logits)
+
+    logits = mean_logits[..., None, :] + jnp.sqrt(jnp.asarray(2.0, dtype=mean_logits.dtype)) * jnp.exp(log_std[..., None, :]) * nodes
+    return jnp.sum(weights * jax.nn.sigmoid(logits), axis=-2)
 
 
 def get_ncbf(config, env):
@@ -21,12 +69,29 @@ def get_ncbf(config, env):
     ncbf_clipping = config.algorithm.ncbf.action_clipping
     eta_cbf = config.algorithm.ncbf.eta_cbf
     lambda_s = config.algorithm.ncbf.lambda_slack
+    output_distribution = getattr(config.algorithm.ncbf, "output_distribution", "deterministic")
+    min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
+    max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
+
+    if output_distribution not in ("deterministic", "logistic_normal"):
+        raise ValueError("algorithm.ncbf.output_distribution must be 'deterministic' or 'logistic_normal'.")
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 
-    NCBF = [NCBF_FFNN(config.algorithm.ncbf.nr_hidden_units) for _ in range(n_ncbf_ensemble)]
-    NCBF_apply = get_ensemble_forward_pass(NCBF[0].apply)
+    NCBF = [
+        NCBF_FFNN(
+            config.algorithm.ncbf.nr_hidden_units,
+            output_distribution=output_distribution,
+        )
+        for _ in range(n_ncbf_ensemble)
+    ]
+    NCBF_apply = get_ensemble_forward_pass(
+        NCBF[0].apply,
+        output_distribution=output_distribution,
+        min_log_std=min_log_std,
+        max_log_std=max_log_std,
+    )
 
 
     safety_layer_function = make_get_safe_action(
@@ -62,7 +127,7 @@ def get_ncbf(config, env):
     )
     return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function_for_batch
 
-def get_ensemble_forward_pass(apply_fn):
+def get_ensemble_forward_pass(apply_fn, output_distribution: str, min_log_std: float, max_log_std: float):
     alpha = 0.4
     E = 5  # number of ensemble members, hardcoded for now
     k = max(1, int(np.ceil((1.0 - alpha) * E)))
@@ -75,6 +140,12 @@ def get_ensemble_forward_pass(apply_fn):
         """
         # Vectorized apply over ensemble, then take mean
         predictions = jax.vmap(lambda p: apply_fn(p, input))(params_stack)
+        mean_predictions, log_std_predictions = split_ncbf_output(
+            predictions,
+            output_distribution,
+            min_log_std,
+            max_log_std,
+        )
 
         def aggregate_predictions(preds):
             # return jnp.mean(preds, axis=0)
@@ -90,13 +161,20 @@ def get_ensemble_forward_pass(apply_fn):
             #
             return cvar_topk(preds)
 
-        return aggregate_predictions(predictions), jnp.std(predictions), predictions
+        if output_distribution == "logistic_normal":
+            prediction_std = jnp.sqrt(jnp.var(mean_predictions) + jnp.mean(jnp.exp(2.0 * log_std_predictions)))
+        else:
+            prediction_std = jnp.std(mean_predictions)
+
+        return aggregate_predictions(mean_predictions), prediction_std, mean_predictions
     return ensemble_forward_pass
 
 
 
 class NCBF_FFNN(nn.Module):
     nr_hidden_units: int
+    n_outputs: int = 2
+    output_distribution: str = "deterministic"
 
     @nn.compact
     def __call__(self, x):
@@ -106,7 +184,8 @@ class NCBF_FFNN(nn.Module):
         x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.tanh(x)
         # Scalar CBF output h(x)
-        h1 = nn.Dense(2, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
+        output_dim = self.n_outputs * (2 if self.output_distribution == "logistic_normal" else 1)
+        h1 = nn.Dense(output_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 
         # clip the output to be in [0, 1]
         # h1 = nn.sigmoid(h1)

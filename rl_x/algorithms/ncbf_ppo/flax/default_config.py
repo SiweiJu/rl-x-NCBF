@@ -41,6 +41,9 @@ def get_config(algorithm_name):
     config.ncbf.minibatch_size = 64
     config.ncbf.nr_hidden_units = 512
     config.ncbf.n_ensemble = 5  # number of networks to assemble for ncbf prediction
+    config.ncbf.output_distribution = "deterministic"  # deterministic or logistic_normal
+    config.ncbf.min_log_std = -5.0
+    config.ncbf.max_log_std = 2.0
 
     # safety layer configs
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint

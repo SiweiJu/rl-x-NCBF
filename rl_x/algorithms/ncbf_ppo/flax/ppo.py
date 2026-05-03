@@ -22,7 +22,11 @@ import wandb
 from rl_x.algorithms.ncbf_ppo.flax.general_properties import GeneralProperties
 from rl_x.algorithms.ncbf_ppo.flax.policy import get_policy
 from rl_x.algorithms.ncbf_ppo.flax.critic import get_critic
-from rl_x.algorithms.ncbf_ppo.flax.ncbf import get_ncbf
+from rl_x.algorithms.ncbf_ppo.flax.ncbf import (
+    get_ncbf,
+    logistic_normal_binary_cross_entropy,
+    split_ncbf_output,
+)
 from rl_x.algorithms.ncbf_ppo.flax.batch import Batch
 from rl_x.algorithms.ncbf_ppo.flax.replay_buffer import ReplayBuffer
 from rl_x.algorithms.ncbf_ppo.flax.history_encoder import get_history_encoder
@@ -84,6 +88,9 @@ class PPO:
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
         self.ncbf_use_safety_layer = config.algorithm.ncbf.use_safety_layer
+        self.ncbf_output_distribution = getattr(config.algorithm.ncbf, "output_distribution", "deterministic")
+        self.ncbf_min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
+        self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
 
         self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
         self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps
@@ -403,15 +410,33 @@ class PPO:
                 gamma_c = self.ncbf_gamma_c
                 h_input = make_h_input(minib_obs, minib_action)
                 h_input_next = make_h_input(minib_nxt, minib_action)
-                h_x = ncbf_state.apply_fn(params, h_input)
-                h_xn = ncbf_state.apply_fn(params, h_input_next)
+                h_x_raw = ncbf_state.apply_fn(params, h_input)
+                h_xn_raw = ncbf_state.apply_fn(params, h_input_next)
+                h_x, h_x_log_std = split_ncbf_output(
+                    h_x_raw,
+                    self.ncbf_output_distribution,
+                    self.ncbf_min_log_std,
+                    self.ncbf_max_log_std,
+                )
+                h_xn, _ = split_ncbf_output(
+                    h_xn_raw,
+                    self.ncbf_output_distribution,
+                    self.ncbf_min_log_std,
+                    self.ncbf_max_log_std,
+                )
                 minib_y = jnp.broadcast_to(minib_y[..., None], h_x.shape)
                 minib_mask = jnp.broadcast_to(minib_mask[..., None], h_x.shape)
 
-                # (1) BCE classification: logits = h(x) - gamma_c
+                # (1) classification: logits = h(x) - gamma_c
                 logits = h_x - gamma_c
-                # BCE with logits: softplus(z) - y*z
-                num = jnp.sum(minib_mask * (jax.nn.softplus(logits) - minib_y * logits))
+                if self.ncbf_output_distribution == "logistic_normal":
+                    classification_loss = logistic_normal_binary_cross_entropy(logits, h_x_log_std, minib_y)
+                    mean_std = jnp.mean(jnp.exp(h_x_log_std))
+                else:
+                    classification_loss = jax.nn.softplus(logits) - minib_y * logits
+                    mean_std = jnp.array(0.0, dtype=h_x.dtype)
+
+                num = jnp.sum(minib_mask * classification_loss)
                 den = jnp.sum(minib_mask) + 1e-8
                 clf_loss = num / den
 
@@ -433,7 +458,13 @@ class PPO:
 
                     def f_single(x_single):
                         # shape (output_dim,) -> reduce to scalar
-                        y = self.ncbf[0].apply(params, x_single)
+                        y_raw = self.ncbf[0].apply(params, x_single)
+                        y, _ = split_ncbf_output(
+                            y_raw,
+                            self.ncbf_output_distribution,
+                            self.ncbf_min_log_std,
+                            self.ncbf_max_log_std,
+                        )
                         return jnp.sum(y)
 
                     # Vectorize grad over batch
@@ -461,6 +492,7 @@ class PPO:
                     loss_lip=lip_loss,
                     loss_wd=wd_loss,
                     mean_y=jnp.mean(minib_y),
+                    mean_std=mean_std,
                 )
                 return total, metrics
 
@@ -1140,7 +1172,13 @@ class PPO:
                 # params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                 h_input = jnp.concatenate([state[:, self.env.envs[0].ncbf_observation_indices], processed_action, latent_z], axis=-1)
                 # prediction_mean, prediction_std, predictions = self.ncbf_state.apply_fn(self.ncbf_state.params, h_input)
-                prediction_mean = self.ncbf_state.apply_fn(self.ncbf_state.params, h_input)
+                prediction_raw = self.ncbf_state.apply_fn(self.ncbf_state.params, h_input)
+                prediction_mean, _ = split_ncbf_output(
+                    prediction_raw,
+                    self.ncbf_output_distribution,
+                    self.ncbf_min_log_std,
+                    self.ncbf_max_log_std,
+                )
 
                 def component_softmin(preds):
                     """

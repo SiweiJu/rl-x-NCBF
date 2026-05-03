@@ -44,6 +44,9 @@ def get_config(algorithm_name):
     config.ncbf.use_safety_layer = False
     config.ncbf.nr_minibatches = 50
     config.ncbf.nr_hidden_units = 512
+    config.ncbf.output_distribution = "deterministic"  # deterministic or logistic_normal
+    config.ncbf.min_log_std = -5.0
+    config.ncbf.max_log_std = 2.0
     config.ncbf.policy_loss_coef = 0.01  # weight for policy loss when training ncbf
     config.ncbf.coef_decay_lambda = 0.95  # decay lambda for ncbf loss coefficients < 1
     config.ncbf.action_clipping = False
