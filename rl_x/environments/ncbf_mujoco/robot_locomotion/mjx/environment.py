@@ -42,6 +42,7 @@ class LocomotionEnv:
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
+        self.root_body_name = robot_config.get("root_body_name", "trunk")
 
         xml_path = (self.robot_config["directory_path"] / "data" / "plane.xml").as_posix()
         xml_handle = mjcf.from_path(xml_path)
@@ -71,7 +72,7 @@ class LocomotionEnv:
             floor.hfield = "empty_hfield"
         
         if self.should_render and self.add_goal_arrow:
-            trunk = xml_handle.find("body", "trunk")
+            trunk = xml_handle.find("body", self.root_body_name)
             trunk.add("body", name="dir_arrow", pos="0 0 0.15")
             dir_vec = xml_handle.find("body", "dir_arrow")
             dir_vec.add("site", name="dir_arrow_ball", type="sphere", size=".02", pos="-.1 0 0")
@@ -89,7 +90,7 @@ class LocomotionEnv:
         mujoco.mj_forward(self.c_model, self.c_data)
         
         self.imu_site_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_SITE, "imu")
-        self.trunk_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, "trunk")
+        self.trunk_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, self.root_body_name)
         self.actuator_joint_max_velocities = jnp.array(robot_config["actuator_joint_max_velocities"])
         self.initial_qpos = jnp.array(self.initial_mj_model.keyframe("home").qpos)
         self.initial_imu_orientation_rotation_inverse = Rotation.from_matrix(self.c_data.site_xmat[self.imu_site_id].reshape(3, 3)).inv()
@@ -122,14 +123,29 @@ class LocomotionEnv:
         self.feet_symmetry_pairs = jnp.array([list(pair) for pair in feet_symmetry_set])
         self.body_ids_of_feet = jnp.array([self.initial_mj_model.geom(geom_id).bodyid[0] for geom_id in self.foot_geom_indices])
         all_feet_are_sphere = jnp.all(self.initial_mjx_model.geom_type[self.foot_geom_indices] == 2)
+        all_feet_are_capsule = jnp.all(self.initial_mjx_model.geom_type[self.foot_geom_indices] == 3)
         all_feet_are_box = jnp.all(self.initial_mjx_model.geom_type[self.foot_geom_indices] == 6)
-        if not all_feet_are_sphere | all_feet_are_box:
-            raise ValueError("Foot geoms are not all of type sphere or box.")
-        self.foot_type = "sphere" if all_feet_are_sphere else "box"
-        self.foot_type_int = 0 if self.foot_type == "sphere" else 1
+        if not bool(all_feet_are_sphere | all_feet_are_capsule | all_feet_are_box):
+            raise ValueError("Foot geoms are not all of type sphere, capsule or box.")
+        self.foot_type = "sphere" if all_feet_are_sphere else ("capsule" if all_feet_are_capsule else "box")
+        self.foot_type_int = 0 if self.foot_type == "sphere" else (2 if self.foot_type == "capsule" else 1)
 
         feet_global_linear_velocity_sensor_ids = [self.initial_mj_model.sensor(f"{foot_name}_global_linear_velocity").id for foot_name in self.feet_names]
         self.feet_global_linear_velocity_sensor_adrs_start = jnp.array([self.initial_mj_model.sensor_adr[sensor_id] for sensor_id in feet_global_linear_velocity_sensor_ids])
+        self.left_foot_site_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_SITE, robot_config.get("left_foot_site_name", "left_foot"))
+        self.right_foot_site_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_SITE, robot_config.get("right_foot_site_name", "right_foot"))
+        self.left_foot_geom_indices = jnp.array([
+            mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            for name in robot_config.get("left_foot_geom_names", [name for name in self.feet_names if "left" in name])
+        ])
+        self.right_foot_geom_indices = jnp.array([
+            mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            for name in robot_config.get("right_foot_geom_names", [name for name in self.feet_names if "right" in name])
+        ])
+        left_foot_velocity_sensor_id = self.initial_mj_model.sensor(robot_config.get("left_foot_velocity_sensor_name", "left_foot_global_linvel")).id
+        right_foot_velocity_sensor_id = self.initial_mj_model.sensor(robot_config.get("right_foot_velocity_sensor_name", "right_foot_global_linvel")).id
+        self.left_foot_velocity_sensor_adr = self.initial_mj_model.sensor_adr[left_foot_velocity_sensor_id]
+        self.right_foot_velocity_sensor_adr = self.initial_mj_model.sensor_adr[right_foot_velocity_sensor_id]
 
         body_to_parentid = jnp.array([self.initial_mj_model.body(body_id).parentid[0] for body_id in range(self.initial_mj_model.nbody)])
         body_to_children_count = jnp.array([jnp.sum(body_to_parentid == body_id) for body_id in range(self.initial_mj_model.nbody)])
@@ -153,20 +169,33 @@ class LocomotionEnv:
         self.dt = env_config["timestep"] * self.nr_substeps
         self.horizon = int(round(env_config["episode_length_in_seconds"] * self.control_frequency_hz))
         self.command_function = get_command_function(env_config["command"]["type"], self)
-        self.command_sampling_function = get_sampling_function(env_config["command"]["sampling_type"], self)
+        self.command_observation_size = getattr(self.command_function, "observation_size", 3)
+        self.command_sampling_function = get_sampling_function(
+            env_config["command"]["sampling_type"],
+            self,
+            probability=env_config["command"].get("sampling_probability", 0.002),
+        )
         self.initial_state_function = get_initial_state_function(env_config["domain_randomization"]["initial_state"]["type"], self)
         self.reward_function = get_reward_function(env_config["reward"]["type"], self)
         self.termination_function = get_termination_function(env_config["termination"]["type"], self)
         self.policy_exteroceptive_observation_function = get_exteroceptive_observation_function(env_config["policy_exteroceptive_observation_type"], self)
         self.critic_exteroceptive_observation_function = get_exteroceptive_observation_function(env_config["critic_exteroceptive_observation_type"], self)
         self.terrain_function = get_terrain_function(env_config["terrain"]["type"], self)
-        self.domain_randomization_sampling_function = get_sampling_function(env_config["domain_randomization"]["sampling_type"], self)
+        self.domain_randomization_sampling_function = get_sampling_function(
+            env_config["domain_randomization"]["sampling_type"],
+            self,
+            probability=env_config["domain_randomization"].get("sampling_probability", 0.002),
+        )
         self.domain_randomization_action_delay_function = get_domain_randomization_action_delay_function(env_config["domain_randomization"]["action_delay"]["type"], self)
         self.domain_randomization_mujoco_model_function = get_domain_randomization_mujoco_model_function(env_config["domain_randomization"]["mujoco_model"]["type"], self)
         self.domain_randomization_seen_robot_function = get_domain_randomization_seen_robot_function(env_config["domain_randomization"]["seen_robot"]["type"], self)
         self.domain_randomization_unseen_robot_function = get_domain_randomization_unseen_robot_function(env_config["domain_randomization"]["unseen_robot"]["type"], self)
         self.domain_randomization_perturbation_function = get_domain_randomization_perturbation_function(env_config["domain_randomization"]["perturbation"]["type"], self)
-        self.domain_randomization_perturbation_sampling_function = get_sampling_function(env_config["domain_randomization"]["perturbation"]["sampling_type"], self)
+        self.domain_randomization_perturbation_sampling_function = get_sampling_function(
+            env_config["domain_randomization"]["perturbation"]["sampling_type"],
+            self,
+            probability=env_config["domain_randomization"]["perturbation"].get("sampling_probability", 0.002),
+        )
         self.observation_noise_function = get_observation_noise_function(env_config["domain_randomization"]["observation_noise"]["type"], self)
         self.joint_dropout_function = get_joint_dropout_function(env_config["domain_randomization"]["joint_dropout"]["type"], self)
         
@@ -331,7 +360,7 @@ class LocomotionEnv:
 
     @partial(jax.jit, static_argnums=(0,))
     def _reset(self, state):
-        key, initial_state_key, terrain_key, domain_randomization_key, observation_key = jax.random.split(state.key, 5)
+        key, initial_state_key, terrain_key, domain_randomization_key, command_key, observation_key = jax.random.split(state.key, 6)
         state = state.replace(key=key)
 
         mjx_model = self.terrain_function.sample(state.mjx_model, state.internal_state, terrain_key)
@@ -372,6 +401,8 @@ class LocomotionEnv:
         self.reward_function.setup(new_internal_state)
         self.domain_randomization_action_delay_function.setup(new_internal_state)
         data, mjx_model = self.handle_domain_randomization(new_internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
+        should_sample_commands = self.command_sampling_function.setup(command_key)
+        self.command_function.get_next_command(new_internal_state, should_sample_commands, command_key)
 
         next_observation = self.get_observation(data, mjx_model, new_internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
         last_state = next_observation
@@ -502,13 +533,26 @@ class LocomotionEnv:
         qvel = jnp.concatenate([data.qvel[:6], data.qvel[self.actuator_joint_mask_qvel]], axis=0)
 
         robot_height = internal_state["robot_imu_height_over_ground"]
-        robot_height_threshold = self.env_config["termination"]["height_percentage_threshold"] * internal_state["robot_nominal_imu_height_over_ground"]
-        robot_height_safe = (robot_height >= robot_height_threshold).astype(jnp.float32)
+        if self.env_config["termination"]["type"] == "booster":
+            robot_height_safe = (
+                (robot_height >= self.env_config["termination"]["min_height"]) &
+                (robot_height <= self.env_config["termination"]["max_height"])
+            ).astype(jnp.float32)
+        else:
+            robot_height_threshold = self.env_config["termination"]["height_percentage_threshold"] * internal_state["robot_nominal_imu_height_over_ground"]
+            robot_height_safe = (robot_height >= robot_height_threshold).astype(jnp.float32)
 
         body_roll = internal_state["imu_orientation_euler"][0]
         body_pitch = internal_state["imu_orientation_euler"][1]
         body_tilt = jnp.sqrt(body_roll ** 2 + body_pitch ** 2)
-        body_tilt_safe = (body_tilt <= internal_state["body_tilt_threshold"]).astype(jnp.float32)
+        body_tilt_safe = jnp.where(
+            self.env_config["termination"]["type"] == "booster",
+            1.0,
+            (body_tilt <= internal_state["body_tilt_threshold"]).astype(jnp.float32),
+        )
+
+        command_observation = self.command_function.get_observation(internal_state) \
+            if hasattr(self.command_function, "get_observation") else internal_state["goal_velocities"]
 
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
@@ -519,7 +563,7 @@ class LocomotionEnv:
             internal_state["feet_time_in_air"],
             data.sensordata[self.imu_linear_velocity_sensor_adr:self.imu_linear_velocity_sensor_adr + self.imu_linear_velocity_sensor_dim],
             data.sensordata[self.imu_angular_velocity_sensor_adr:self.imu_angular_velocity_sensor_adr + self.imu_angular_velocity_sensor_dim],
-            internal_state["goal_velocities"],
+            command_observation,
             internal_state["imu_orientation_rotation_inverse"].apply(jnp.array([0.0, 0.0, -1.0])),
             jnp.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             jnp.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
@@ -533,19 +577,20 @@ class LocomotionEnv:
         # Add noise
         observation = self.observation_noise_function.modify_observation(internal_state, observation, key)
 
-        # Normalize and clip
-        observation = observation.at[self.joint_positions_obs_idx].set((observation[self.joint_positions_obs_idx] - internal_state["actuator_joint_nominal_positions"]) / 3.14)
-        observation = observation.at[self.joint_velocities_obs_idx].set(observation[self.joint_velocities_obs_idx] / 100.0)
-        observation = observation.at[self.joint_previous_actions_obs_idx].set(observation[self.joint_previous_actions_obs_idx] / 10.0)
-        observation = observation.at[self.feet_ground_contact_obs_idx].set((observation[self.feet_ground_contact_obs_idx] / 0.5) - 1.0)
-        observation = observation.at[self.feet_time_on_ground_obs_idx].set(jnp.clip((observation[self.feet_time_on_ground_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0))
-        observation = observation.at[self.feet_time_in_air_obs_idx].set(jnp.clip((observation[self.feet_time_in_air_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0))
-        observation = observation.at[self.imu_linear_vel_obs_idx].set(jnp.clip(observation[self.imu_linear_vel_obs_idx] / 10.0, -1.0, 1.0))
-        observation = observation.at[self.imu_angular_vel_obs_idx].set(jnp.clip(observation[self.imu_angular_vel_obs_idx] / 50.0, -1.0, 1.0))
-        if len(self.policy_exteroception_obs_idx) > 0:
-            observation = observation.at[self.policy_exteroception_obs_idx].set(jnp.clip((observation[self.policy_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0))
-        if len(self.critic_exteroception_obs_idx) > 0:
-            observation = observation.at[self.critic_exteroception_obs_idx].set(jnp.clip((observation[self.critic_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0))
+        if not getattr(self.observation_noise_function, "handles_normalization", False):
+            # Normalize and clip
+            observation = observation.at[self.joint_positions_obs_idx].set((observation[self.joint_positions_obs_idx] - internal_state["actuator_joint_nominal_positions"]) / 3.14)
+            observation = observation.at[self.joint_velocities_obs_idx].set(observation[self.joint_velocities_obs_idx] / 100.0)
+            observation = observation.at[self.joint_previous_actions_obs_idx].set(observation[self.joint_previous_actions_obs_idx] / 10.0)
+            observation = observation.at[self.feet_ground_contact_obs_idx].set((observation[self.feet_ground_contact_obs_idx] / 0.5) - 1.0)
+            observation = observation.at[self.feet_time_on_ground_obs_idx].set(jnp.clip((observation[self.feet_time_on_ground_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0))
+            observation = observation.at[self.feet_time_in_air_obs_idx].set(jnp.clip((observation[self.feet_time_in_air_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0))
+            observation = observation.at[self.imu_linear_vel_obs_idx].set(jnp.clip(observation[self.imu_linear_vel_obs_idx] / 10.0, -1.0, 1.0))
+            observation = observation.at[self.imu_angular_vel_obs_idx].set(jnp.clip(observation[self.imu_angular_vel_obs_idx] / 50.0, -1.0, 1.0))
+            if len(self.policy_exteroception_obs_idx) > 0:
+                observation = observation.at[self.policy_exteroception_obs_idx].set(jnp.clip((observation[self.policy_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0))
+            if len(self.critic_exteroception_obs_idx) > 0:
+                observation = observation.at[self.critic_exteroception_obs_idx].set(jnp.clip((observation[self.critic_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0))
 
         observation = jnp.nan_to_num(observation, nan=0.0, posinf=0.0, neginf=0.0)
         observation = jnp.clip(observation, -10.0, 10.0)
@@ -594,8 +639,8 @@ class LocomotionEnv:
         current_observation_idx += self.imu_linear_velocity_sensor_dim
         self.imu_angular_vel_obs_idx = jnp.array([current_observation_idx + i for i in range(self.imu_angular_velocity_sensor_dim)])
         current_observation_idx += self.imu_angular_velocity_sensor_dim
-        self.goal_velocities_obs_idx = jnp.array([current_observation_idx + i for i in range(3)])
-        current_observation_idx += 3
+        self.goal_velocities_obs_idx = jnp.array([current_observation_idx + i for i in range(self.command_observation_size)])
+        current_observation_idx += self.command_observation_size
         self.gravity_vector_obs_idx = jnp.array([current_observation_idx + i for i in range(3)])
         current_observation_idx += 3
         self.policy_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.policy_exteroceptive_observation_function.nr_exteroceptive_observations)])

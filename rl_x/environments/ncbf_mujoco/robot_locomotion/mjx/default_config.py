@@ -195,4 +195,150 @@ def get_config(environment_name):
         "episode_length_in_seconds": 20,
     }
 
-    return config_dict.ConfigDict(config)
+    config = config_dict.ConfigDict(config)
+    if "booster" in environment_name.lower():
+        apply_booster_defaults(config)
+    return config
+
+
+def apply_booster_defaults(config):
+    config.booster_defaults_applied = True
+    config.train_robot = "booster_t1"
+    config.command.type = "booster"
+    config.command.sampling_type = "step_probability_and_reset"
+    config.command.sampling_probability = 0.004
+    config.command.max_x_vel = 0.8
+    config.command.max_y_vel = 0.5
+    config.command.max_yaw_vel = 1.0
+    config.command.min_height = 0.67
+    config.command.max_height = 0.67
+    config.command.still_proportion = 0.2
+    config.command.gait_frequency_range = [1.0, 1.5]
+
+    config.domain_randomization.sampling_type = "step_probability_and_reset"
+    config.domain_randomization.sampling_probability = 0.0
+    config.domain_randomization.action_delay.type = "none"
+    config.domain_randomization.initial_state.type = "default"
+    config.domain_randomization.joint_dropout.type = "none"
+    config.domain_randomization.unseen_robot.type = "none"
+
+    config.domain_randomization.mujoco_model.type = "booster"
+    config.domain_randomization.mujoco_model.randomize_gravity = True
+    config.domain_randomization.mujoco_model.gravity_range = [9.51, 10.11]
+    config.domain_randomization.mujoco_model.randomize_model_geom_friction_tangential = False
+    config.domain_randomization.mujoco_model.model_geom_friction_tangential_range = [0.5, 1.5]
+    config.domain_randomization.mujoco_model.randomize_model_geom_friction_torsional = False
+    config.domain_randomization.mujoco_model.model_geom_friction_torsional_range = [0.1, 0.3]
+    config.domain_randomization.mujoco_model.randomize_model_geom_friction_rolling = False
+    config.domain_randomization.mujoco_model.model_geom_friction_rolling_range = [0.00008, 0.00012]
+    config.domain_randomization.mujoco_model.randomize_floor_geom_friction_tangential = True
+    config.domain_randomization.mujoco_model.floor_geom_friction_tangential_range = [0.5, 1.5]
+    config.domain_randomization.mujoco_model.randomize_floor_geom_friction_torsional = True
+    config.domain_randomization.mujoco_model.floor_geom_friction_torsional_range = [0.1, 0.3]
+    config.domain_randomization.mujoco_model.randomize_floor_geom_friction_rolling = True
+    config.domain_randomization.mujoco_model.floor_geom_friction_rolling_range = [0.00008, 0.00012]
+    config.domain_randomization.mujoco_model.randomize_geom_damping = False
+    config.domain_randomization.mujoco_model.geom_damping_range = [100.0, 500.0]
+    config.domain_randomization.mujoco_model.randomize_geom_stiffness = False
+    config.domain_randomization.mujoco_model.geom_stiffness_range = [100000.0, 300000.0]
+
+    config.domain_randomization.seen_robot.type = "booster"
+    config.domain_randomization.seen_robot.randomize_joint_damping = True
+    config.domain_randomization.seen_robot.joint_damping_range = [0.005, 0.015]
+    config.domain_randomization.seen_robot.randomize_joint_friction_loss = True
+    config.domain_randomization.seen_robot.joint_friction_loss_range = [0.0, 0.5]
+    config.domain_randomization.seen_robot.randomize_joint_armature = True
+    config.domain_randomization.seen_robot.joint_armature_range = [0.007, 0.013]
+    config.domain_randomization.seen_robot.randomize_com_displacement = True
+    config.domain_randomization.seen_robot.com_displacement_range = [-0.05, 0.05]
+    config.domain_randomization.seen_robot.randomize_link_mass = True
+    config.domain_randomization.seen_robot.link_mass_multiplier_range = {
+        "root_body": [0.8, 1.2],
+        "other_bodies": [0.9, 1.1],
+    }
+    config.domain_randomization.seen_robot.add_p_gains_noise = True
+    config.domain_randomization.seen_robot.add_d_gains_noise = True
+    config.domain_randomization.seen_robot.p_gains_noise_scale = 0.15
+    config.domain_randomization.seen_robot.d_gains_noise_scale = 0.15
+
+    config.domain_randomization.observation_noise.type = "booster"
+    config.domain_randomization.observation_noise.add_joint_pos_noise = True
+    config.domain_randomization.observation_noise.joint_pos_noise_scale = 0.03
+    config.domain_randomization.observation_noise.add_joint_vel_noise = True
+    config.domain_randomization.observation_noise.joint_vel_noise_scale = 0.3
+    config.domain_randomization.observation_noise.add_gravity_noise = True
+    config.domain_randomization.observation_noise.gravity_noise_scale = 0.015
+    config.domain_randomization.observation_noise.add_free_joint_lin_vel_noise = False
+    config.domain_randomization.observation_noise.lin_vel_noise_scale = 0.1
+    config.domain_randomization.observation_noise.add_free_joint_ang_vel_noise = True
+    config.domain_randomization.observation_noise.ang_vel_noise_scale = 0.2
+    config.domain_randomization.observation_noise.add_policy_ang_vel_noise = True
+    config.domain_randomization.observation_noise.policy_ang_vel_noise_scale = 0.2
+    config.domain_randomization.observation_noise.normalize_observations = True
+    config.domain_randomization.observation_noise.norm_factors = {
+        "joint_pos": 1.0,
+        "joint_vel": 0.1,
+        "gravity": 1.0,
+        "lin_vel": 1.0,
+        "ang_vel": 1.0,
+    }
+
+    config.domain_randomization.perturbation.type = "booster"
+    config.domain_randomization.perturbation.sampling_type = "booster_step_probability_and_reset"
+    config.domain_randomization.perturbation.sampling_probability = 0.004
+    config.domain_randomization.perturbation.kick_robots = True
+    config.domain_randomization.perturbation.kick_min_vel = 0.0
+    config.domain_randomization.perturbation.kick_max_vel = 0.4
+    config.domain_randomization.perturbation.kick_prob = 0.004
+    config.domain_randomization.perturbation.kick_at_reset = True
+
+    config.policy_exteroceptive_observation_type = "none"
+    config.critic_exteroceptive_observation_type = "none"
+    config.reward = config_dict.ConfigDict({
+        "type": "booster",
+        "survival": 0.25,
+        "tracking_w_exp_linvel_x": 4.0,
+        "tracking_w_sum_linvel_x": 1.5,
+        "tracking_w_exp_linvel_y": 4.0,
+        "tracking_w_sum_linvel_y": 1.5,
+        "tracking_w_exp_angvel": 4.0,
+        "tracking_w_sum_angvel": 1.0,
+        "tracking_nominal_joint_pos_exp": 4.0,
+        "tracking_nominal_joint_pos_coeff": 0.0,
+        "tracking_nominal_joint_pos_names": [
+            "AAHead_yaw", "Head_pitch",
+            "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+            "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+            "Waist", "Right_Ankle_Roll", "Left_Ankle_Roll",
+        ],
+        "feet_swing_coeff": 6.0,
+        "feet_swing_period": 0.2,
+        "joint_deviation_l1_coeff": -0.3,
+        "base_height_coeff": -10.0,
+        "orientation_coeff": -5.0,
+        "joint_torque_coeff": -2.0e-4,
+        "energy_coeff": -2.0e-3,
+        "z_vel_coeff": -0.0,
+        "roll_pitch_vel_coeff": -0.2,
+        "joint_vel_coeff": -9.0e-4,
+        "joint_acc_coeff": -1.0e-7,
+        "root_acc_coeff": -1.0e-4,
+        "action_rate_coeff": -1.0,
+        "joint_position_limit_scale": 0.98,
+        "joint_position_limit_coeff": -1.0,
+        "feet_slip_coeff": -0.1,
+        "feet_yaw_diff_coeff": -1.0,
+        "feet_yaw_mean_coeff": -1.0,
+        "feet_roll_coeff": -4.0,
+        "feet_distance_target": 0.2,
+        "feet_distance_coeff": 0.0,
+        "air_time_max": 0.3,
+        "air_time_coeff": 0.0,
+        "no_fly_coeff": 0.0,
+        "impact_threshold": 150.0,
+        "impact_coeff": 0.0,
+    })
+    config.termination.type = "booster"
+    config.termination.min_height = 0.3
+    config.termination.max_height = 1.0
+    config.terrain.type = "plane"

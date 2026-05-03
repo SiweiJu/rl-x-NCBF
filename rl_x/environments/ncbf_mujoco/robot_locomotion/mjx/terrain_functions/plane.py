@@ -28,7 +28,7 @@ class PlaneTerrainGeneration:
     
 
     def check_flat_feet_floor_missing_contacts(self, data, mjx_model, internal_state):
-        if self.env.foot_type == "sphere":
+        if self.env.foot_type in ["sphere", "capsule"]:
             return jnp.zeros(self.env.nr_feet)
         elif self.env.foot_type == "box":
             feet_xpos = data.geom_xpos[self.env.foot_geom_indices]

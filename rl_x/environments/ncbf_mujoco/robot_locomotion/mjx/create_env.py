@@ -3,10 +3,14 @@ from pathlib import Path
 
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.environment import LocomotionEnv
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.general_properties import GeneralProperties
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.default_config import apply_booster_defaults
 
 
 def create_env(config):
-    robot_config = importlib.import_module(f"rl_x.environments.custom_mujoco.robot_locomotion.robots.{config.environment.train_robot}.robot_config").robot_config
+    if config.environment.train_robot == "booster_t1" and not config.environment.get("booster_defaults_applied", False):
+        apply_booster_defaults(config.environment)
+
+    robot_config = importlib.import_module(f"rl_x.environments.ncbf_mujoco.robot_locomotion.robots.{config.environment.train_robot}.robot_config").robot_config
     robot_config["directory_path"] = Path(__file__).parent.parent / "robots" / config.environment.train_robot
 
     env = LocomotionEnv(
