@@ -225,6 +225,8 @@ def get_config(environment_name):
             "foot_z_velocity_coeff": 0.2,
             "foot_flat_contact_coeff": 0.01,
             "ball_plate_centering_coeff": 2.0,
+            "ball_plate_center_bonus_coeff": 2.0,
+            "ball_plate_center_bonus_temperature": 0.01,
             "ball_plate_velocity_coeff": 0.1,
             "ball_plate_on_plate_coeff": 1.0,
             "ball_plate_alive_coeff": 0.2,
