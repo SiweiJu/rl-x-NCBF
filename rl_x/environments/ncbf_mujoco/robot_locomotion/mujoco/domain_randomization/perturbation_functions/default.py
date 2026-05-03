@@ -19,8 +19,15 @@ class DefaultDRPerturbation:
         trunk_velocity_perturbation = np.where(self.env.np_rng.uniform() < self.trunk_velocity_add_chance, self.env.internal_state["data"].qvel[0:6] + trunk_velocity_perturbation, (trunk_velocity_perturbation * self.env.internal_state["env_curriculum_coeff"]) + (self.env.internal_state["data"].qvel[0:6] * (1 - self.env.internal_state["env_curriculum_coeff"])))
         trunk_velocity = trunk_velocity_perturbation
 
-        joint_velocity = self.env.internal_state["data"].qvel[6:] + self.env.internal_state["env_curriculum_coeff"] * self.env.np_rng.uniform(size=(self.env.internal_state["data"].qvel[6:].shape[0],), low=-self.max_joint_velocity, high=self.max_joint_velocity)
-        joint_position = self.env.internal_state["data"].qpos[7:] + self.env.internal_state["env_curriculum_coeff"] * self.env.np_rng.uniform(size=(self.env.internal_state["data"].qpos[7:].shape[0],), low=-self.max_joint_position, high=self.max_joint_position)
+        qpos = self.env.internal_state["data"].qpos.copy()
+        qvel = self.env.internal_state["data"].qvel.copy()
+        qpos[self.env.actuator_joint_mask_qpos] += self.env.internal_state["env_curriculum_coeff"] * self.env.np_rng.uniform(
+            size=(self.env.nr_actuator_joints,), low=-self.max_joint_position, high=self.max_joint_position
+        )
+        qvel[self.env.actuator_joint_mask_qvel] += self.env.internal_state["env_curriculum_coeff"] * self.env.np_rng.uniform(
+            size=(self.env.nr_actuator_joints,), low=-self.max_joint_velocity, high=self.max_joint_velocity
+        )
+        qvel[0:6] = trunk_velocity
 
-        self.env.internal_state["data"].qpos = np.concatenate([self.env.internal_state["data"].qpos[0:7], joint_position])
-        self.env.internal_state["data"].qvel = np.concatenate([trunk_velocity, joint_velocity])
+        self.env.internal_state["data"].qpos = qpos
+        self.env.internal_state["data"].qvel = qvel

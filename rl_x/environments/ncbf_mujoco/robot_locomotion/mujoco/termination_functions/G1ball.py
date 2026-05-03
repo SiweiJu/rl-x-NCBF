@@ -1,6 +1,7 @@
 import numpy as np
 
-class BelowHeightTermination:
+
+class G1BallTermination:
     def __init__(self, env):
         self.env = env
 
@@ -17,10 +18,19 @@ class BelowHeightTermination:
         body_tilt_angle = np.sqrt(body_roll ** 2 + body_pitch ** 2)
         body_tilt = body_tilt_angle > self.env.internal_state["body_tilt_threshold"]
 
+        ball_dropped = self.env.ball_plate_ball_has_dropped()
+        plate_dropped = self.env.ball_plate_plate_has_dropped()
+
         if below_height:
             print("Termination: Below Height")
 
         if body_tilt:
             print("Termination: Tilt")
 
-        return below_height or body_tilt
+        if ball_dropped:
+            print("Termination: Ball Dropped")
+
+        if plate_dropped:
+            print("Termination: Plate Dropped")
+
+        return below_height or body_tilt or ball_dropped or plate_dropped

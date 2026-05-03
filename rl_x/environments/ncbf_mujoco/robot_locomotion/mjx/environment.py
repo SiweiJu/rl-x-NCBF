@@ -40,6 +40,9 @@ class LocomotionEnv:
         self.should_render = render
         self.env_config = env_config
         self.add_goal_arrow = env_config["add_goal_arrow"]
+        self.ball_plate_config = env_config.get("ball_plate", {})
+        self.use_ball_plate = bool(self.ball_plate_config.get("enabled", False))
+        self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations", True))
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
 
@@ -69,6 +72,9 @@ class LocomotionEnv:
             floor = xml_handle.find("geom", "floor")
             floor.type = "hfield"
             floor.hfield = "empty_hfield"
+
+        if self.use_ball_plate:
+            self._add_ball_plate_to_xml(xml_handle)
         
         if self.should_render and self.add_goal_arrow:
             trunk = xml_handle.find("body", "trunk")
@@ -138,6 +144,40 @@ class LocomotionEnv:
 
         self.floor_geom_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
 
+        if self.use_ball_plate:
+            self.ball_plate_site_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_SITE, "ball_plate_center")
+            self.ball_plate_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, "ball_plate")
+            self.ball_plate_ball_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, "plate_ball")
+            self.ball_plate_ball_geom_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "plate_ball_geom")
+            self.ball_plate_geom_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "ball_plate_geom")
+            self.ball_plate_qposadr = self.initial_mj_model.joint("ball_plate_freejoint").qposadr[0]
+            self.ball_plate_qveladr = self.initial_mj_model.joint("ball_plate_freejoint").dofadr[0]
+            self.ball_plate_ball_qposadr = self.initial_mj_model.joint("plate_ball_freejoint").qposadr[0]
+            self.ball_plate_ball_qveladr = self.initial_mj_model.joint("plate_ball_freejoint").dofadr[0]
+            self.ball_plate_plate_size = jnp.array(self.ball_plate_config["plate_size"], dtype=jnp.float32)
+            self.ball_plate_ball_radius = float(self.ball_plate_config["ball_radius"])
+            self.ball_plate_ball_mass = float(self.ball_plate_config["ball_mass"])
+            self.ball_plate_ball_radius_range = jnp.array(
+                self.ball_plate_config.get("ball_radius_range", [self.ball_plate_ball_radius, self.ball_plate_ball_radius]),
+                dtype=jnp.float32,
+            )
+            self.ball_plate_ball_mass_range = jnp.array(
+                self.ball_plate_config.get("ball_mass_range", [self.ball_plate_ball_mass, self.ball_plate_ball_mass]),
+                dtype=jnp.float32,
+            )
+            self.ball_plate_ball_start_offset = jnp.array(self.ball_plate_config["ball_start_offset"], dtype=jnp.float32)
+            self.ball_plate_drop_margin = float(self.ball_plate_config["drop_margin"])
+            self.ball_plate_drop_height = float(self.ball_plate_config["drop_height"])
+            self.ball_plate_plate_support_clearance = float(self.ball_plate_config["plate_support_clearance"])
+            self.ball_plate_tilt_drop_threshold = float(self.ball_plate_config["plate_tilt_drop_threshold"])
+            self.ball_plate_left_fist_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, self.ball_plate_config["left_fist_body"])
+            self.ball_plate_right_fist_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, self.ball_plate_config["right_fist_body"])
+            self.ball_plate_left_fist_pos = jnp.array(self.ball_plate_config["left_fist_pos"], dtype=jnp.float32)
+            self.ball_plate_right_fist_pos = jnp.array(self.ball_plate_config["right_fist_pos"], dtype=jnp.float32)
+            self.nr_ball_plate_observations = 12 if self.include_ball_plate_observations else 0
+        else:
+            self.nr_ball_plate_observations = 0
+
         self.reward_collision_sphere_geom_ids = jnp.array([geom.id for geom in [self.initial_mj_model.geom(geom_id) for geom_id in range(self.initial_mj_model.ngeom)] if geom.group[0] == 5])
 
         self.has_equality_constraints = len(self.initial_mj_model.eq_data) > 0
@@ -198,6 +238,144 @@ class LocomotionEnv:
                 self.joystick.init()
                 self.joystick_present = True
         del self.c_model, self.c_data
+
+
+    def _add_ball_plate_to_xml(self, xml_handle):
+        plate_size = np.array(self.ball_plate_config["plate_size"], dtype=float)
+        plate_pos = np.array(self.ball_plate_config["plate_home_pos"], dtype=float)
+        plate_quat = np.array(self.ball_plate_config["plate_home_quat"], dtype=float)
+        ball_radius = float(self.ball_plate_config["ball_radius"])
+        fist_radius = float(self.ball_plate_config["fist_radius"])
+        fist_half_length = float(self.ball_plate_config["fist_half_length"])
+        plate_ball_pair_friction = " ".join(map(str, self.ball_plate_config.get("plate_ball_contact_friction", [1.0, 1.0, 0.005, 0.0001, 0.0001])))
+        plate_ball_pair_dim = str(self.ball_plate_config.get("plate_ball_contact_dim", 3))
+        plate_ball_pair_solref = " ".join(map(str, self.ball_plate_config.get("plate_ball_contact_solref", [0.02, 1.0])))
+        plate_ball_pair_solimp = " ".join(map(str, self.ball_plate_config.get("plate_ball_contact_solimp", [0.9, 0.95, 0.001, 0.5, 2.0])))
+        plate_ball_pair_margin = str(self.ball_plate_config.get("plate_ball_contact_margin", 0.0))
+        plate_support_pair_friction = " ".join(map(str, self.ball_plate_config.get("plate_support_contact_friction", [1.0, 1.0, 0.005, 0.0001, 0.0001])))
+        plate_support_pair_dim = str(self.ball_plate_config.get("plate_support_contact_dim", 3))
+        plate_torso_pair_friction = " ".join(map(str, self.ball_plate_config.get("plate_torso_contact_friction", [1.0, 1.0, 0.005, 0.0001, 0.0001])))
+        plate_torso_pair_dim = str(self.ball_plate_config.get("plate_torso_contact_dim", 3))
+        plate_arm_pair_friction = " ".join(map(str, self.ball_plate_config.get("plate_arm_contact_friction", [1.0, 1.0, 0.005, 0.0001, 0.0001])))
+        plate_arm_pair_dim = str(self.ball_plate_config.get("plate_arm_contact_dim", 3))
+
+        left_fist = xml_handle.find("body", self.ball_plate_config["left_fist_body"])
+        right_fist = xml_handle.find("body", self.ball_plate_config["right_fist_body"])
+        torso_contact_body = xml_handle.find("body", self.ball_plate_config["torso_contact_body"])
+        left_upper_arm_contact_body = xml_handle.find("body", self.ball_plate_config["left_upper_arm_contact_body"])
+        right_upper_arm_contact_body = xml_handle.find("body", self.ball_plate_config["right_upper_arm_contact_body"])
+        left_forearm_contact_body = xml_handle.find("body", self.ball_plate_config["left_forearm_contact_body"])
+        right_forearm_contact_body = xml_handle.find("body", self.ball_plate_config["right_forearm_contact_body"])
+        left_fist_pos = np.array(self.ball_plate_config["left_fist_pos"], dtype=float)
+        right_fist_pos = np.array(self.ball_plate_config["right_fist_pos"], dtype=float)
+        torso_contact_pos = np.array(self.ball_plate_config["torso_contact_pos"], dtype=float)
+        torso_contact_size = float(self.ball_plate_config["torso_contact_size"])
+        upper_arm_contact_fromto = np.array(self.ball_plate_config["upper_arm_contact_fromto"], dtype=float)
+        upper_arm_contact_radius = float(self.ball_plate_config["upper_arm_contact_radius"])
+        forearm_contact_fromto = np.array(self.ball_plate_config["forearm_contact_fromto"], dtype=float)
+        forearm_contact_radius = float(self.ball_plate_config["forearm_contact_radius"])
+        left_fist.add("geom", name="left_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{left_fist_pos[0] - fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]} {left_fist_pos[0] + fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
+        right_fist.add("geom", name="right_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{right_fist_pos[0] - fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]} {right_fist_pos[0] + fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
+        torso_contact_body.add("geom", name="torso_plate_guard", type="sphere", pos=" ".join(map(str, torso_contact_pos)), size=str(torso_contact_size), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        left_upper_arm_contact_body.add("geom", name="left_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        right_upper_arm_contact_body.add("geom", name="right_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        left_forearm_contact_body.add("geom", name="left_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        right_forearm_contact_body.add("geom", name="right_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+
+        plate = xml_handle.worldbody.add("body", name="ball_plate", pos=" ".join(map(str, plate_pos)), quat=" ".join(map(str, plate_quat)))
+        plate.add("freejoint", name="ball_plate_freejoint")
+        plate.add(
+            "geom",
+            name="ball_plate_geom",
+            type="box",
+            size=" ".join(map(str, plate_size)),
+            mass=str(self.ball_plate_config["plate_mass"]),
+            rgba="0.15 0.16 0.18 1",
+            contype="0",
+            conaffinity="0",
+            friction="0.55 0.002 0.00001",
+        )
+        plate.add("site", name="ball_plate_center", pos=f"0 0 {plate_size[2]}")
+
+        initial_ball_pos = np.array(self.ball_plate_config["ball_home_pos"], dtype=float)
+        ball = xml_handle.worldbody.add("body", name="plate_ball", pos=" ".join(map(str, initial_ball_pos)))
+        ball.add("freejoint", name="plate_ball_freejoint")
+        ball.add(
+            "geom",
+            name="plate_ball_geom",
+            type="sphere",
+            size=str(ball_radius),
+            mass=str(self.ball_plate_config["ball_mass"]),
+            rgba="0.9 0.12 0.08 1",
+            contype="0",
+            conaffinity="0",
+            friction="0.55 0.002 0.00001",
+        )
+
+        xml_handle.contact.add(
+            "pair",
+            geom1="ball_plate_geom",
+            geom2="plate_ball_geom",
+            condim=plate_ball_pair_dim,
+            friction=plate_ball_pair_friction,
+            solref=plate_ball_pair_solref,
+            solimp=plate_ball_pair_solimp,
+            margin=plate_ball_pair_margin,
+        )
+        xml_handle.contact.add("pair", geom1="left_plate_support_fist", geom2="ball_plate_geom", condim=plate_support_pair_dim, friction=plate_support_pair_friction)
+        xml_handle.contact.add("pair", geom1="right_plate_support_fist", geom2="ball_plate_geom", condim=plate_support_pair_dim, friction=plate_support_pair_friction)
+        xml_handle.contact.add("pair", geom1="torso_plate_guard", geom2="ball_plate_geom", condim=plate_torso_pair_dim, friction=plate_torso_pair_friction)
+        xml_handle.contact.add("pair", geom1="left_upper_arm_plate_guard", geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction)
+        xml_handle.contact.add("pair", geom1="right_upper_arm_plate_guard", geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction)
+        xml_handle.contact.add("pair", geom1="left_forearm_plate_guard", geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction)
+        xml_handle.contact.add("pair", geom1="right_forearm_plate_guard", geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction)
+        xml_handle.contact.add("pair", geom1="floor", geom2="ball_plate_geom")
+        xml_handle.contact.add("pair", geom1="floor", geom2="plate_ball_geom")
+
+        self._append_ball_plate_to_home_key(xml_handle, plate_pos, plate_quat, initial_ball_pos)
+        self._apply_ball_plate_initial_joint_positions_to_home_key(xml_handle)
+
+
+    def _append_ball_plate_to_home_key(self, xml_handle, initial_plate_pos, initial_plate_quat, initial_ball_pos):
+        home_key = xml_handle.find("key", "home")
+        if home_key is None or home_key.qpos is None:
+            return
+
+        home_qpos = home_key.qpos
+        if isinstance(home_qpos, str):
+            home_qpos = np.fromstring(home_qpos, sep=" ")
+        else:
+            home_qpos = np.asarray(home_qpos, dtype=float)
+        home_key.qpos = np.concatenate([home_qpos, [*initial_plate_pos, *initial_plate_quat, *initial_ball_pos, 1.0, 0.0, 0.0, 0.0]])
+
+
+    def _apply_ball_plate_initial_joint_positions_to_home_key(self, xml_handle):
+        initial_joint_positions = self.ball_plate_config.get("initial_joint_positions", {})
+        if not initial_joint_positions:
+            return
+
+        home_key = xml_handle.find("key", "home")
+        if home_key is None or home_key.qpos is None:
+            return
+
+        home_qpos = home_key.qpos
+        if isinstance(home_qpos, str):
+            home_qpos = np.fromstring(home_qpos, sep=" ")
+        else:
+            home_qpos = np.asarray(home_qpos, dtype=float)
+
+        temp_model = mujoco.MjModel.from_xml_string(xml=xml_handle.to_xml_string(), assets=xml_handle.get_assets())
+        for joint_name, joint_position in initial_joint_positions.items():
+            joint_id = mujoco.mj_name2id(temp_model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            if joint_id == -1:
+                raise ValueError(f"Unknown ball_plate initial joint: {joint_name}")
+
+            qposadr = temp_model.jnt_qposadr[joint_id]
+            if temp_model.jnt_limited[joint_id]:
+                joint_position = np.clip(joint_position, temp_model.jnt_range[joint_id, 0], temp_model.jnt_range[joint_id, 1])
+            home_qpos[qposadr] = joint_position
+
+        home_key.qpos = home_qpos
 
     
     def render(self, state):
@@ -296,6 +474,11 @@ class LocomotionEnv:
             "robot_dimensions_mean": self.robot_dimensions_mean,
             "body_tilt_threshold": self.env_config["termination"]["body_tilt_threshold"],
             "max_command_velocity": jnp.minimum(self.robot_dimensions_mean * self.command_function.max_velocity_per_m_factor, self.command_function.clip_max_velocity),
+            "ball_plate_ball_radius": self.ball_plate_ball_radius if self.use_ball_plate else 0.0,
+            "ball_plate_ball_mass": self.ball_plate_ball_mass if self.use_ball_plate else 0.0,
+            "ball_plate_ball_dropped": False,
+            "ball_plate_plate_dropped": False,
+            "ball_plate_dropped": False,
             "nr_collisions_in_nominal": 0,
             "history_stack": history_stack,
         }
@@ -331,7 +514,7 @@ class LocomotionEnv:
 
     @partial(jax.jit, static_argnums=(0,))
     def _reset(self, state):
-        key, initial_state_key, terrain_key, domain_randomization_key, observation_key = jax.random.split(state.key, 5)
+        key, initial_state_key, terrain_key, domain_randomization_key, ball_plate_key, observation_key = jax.random.split(state.key, 6)
         state = state.replace(key=key)
 
         mjx_model = self.terrain_function.sample(state.mjx_model, state.internal_state, terrain_key)
@@ -372,8 +555,17 @@ class LocomotionEnv:
         self.reward_function.setup(new_internal_state)
         self.domain_randomization_action_delay_function.setup(new_internal_state)
         data, mjx_model = self.handle_domain_randomization(new_internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
+        data, mjx_model = self._reset_ball_plate_state(data, mjx_model, new_internal_state, ball_plate_key)
 
         next_observation = self.get_observation(data, mjx_model, new_internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
+        new_info = dict(new_state.info)
+        if self.use_ball_plate:
+            ball_plate_metrics = self.get_ball_plate_metrics(data, new_internal_state)
+            new_info[f"env_info/ball_plate_radial_distance"] = ball_plate_metrics["radial_distance"]
+            new_info[f"env_info/ball_plate_on_plate"] = ball_plate_metrics["on_plate"].astype(jnp.float32)
+            new_info[f"env_info/ball_plate_ball_dropped"] = ball_plate_metrics["ball_dropped"].astype(jnp.float32)
+            new_info[f"env_info/ball_plate_plate_dropped"] = ball_plate_metrics["plate_dropped"].astype(jnp.float32)
+            new_info[f"env_info/ball_plate_dropped"] = ball_plate_metrics["dropped"].astype(jnp.float32)
         last_state = next_observation
         new_internal_state["last_state"] = last_state
         reward = 0.0
@@ -396,6 +588,7 @@ class LocomotionEnv:
             actual_next_observation=next_observation,
             reward=reward,
             terminated=terminated, truncated=truncated,
+            info=new_info,
             info_episode_store=info_episode_store,
             last_state=last_state,
             last_action=last_action,
@@ -482,7 +675,13 @@ class LocomotionEnv:
 
         def when_done(_):
             start_state = self._reset(state)
-            start_state = start_state.replace(actual_next_observation=next_observation, reward=reward, terminated=terminated, truncated=truncated)
+            start_state = start_state.replace(
+                actual_next_observation=next_observation,
+                reward=reward,
+                terminated=terminated,
+                truncated=truncated,
+                info=state.info,
+            )
             return start_state
         def when_not_done(_):
             return state.replace(data=data, next_observation=next_observation, actual_next_observation=next_observation,
@@ -510,6 +709,17 @@ class LocomotionEnv:
         body_tilt = jnp.sqrt(body_roll ** 2 + body_pitch ** 2)
         body_tilt_safe = (body_tilt <= internal_state["body_tilt_threshold"]).astype(jnp.float32)
 
+        if self.use_ball_plate:
+            ball_plate_metrics = self.get_ball_plate_metrics(data, internal_state)
+            internal_state["ball_plate_ball_dropped"] = ball_plate_metrics["ball_dropped"]
+            internal_state["ball_plate_plate_dropped"] = ball_plate_metrics["plate_dropped"]
+            internal_state["ball_plate_dropped"] = ball_plate_metrics["dropped"]
+            ball_not_falling = (~ball_plate_metrics["ball_dropped"]).astype(jnp.float32)
+            plate_not_falling = (~ball_plate_metrics["plate_dropped"]).astype(jnp.float32)
+        else:
+            ball_not_falling = jnp.asarray(1.0, dtype=jnp.float32)
+            plate_not_falling = jnp.asarray(1.0, dtype=jnp.float32)
+
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
             data.qvel[self.actuator_joint_mask_qvel],
@@ -521,6 +731,7 @@ class LocomotionEnv:
             data.sensordata[self.imu_angular_velocity_sensor_adr:self.imu_angular_velocity_sensor_adr + self.imu_angular_velocity_sensor_dim],
             internal_state["goal_velocities"],
             internal_state["imu_orientation_rotation_inverse"].apply(jnp.array([0.0, 0.0, -1.0])),
+            self.get_ball_plate_observation(data, internal_state),
             jnp.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             jnp.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             qpos, # qpos all not normalized, base pose can be dummy for deployment
@@ -528,6 +739,8 @@ class LocomotionEnv:
             feet_ground_contact,
             jnp.array([robot_height_safe]),
             jnp.array([body_tilt_safe]),
+            jnp.array([ball_not_falling]),
+            jnp.array([plate_not_falling]),
         ])
 
         # Add noise
@@ -542,6 +755,11 @@ class LocomotionEnv:
         observation = observation.at[self.feet_time_in_air_obs_idx].set(jnp.clip((observation[self.feet_time_in_air_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0))
         observation = observation.at[self.imu_linear_vel_obs_idx].set(jnp.clip(observation[self.imu_linear_vel_obs_idx] / 10.0, -1.0, 1.0))
         observation = observation.at[self.imu_angular_vel_obs_idx].set(jnp.clip(observation[self.imu_angular_vel_obs_idx] / 50.0, -1.0, 1.0))
+        if len(self.ball_plate_obs_idx) > 0:
+            observation = observation.at[self.ball_plate_obs_idx[:3]].set(jnp.clip(observation[self.ball_plate_obs_idx[:3]] / jnp.maximum(jnp.max(self.ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0))
+            observation = observation.at[self.ball_plate_obs_idx[3:6]].set(jnp.clip(observation[self.ball_plate_obs_idx[3:6]] / 5.0, -10.0, 10.0))
+            observation = observation.at[self.ball_plate_obs_idx[6:9]].set(jnp.clip(observation[self.ball_plate_obs_idx[6:9]] / jnp.maximum(jnp.max(self.ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0))
+            observation = observation.at[self.ball_plate_obs_idx[9:]].set(jnp.clip(observation[self.ball_plate_obs_idx[9:]] / 5.0, -10.0, 10.0))
         if len(self.policy_exteroception_obs_idx) > 0:
             observation = observation.at[self.policy_exteroception_obs_idx].set(jnp.clip((observation[self.policy_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0))
         if len(self.critic_exteroception_obs_idx) > 0:
@@ -551,6 +769,169 @@ class LocomotionEnv:
         observation = jnp.clip(observation, -10.0, 10.0)
 
         return observation
+
+
+    def _reset_ball_plate_state(self, data, mjx_model, internal_state, key):
+        if not self.use_ball_plate:
+            return data, mjx_model
+
+        ball_radius, ball_mass = self._sample_ball_plate_size_mass(key)
+        mjx_model = self._apply_ball_plate_size_mass(mjx_model, ball_radius, ball_mass)
+
+        data = mjx.forward(mjx_model, data)
+        plate_pos, plate_quat = self._get_ball_plate_supported_pose(data)
+        qpos = data.qpos.at[self.ball_plate_qposadr:self.ball_plate_qposadr + 3].set(plate_pos)
+        qpos = qpos.at[self.ball_plate_qposadr + 3:self.ball_plate_qposadr + 7].set(plate_quat)
+        qvel = data.qvel.at[self.ball_plate_qveladr:self.ball_plate_qveladr + 6].set(0.0)
+        data = data.replace(qpos=qpos, qvel=qvel)
+        data = mjx.forward(mjx_model, data)
+
+        plate_xmat = data.site_xmat[self.ball_plate_site_id].reshape(3, 3)
+        ball_start_offset = self.ball_plate_ball_start_offset.at[2].set(ball_radius)
+        ball_pos = data.site_xpos[self.ball_plate_site_id] + plate_xmat @ ball_start_offset
+
+        qpos = data.qpos.at[self.ball_plate_ball_qposadr:self.ball_plate_ball_qposadr + 3].set(ball_pos)
+        qpos = qpos.at[self.ball_plate_ball_qposadr + 3:self.ball_plate_ball_qposadr + 7].set(jnp.array([1.0, 0.0, 0.0, 0.0]))
+        qvel = data.qvel.at[self.ball_plate_ball_qveladr:self.ball_plate_ball_qveladr + 6].set(0.0)
+        data = data.replace(qpos=qpos, qvel=qvel)
+        data = mjx.forward(mjx_model, data)
+
+        internal_state["ball_plate_ball_radius"] = ball_radius
+        internal_state["ball_plate_ball_mass"] = ball_mass
+        internal_state["ball_plate_ball_dropped"] = False
+        internal_state["ball_plate_plate_dropped"] = False
+        internal_state["ball_plate_dropped"] = False
+        return data, mjx_model
+
+
+    def _get_ball_plate_support_points(self, data):
+        left_body_xmat = data.xmat[self.ball_plate_left_fist_body_id].reshape(3, 3)
+        right_body_xmat = data.xmat[self.ball_plate_right_fist_body_id].reshape(3, 3)
+        left_support = data.xpos[self.ball_plate_left_fist_body_id] + left_body_xmat @ self.ball_plate_left_fist_pos
+        right_support = data.xpos[self.ball_plate_right_fist_body_id] + right_body_xmat @ self.ball_plate_right_fist_pos
+        return left_support, right_support
+
+
+    def _get_ball_plate_supported_pose(self, data):
+        left_support, right_support = self._get_ball_plate_support_points(data)
+        support_center = 0.5 * (left_support + right_support)
+        support_height = jnp.maximum(left_support[2], right_support[2])
+        plate_pos = support_center.at[2].set(
+            support_height
+            + float(self.ball_plate_config["fist_radius"])
+            + self.ball_plate_plate_size[2]
+            + self.ball_plate_plate_support_clearance
+        )
+        return plate_pos, jnp.asarray(self.ball_plate_config["plate_home_quat"], dtype=jnp.float32)
+
+
+    def _sample_ball_plate_size_mass(self, key):
+        if not self.ball_plate_config.get("randomize_ball_size_mass", True):
+            return jnp.asarray(self.ball_plate_ball_radius), jnp.asarray(self.ball_plate_ball_mass)
+
+        radius_key, mass_key = jax.random.split(key, 2)
+        ball_radius = jax.random.uniform(
+            radius_key,
+            minval=self.ball_plate_ball_radius_range[0],
+            maxval=self.ball_plate_ball_radius_range[1],
+        )
+        ball_mass = jax.random.uniform(
+            mass_key,
+            minval=self.ball_plate_ball_mass_range[0],
+            maxval=self.ball_plate_ball_mass_range[1],
+        )
+        return ball_radius, ball_mass
+
+
+    def _apply_ball_plate_size_mass(self, mjx_model, ball_radius, ball_mass):
+        geom_size = mjx_model.geom_size.at[self.ball_plate_ball_geom_id, 0].set(ball_radius)
+        geom_rbound = mjx_model.geom_rbound.at[self.ball_plate_ball_geom_id].set(ball_radius)
+        body_mass = mjx_model.body_mass.at[self.ball_plate_ball_body_id].set(ball_mass)
+        body_inertia = mjx_model.body_inertia.at[self.ball_plate_ball_body_id].set(jnp.full(3, 0.4 * ball_mass * ball_radius ** 2))
+
+        return mjx_model.tree_replace(
+            {
+                "geom_size": geom_size,
+                "geom_rbound": geom_rbound,
+                "body_mass": body_mass,
+                "body_inertia": body_inertia,
+            }
+        )
+
+
+    def get_ball_plate_metrics(self, data, internal_state):
+        if not self.use_ball_plate:
+            return {
+                "plate_support_relative_position": jnp.zeros(3),
+                "plate_velocity": jnp.zeros(3),
+                "ball_dropped": False,
+                "plate_dropped": False,
+                "relative_position": jnp.zeros(3),
+                "relative_velocity": jnp.zeros(3),
+                "radial_distance": 0.0,
+                "on_plate": False,
+                "dropped": False,
+            }
+
+        plate_pos = data.site_xpos[self.ball_plate_site_id]
+        plate_xmat = data.site_xmat[self.ball_plate_site_id].reshape(3, 3)
+        ball_pos = data.xpos[self.ball_plate_ball_body_id]
+        left_support, right_support = self._get_ball_plate_support_points(data)
+        support_center = 0.5 * (left_support + right_support)
+        support_height = jnp.maximum(left_support[2], right_support[2])
+        relative_position = plate_xmat.T @ (ball_pos - plate_pos)
+        relative_velocity = plate_xmat.T @ data.qvel[self.ball_plate_ball_qveladr:self.ball_plate_ball_qveladr + 3]
+        plate_support_relative_position = plate_pos - support_center
+        plate_velocity = data.qvel[self.ball_plate_qveladr:self.ball_plate_qveladr + 3]
+        plate_up = plate_xmat[:, 2]
+
+        outside_x = jnp.abs(relative_position[0]) > (self.ball_plate_plate_size[0] + self.ball_plate_drop_margin)
+        outside_y = jnp.abs(relative_position[1]) > (self.ball_plate_plate_size[1] + self.ball_plate_drop_margin)
+        below_plate = relative_position[2] < -self.ball_plate_drop_height
+        near_plate_height = relative_position[2] <= (internal_state["ball_plate_ball_radius"] * 3.0)
+        plate_below_support = data.xpos[self.ball_plate_body_id, 2] < (support_height - self.ball_plate_drop_height)
+        plate_tilted = plate_up[2] < self.ball_plate_tilt_drop_threshold
+        ball_dropped = outside_x | outside_y | below_plate
+        plate_dropped = plate_below_support | plate_tilted
+        dropped = ball_dropped | plate_dropped
+        on_plate = (~outside_x) & (~outside_y) & (~below_plate) & near_plate_height
+
+        return {
+            "plate_support_relative_position": plate_support_relative_position,
+            "plate_velocity": plate_velocity,
+            "ball_dropped": ball_dropped,
+            "plate_dropped": plate_dropped,
+            "relative_position": relative_position,
+            "relative_velocity": relative_velocity,
+            "radial_distance": jnp.linalg.norm(relative_position[:2]),
+            "on_plate": on_plate,
+            "dropped": dropped,
+        }
+
+
+    def get_ball_plate_observation(self, data, internal_state):
+        if not self.include_ball_plate_observations:
+            return jnp.zeros(0)
+
+        metrics = self.get_ball_plate_metrics(data, internal_state)
+        return jnp.concatenate([
+            metrics["plate_support_relative_position"],
+            metrics["plate_velocity"],
+            metrics["relative_position"],
+            metrics["relative_velocity"],
+        ])
+
+
+    def ball_plate_has_dropped(self, internal_state):
+        return internal_state["ball_plate_dropped"] if self.use_ball_plate else False
+
+
+    def ball_plate_ball_has_dropped(self, internal_state):
+        return internal_state["ball_plate_ball_dropped"] if self.use_ball_plate else False
+
+
+    def ball_plate_plate_has_dropped(self, internal_state):
+        return internal_state["ball_plate_plate_dropped"] if self.use_ball_plate else False
     
 
     def handle_domain_randomization(self, internal_state, mjx_model, data, key, is_episode_start=False):
@@ -569,6 +950,12 @@ class LocomotionEnv:
         self.domain_randomization_action_delay_function.sample(internal_state, should_randomize_domain, action_delay_key)
         mjx_model = self.joint_dropout_function.sample(internal_state, mjx_model, should_randomize_domain, joint_dropout_key)
         self.reward_function.handle_model_change(internal_state, mjx_model, should_randomize_domain)
+        if self.use_ball_plate:
+            mjx_model = self._apply_ball_plate_size_mass(
+                mjx_model,
+                internal_state["ball_plate_ball_radius"],
+                internal_state["ball_plate_ball_mass"],
+            )
 
         data = self.domain_randomization_perturbation_function.sample(internal_state, mjx_model, data, should_randomize_domain_perturbation, perturbation_key)
 
@@ -598,6 +985,8 @@ class LocomotionEnv:
         current_observation_idx += 3
         self.gravity_vector_obs_idx = jnp.array([current_observation_idx + i for i in range(3)])
         current_observation_idx += 3
+        self.ball_plate_obs_idx = jnp.array([current_observation_idx + i for i in range(self.nr_ball_plate_observations)])
+        current_observation_idx += self.nr_ball_plate_observations
         self.policy_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.policy_exteroceptive_observation_function.nr_exteroceptive_observations)])
         current_observation_idx += self.policy_exteroceptive_observation_function.nr_exteroceptive_observations
         self.critic_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.critic_exteroceptive_observation_function.nr_exteroceptive_observations)])
@@ -619,6 +1008,12 @@ class LocomotionEnv:
         self.body_tilt_obs_idx = jnp.array([current_observation_idx])
         current_observation_idx += 1
 
+        self.ball_not_falling_obs_idx = jnp.array([current_observation_idx])
+        current_observation_idx += 1
+
+        self.plate_not_falling_obs_idx = jnp.array([current_observation_idx])
+        current_observation_idx += 1
+
         self.policy_observation_indices = jnp.concatenate([
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
@@ -626,6 +1021,7 @@ class LocomotionEnv:
             self.imu_angular_vel_obs_idx,
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
+            self.ball_plate_obs_idx,
             self.policy_exteroception_obs_idx,
         ], dtype=int)
 
@@ -641,6 +1037,7 @@ class LocomotionEnv:
             self.imu_angular_vel_obs_idx,
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
+            self.ball_plate_obs_idx,
             self.critic_exteroception_obs_idx,
         ], dtype=int)
 
@@ -648,15 +1045,13 @@ class LocomotionEnv:
             self.qpos_observation_idx,
             self.qvel_observation_idx], dtype=int)
 
-        # omit the base position from the ncbf observations
-        actuator_qpos_idx = self.qpos_observation_idx[self.actuator_joint_mask_qpos]
-        actuator_qvel_idx = self.qvel_observation_idx[self.actuator_joint_mask_qvel]
-
         if self.env_config["ncbf_use_policy_observations"]:
             # this is for the state and action model used in ncbf, which uses the same obs as the policy
             self.ncbf_observation_indices = self.policy_observation_indices
         else:
-            self.ncbf_observation_indices = np.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
+            actuator_qpos_idx = self.qpos_observation_idx[7:]
+            actuator_qvel_idx = self.qvel_observation_idx[6:]
+            self.ncbf_observation_indices = jnp.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
 
             # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
         # TODO get rid of htis after updating safety layer function based on q
@@ -678,6 +1073,8 @@ class LocomotionEnv:
         self.ncbf_target_indices = jnp.concatenate([
             self.body_height_obs_idx,
             self.body_tilt_obs_idx,
+            self.ball_not_falling_obs_idx,
+            self.plate_not_falling_obs_idx,
         ])
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
 

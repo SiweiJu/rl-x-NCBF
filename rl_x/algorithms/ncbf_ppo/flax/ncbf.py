@@ -63,6 +63,7 @@ def logistic_normal_safe_probability(mean_logits: Array, log_std: Array) -> Arra
 def get_ncbf(config, env):
     # ...existing imports and comments...
     n_ncbf_ensemble = config.algorithm.ncbf.n_ensemble
+    n_ncbf_output = len(env.ncbf_target_indices)
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
     ncbf_observation_indices = env.ncbf_observation_indices
     gamma_c = config.algorithm.ncbf.gamma_c
@@ -82,6 +83,7 @@ def get_ncbf(config, env):
     NCBF = [
         NCBF_FFNN(
             config.algorithm.ncbf.nr_hidden_units,
+            n_ncbf_output,
             output_distribution=output_distribution,
         )
         for _ in range(n_ncbf_ensemble)
@@ -173,7 +175,7 @@ def get_ensemble_forward_pass(apply_fn, output_distribution: str, min_log_std: f
 
 class NCBF_FFNN(nn.Module):
     nr_hidden_units: int
-    n_outputs: int = 2
+    n_outputs: int
     output_distribution: str = "deterministic"
 
     @nn.compact
@@ -183,7 +185,7 @@ class NCBF_FFNN(nn.Module):
         x = nn.tanh(x)
         x = nn.Dense(self.nr_hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.tanh(x)
-        # Scalar CBF output h(x)
+        # One CBF output per configured safety target.
         output_dim = self.n_outputs * (2 if self.output_distribution == "logistic_normal" else 1)
         h1 = nn.Dense(output_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(x)
 

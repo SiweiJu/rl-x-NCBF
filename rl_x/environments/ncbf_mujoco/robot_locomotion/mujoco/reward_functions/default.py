@@ -30,6 +30,7 @@ class DefaultReward:
         self.base_height_coeff = env.env_config["reward"]["base_height_coeff"] * env.dt
         self.foot_air_time_coeff = env.env_config["reward"]["foot_air_time_coeff"] * env.dt
         self.foot_air_time_per_robot_size_m = env.env_config["reward"]["foot_air_time_per_robot_size_m"]
+        self.all_feet_off_ground_coeff = env.env_config["reward"].get("all_feet_off_ground_coeff", 2.0) * env.dt
         self.symmetry_air_coeff = env.env_config["reward"]["symmetry_air_coeff"] * env.dt
         self.foot_slip_coeff = env.env_config["reward"]["foot_slip_coeff"] * env.dt
         self.foot_z_velocity_coeff = env.env_config["reward"]["foot_z_velocity_coeff"] * env.dt

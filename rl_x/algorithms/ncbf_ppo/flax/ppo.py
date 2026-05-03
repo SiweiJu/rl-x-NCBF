@@ -1198,7 +1198,6 @@ class PPO:
                 next_step_prediction = self.decoder.apply(self.decoder_state.params, latent_z, state, processed_action)
                 prediction_denormed = next_step_prediction / (1 + next_step_prediction)
 
-
                 self.env.envs[0].internal_state["safe_prediction"] = component_softmin(prediction_mean) # prediction_mean
                 previous_state = state
                 state, reward, terminated, truncated, info = self.env.step(jax.device_get(processed_action))
