@@ -157,6 +157,10 @@ def get_config(environment_name):
         "termination": {
             "type": "below_height",
             "height_percentage_threshold": 0.8,
+            "use_curriculum_scaling": True,
+        },
+        "safety": {
+            "safe_time_limit_seconds": 0.0,
         },
         "terrain": {
             "type": "hfield_diverse",

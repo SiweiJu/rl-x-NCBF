@@ -42,6 +42,8 @@ class LocomotionEnv:
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
+        safety_config = env_config.get("safety", {})
+        self.safe_time_limit_seconds = safety_config.get("safe_time_limit_seconds", 0.0)
 
         xml_path = (self.robot_config["directory_path"] / "data" / "plane.xml").as_posix()
         xml_handle = mjcf.from_path(xml_path)
@@ -311,10 +313,16 @@ class LocomotionEnv:
         info["rollout/episode_return"] = reward
         info["rollout/episode_length"] = 0
         info["env_curriculum/coefficient"] = internal_state["env_curriculum_coeff"]
+        info["constraint/cost"] = 0.0
+        info["constraint/below_height"] = False
+        info["constraint/safe_time"] = 0.0
+        info["constraint/episode_cost"] = 0.0
         info_episode_store = {
             "episode_return": reward,
             "episode_step": 0,
             "episode_total_xy_velocity_diff_abs": 0.0,
+            "episode_safe_time": 0.0,
+            "episode_cost": 0.0,
         }
 
         state = State(mjx_model, data, next_observation, next_observation, reward, terminated, truncated, info, info_episode_store, internal_state, key, last_action, last_observation, history_stack)
@@ -381,6 +389,8 @@ class LocomotionEnv:
             "episode_return": reward,
             "episode_step": 0,
             "episode_total_xy_velocity_diff_abs": 0.0,
+            "episode_safe_time": 0.0,
+            "episode_cost": 0.0,
         }
 
         history_stack = jnp.tile(next_observation[None, :], (self.nr_history_steps, 1))
@@ -445,7 +455,9 @@ class LocomotionEnv:
         self.command_function.get_next_command(state.internal_state, should_sample_commands, command_key)
 
         next_observation = self.get_observation(data, mjx_model, state.internal_state, observation_key, chosen_action)
-        terminated = self.termination_function.should_terminate(state.internal_state) | jnp.any(jnp.abs(data.qvel[:3]) == 100.0)
+        below_height_terminated = self.termination_function.should_terminate(state.internal_state)
+        qvel_limit_terminated = jnp.any(jnp.abs(data.qvel[:3]) == 100.0)
+        terminated = below_height_terminated | qvel_limit_terminated
         truncated = state.info_episode_store["episode_step"] >= (self.horizon - 1)
         done = terminated | truncated
 
@@ -467,6 +479,16 @@ class LocomotionEnv:
         new_info_episode_store["episode_step"] += 1
         new_info_episode_store["episode_return"] += reward
         new_info_episode_store["episode_total_xy_velocity_diff_abs"] = state.info["env_info/xy_vel_diff_abs"]
+        new_info_episode_store["episode_safe_time"] += jnp.where(below_height_terminated, 0.0, self.dt)
+
+        safe_time_limit = jnp.array(self.safe_time_limit_seconds, dtype=jnp.float32)
+        safe_time_shortfall = jnp.where(
+            safe_time_limit > 0.0,
+            jnp.maximum(safe_time_limit - new_info_episode_store["episode_safe_time"], 0.0) / (safe_time_limit + 1e-8),
+            1.0,
+        )
+        constraint_cost = below_height_terminated.astype(jnp.float32) * safe_time_shortfall
+        new_info_episode_store["episode_cost"] += constraint_cost
 
         new_info = dict(state.info)
         new_info["rollout/episode_return"] = jnp.where(done, new_info_episode_store["episode_return"],
@@ -474,6 +496,10 @@ class LocomotionEnv:
         new_info["rollout/episode_length"] = jnp.where(done, new_info_episode_store["episode_step"],
                                                          state.info["rollout/episode_length"])
         new_info["env_curriculum/coefficient"] = state.internal_state["env_curriculum_coeff"]
+        new_info["constraint/cost"] = constraint_cost
+        new_info["constraint/below_height"] = below_height_terminated
+        new_info["constraint/safe_time"] = new_info_episode_store["episode_safe_time"]
+        new_info["constraint/episode_cost"] = new_info_episode_store["episode_cost"]
 
 
         state = state.replace(internal_state=new_internal_state, info=new_info, info_episode_store=new_info_episode_store)
