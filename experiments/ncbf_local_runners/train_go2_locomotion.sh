@@ -27,8 +27,6 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.next_step_predictor.nr_minibatches=50 \
     --algorithm.next_step_predictor.lr=1e-5 \
     --algorithm.next_step_predictor.aux_loss_coef=1 \
-    --algorithm.next_step_predictor.pretrain_nr_steps=0 \
-    --algorithm.ncbf.pretrain.nr_steps=0 \
     --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
     --environment.seed="${SEED}" \
     --environment.nr_envs="${NR_ENVS}" \

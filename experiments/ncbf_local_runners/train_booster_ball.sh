@@ -8,30 +8,23 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-safety_on}"
 
 cd "${EXPERIMENTS_DIR}"
 
 conda run --no-capture-output -n ncbf-mjx python experiment.py \
-    --algorithm.name="ncbf_ppo.flax_full_jit" \
-    --algorithm.total_timesteps=1000000000 \
-    --algorithm.minibatch_size=4096 \
-    --algorithm.learning_rate=4e-4 \
-    --algorithm.nr_steps=128 \
-    --algorithm.nr_epochs=4 \
-    --algorithm.ncbf.use_safety_layer=True \
+    --algorithm.name="ncbf_ppo.flax_full_jit_booster" \
+    --algorithm.ncbf.use_safety_layer=False \
     --algorithm.ncbf.H=25 \
     --algorithm.ncbf.action_clipping=False \
     --algorithm.ncbf_buffer.neg_buffer_size=1 \
     --algorithm.ncbf.coef_decay_lambda=0.95 \
+    --algorithm.next_step_predictor.nr_minibatches=50 \
     --algorithm.next_step_predictor.lr=1e-5 \
     --algorithm.next_step_predictor.aux_loss_coef=1 \
-    --algorithm.next_step_predictor.pretrain_nr_steps=0 \
-    --algorithm.ncbf.pretrain.nr_steps=0 \
-    --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
+    --environment.name="ncbf_mujoco.robot_locomotion.mjx_boosterball" \
     --environment.seed="${SEED}" \
     --environment.nr_envs="${NR_ENVS}" \
-    --environment.train_robot="unitree_g1" \
+    --environment.train_robot="booster_t1" \
     --environment.ncbf_use_policy_observations=True \
     --environment.episode_length_in_seconds=20 \
     --environment.env_curriculum_level_success_episode_return=50 \
@@ -46,4 +39,4 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --runner.wandb_entity="catherineju-rwth-aachen-university" \
     --runner.project_name="202605_ncbf" \
     --runner.exp_name="ncbf_in_aux_debug" \
-    --runner.run_name="${RUN_NAME}"
+    --runner.run_name="booster_ball_same_config"
