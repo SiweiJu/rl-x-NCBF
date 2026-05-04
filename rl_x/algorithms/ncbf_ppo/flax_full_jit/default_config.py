@@ -81,12 +81,11 @@ def get_config(algorithm_name):
 
 def apply_booster_defaults(config):
     config.total_timesteps = 700e6
-    config.learning_rate = 1e-5
-    config.anneal_learning_rate = False
-    config.nr_steps = 50
-    config.nr_epochs = 20
-    config.minibatch_size = 409600
-    config.gamma = 0.995
+    # config.learning_rate = 1e-5
+    # config.anneal_learning_rate = False
+    # config.nr_epochs = 20
+    # config.minibatch_size = 409600
+    # config.gamma = 0.995
     config.gae_lambda = 0.95
     config.clip_range = 0.2
     config.target_kl = 0.02
@@ -97,5 +96,5 @@ def apply_booster_defaults(config):
     config.action_clipping_and_rescaling = False
     config.action_clip = 1.0
     config.evaluation_active = False
-    config.evaluation_and_save_frequency = -1
+    # config.evaluation_and_save_frequency = -1
     config.hidden_layers = (256, 128)

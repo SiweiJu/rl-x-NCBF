@@ -782,9 +782,9 @@ class LocomotionEnv(gym.Env):
             ball_plate_metrics = self.get_ball_plate_metrics()
             ball_not_falling = float(not bool(ball_plate_metrics["ball_dropped"]))
             plate_not_falling = float(not bool(ball_plate_metrics["plate_dropped"]))
+            ball_plate_safety_observation = np.array([ball_not_falling, plate_not_falling], dtype=np.float32)
         else:
-            ball_not_falling = 1.0
-            plate_not_falling = 1.0
+            ball_plate_safety_observation = np.array([], dtype=np.float32)
 
         observation = np.concatenate([
             self.internal_state["data"].qpos[self.actuator_joint_mask_qpos],
@@ -805,8 +805,7 @@ class LocomotionEnv(gym.Env):
             feet_ground_contact,
             np.array([robot_height_safe]),
             np.array([body_tilt_safe]),
-            np.array([ball_not_falling]),
-            np.array([plate_not_falling]),
+            ball_plate_safety_observation,
         ])
 
         # Add noise
@@ -1064,11 +1063,15 @@ class LocomotionEnv(gym.Env):
         self.body_tilt_obs_idx = np.array([current_observation_idx], dtype=int)
         current_observation_idx += 1
 
-        self.ball_not_falling_obs_idx = np.array([current_observation_idx], dtype=int)
-        current_observation_idx += 1
+        if self.use_ball_plate:
+            self.ball_not_falling_obs_idx = np.array([current_observation_idx], dtype=int)
+            current_observation_idx += 1
 
-        self.plate_not_falling_obs_idx = np.array([current_observation_idx], dtype=int)
-        current_observation_idx += 1
+            self.plate_not_falling_obs_idx = np.array([current_observation_idx], dtype=int)
+            current_observation_idx += 1
+        else:
+            self.ball_not_falling_obs_idx = np.array([], dtype=int)
+            self.plate_not_falling_obs_idx = np.array([], dtype=int)
 
         self.policy_observation_indices = np.concatenate([
             self.joint_positions_obs_idx,
@@ -1123,13 +1126,16 @@ class LocomotionEnv(gym.Env):
         ], dtype=int
         )
 
-        self.ncbf_target_indices = np.concatenate([
+        ncbf_target_indices = [
             self.body_height_obs_idx,
             self.body_tilt_obs_idx,
-            self.ball_not_falling_obs_idx,
-            self.plate_not_falling_obs_idx,
-        ], dtype=int
-        )
+        ]
+        if self.use_ball_plate:
+            ncbf_target_indices.extend([
+                self.ball_not_falling_obs_idx,
+                self.plate_not_falling_obs_idx,
+            ])
+        self.ncbf_target_indices = np.concatenate(ncbf_target_indices, dtype=int)
 
         observation_space_low = -np.ones(current_observation_idx) * np.inf
         observation_space_high = np.ones(current_observation_idx) * np.inf

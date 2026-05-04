@@ -774,9 +774,9 @@ class LocomotionEnv:
             internal_state["ball_plate_dropped"] = ball_plate_metrics["dropped"]
             ball_not_falling = (~ball_plate_metrics["ball_dropped"]).astype(jnp.float32)
             plate_not_falling = (~ball_plate_metrics["plate_dropped"]).astype(jnp.float32)
+            ball_plate_safety_observation = jnp.array([ball_not_falling, plate_not_falling])
         else:
-            ball_not_falling = jnp.asarray(1.0, dtype=jnp.float32)
-            plate_not_falling = jnp.asarray(1.0, dtype=jnp.float32)
+            ball_plate_safety_observation = jnp.array([], dtype=jnp.float32)
 
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
@@ -797,8 +797,7 @@ class LocomotionEnv:
             feet_ground_contact,
             jnp.array([robot_height_safe]),
             jnp.array([body_tilt_safe]),
-            jnp.array([ball_not_falling]),
-            jnp.array([plate_not_falling]),
+            ball_plate_safety_observation,
         ])
 
         # Add noise
@@ -1067,11 +1066,15 @@ class LocomotionEnv:
         self.body_tilt_obs_idx = jnp.array([current_observation_idx])
         current_observation_idx += 1
 
-        self.ball_not_falling_obs_idx = jnp.array([current_observation_idx])
-        current_observation_idx += 1
+        if self.use_ball_plate:
+            self.ball_not_falling_obs_idx = jnp.array([current_observation_idx], dtype=int)
+            current_observation_idx += 1
 
-        self.plate_not_falling_obs_idx = jnp.array([current_observation_idx])
-        current_observation_idx += 1
+            self.plate_not_falling_obs_idx = jnp.array([current_observation_idx], dtype=int)
+            current_observation_idx += 1
+        else:
+            self.ball_not_falling_obs_idx = jnp.array([], dtype=int)
+            self.plate_not_falling_obs_idx = jnp.array([], dtype=int)
 
         self.policy_observation_indices = jnp.concatenate([
             self.joint_positions_obs_idx,
@@ -1129,12 +1132,16 @@ class LocomotionEnv:
         )
 
         # target value for the predictor
-        self.ncbf_target_indices = jnp.concatenate([
+        ncbf_target_indices = [
             self.body_height_obs_idx,
             self.body_tilt_obs_idx,
-            self.ball_not_falling_obs_idx,
-            self.plate_not_falling_obs_idx,
-        ])
+        ]
+        if self.use_ball_plate:
+            ncbf_target_indices.extend([
+                self.ball_not_falling_obs_idx,
+                self.plate_not_falling_obs_idx,
+            ])
+        self.ncbf_target_indices = jnp.concatenate(ncbf_target_indices, dtype=int)
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
 
 
