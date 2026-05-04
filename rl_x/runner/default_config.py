@@ -15,6 +15,7 @@ def get_config(runner_mode):
     config.exp_name = "placeholder"
     config.run_name = f"{int(time.time())}"
     config.notes = "placeholder"
+    config.wandb_init_timeout = 600
 
     config.save_model = False
     config.load_model = ""

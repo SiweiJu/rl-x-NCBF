@@ -290,6 +290,7 @@ class Runner:
                 config=self._config.to_dict(),
                 monitor_gym=True,
                 save_code=True,
+                settings=wandb.Settings(init_timeout=self._config.runner.wandb_init_timeout),
             )
 
         run_path = f"runs/{self._config.runner.project_name}/{self._config.runner.exp_name}/{self._config.runner.run_name}"

@@ -35,6 +35,7 @@ TERRAIN_TYPE="${TERRAIN_TYPE:-plane}"
 PROJECT_NAME="${PROJECT_NAME:-202603_ncbf_cluster}"
 EXP_NAME="${EXP_NAME:-merge test}"
 WANDB_ENTITY="${WANDB_ENTITY:-catherineju-rwth-aachen-university}"
+WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-600}"
 RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-}"
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -89,6 +90,7 @@ python experiment.py \
     --runner.track_wandb=True \
     --runner.save_model=True \
     --runner.wandb_entity="${WANDB_ENTITY}" \
+    --runner.wandb_init_timeout="${WANDB_INIT_TIMEOUT}" \
     --runner.project_name="${PROJECT_NAME}" \
     --runner.exp_name="${EXP_NAME}" \
     --runner.run_name="${RUN_NAME_PREFIX}${RUN_NAME}"
