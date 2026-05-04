@@ -180,9 +180,13 @@ class DefaultG1Reward(DefaultReward):
                         power_draw_penalty_reward + action_rate_reward + action_smoothness_reward
         gait_reward = foot_lift_bonus_reward
         gait_penalty = foot_air_time_reward + symmetry_air_reward + contact_count_reward + foot_stance_time_reward + foot_clearance_reward
-        reward = tracking_reward + critical_penalty + style_penalty + gait_penalty + gait_reward + extra_penalty + alive_clipped_reward
-        reward = reward + extra_alive_reward + extra_positive_reward
-        reward = jnp.maximum(reward, 0.0) + alive_unclipped_reward
+        alive_total = alive_clipped_reward + alive_unclipped_reward + extra_alive_reward
+        penalty_total = critical_penalty + style_penalty + gait_penalty + extra_penalty
+        pre_clip_total = (
+            tracking_reward + penalty_total + gait_reward +
+            extra_positive_reward + alive_clipped_reward + extra_alive_reward
+        )
+        reward = jnp.maximum(pre_clip_total, 0.0) + alive_unclipped_reward
         reward = jnp.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
         info[f"reward/track_xy_vel_cmd"] = tracking_xy_velocity_command_reward

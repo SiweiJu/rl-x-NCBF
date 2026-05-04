@@ -1,5 +1,11 @@
 robot_config = {
     "short_name": "g1",
+    "left_foot_site_name": "left_foot",
+    "right_foot_site_name": "right_foot",
+    "left_foot_geom_names": ["left_foot"],
+    "right_foot_geom_names": ["right_foot"],
+    "left_foot_velocity_sensor_name": "left_foot_global_linear_velocity",
+    "right_foot_velocity_sensor_name": "right_foot_global_linear_velocity",
 
     "actuator_joint_max_velocities": [
         32.0, 32.0, 32.0, 20.0, 53.0, 53.0,
