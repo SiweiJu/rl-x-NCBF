@@ -1112,6 +1112,9 @@ class PPO:
                             "policy_ratio/approx_kl": approx_kl_div,
                             "policy_ratio/clip_fraction": clip_fraction,
                         }
+                        if len(self.env.ncbf_target_indices) > 3:
+                            metrics["ncbf/ball_drop_bce"] = jnp.sum(ncbf_masks * bce[..., 2]) / den
+                            metrics["ncbf/plate_drop_bce"] = jnp.sum(ncbf_masks * bce[..., 3]) / den
 
                         return loss, metrics
 
