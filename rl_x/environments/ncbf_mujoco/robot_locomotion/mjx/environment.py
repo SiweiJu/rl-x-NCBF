@@ -299,17 +299,31 @@ class LocomotionEnv:
         right_fist_pos = np.array(self.ball_plate_config["right_fist_pos"], dtype=float)
         torso_contact_pos = np.array(self.ball_plate_config["torso_contact_pos"], dtype=float)
         torso_contact_size = float(self.ball_plate_config["torso_contact_size"])
-        upper_arm_contact_fromto = np.array(self.ball_plate_config["upper_arm_contact_fromto"], dtype=float)
+        left_upper_arm_contact_fromto = np.array(
+            self.ball_plate_config.get("left_upper_arm_contact_fromto", self.ball_plate_config["upper_arm_contact_fromto"]),
+            dtype=float,
+        )
+        right_upper_arm_contact_fromto = np.array(
+            self.ball_plate_config.get("right_upper_arm_contact_fromto", self.ball_plate_config["upper_arm_contact_fromto"]),
+            dtype=float,
+        )
         upper_arm_contact_radius = float(self.ball_plate_config["upper_arm_contact_radius"])
-        forearm_contact_fromto = np.array(self.ball_plate_config["forearm_contact_fromto"], dtype=float)
+        left_forearm_contact_fromto = np.array(
+            self.ball_plate_config.get("left_forearm_contact_fromto", self.ball_plate_config["forearm_contact_fromto"]),
+            dtype=float,
+        )
+        right_forearm_contact_fromto = np.array(
+            self.ball_plate_config.get("right_forearm_contact_fromto", self.ball_plate_config["forearm_contact_fromto"]),
+            dtype=float,
+        )
         forearm_contact_radius = float(self.ball_plate_config["forearm_contact_radius"])
         left_fist.add("geom", name="left_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{left_fist_pos[0] - fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]} {left_fist_pos[0] + fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
         right_fist.add("geom", name="right_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{right_fist_pos[0] - fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]} {right_fist_pos[0] + fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
         torso_contact_body.add("geom", name="torso_plate_guard", type="sphere", pos=" ".join(map(str, torso_contact_pos)), size=str(torso_contact_size), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
-        left_upper_arm_contact_body.add("geom", name="left_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
-        right_upper_arm_contact_body.add("geom", name="right_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
-        left_forearm_contact_body.add("geom", name="left_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
-        right_forearm_contact_body.add("geom", name="right_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        left_upper_arm_contact_body.add("geom", name="left_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, left_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        right_upper_arm_contact_body.add("geom", name="right_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, right_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        left_forearm_contact_body.add("geom", name="left_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, left_forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        right_forearm_contact_body.add("geom", name="right_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, right_forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
 
         plate = xml_handle.worldbody.add("body", name="ball_plate", pos=" ".join(map(str, plate_pos)), quat=" ".join(map(str, plate_quat)))
         plate.add("freejoint", name="ball_plate_freejoint")

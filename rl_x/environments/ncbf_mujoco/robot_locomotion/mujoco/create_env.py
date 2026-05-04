@@ -6,12 +6,18 @@ from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.environment import Lo
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.wrappers import RLXInfo, RecordEpisodeStatistics
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.async_vectorized_wrapper import AsyncVectorEnvWithSkipping
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.general_properties import GeneralProperties
-from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.default_config import apply_booster_defaults
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.default_config import apply_booster_defaults, apply_boosterball_defaults
 
 
 def create_env(config):
     if config.environment.train_robot == "booster_t1" and not config.environment.get("booster_defaults_applied", False):
         apply_booster_defaults(config.environment)
+    if (
+        config.environment.train_robot == "booster_t1"
+        and config.environment.ball_plate.enabled
+        and not config.environment.get("boosterball_defaults_applied", False)
+    ):
+        apply_boosterball_defaults(config.environment)
 
     robot_config = importlib.import_module(f"rl_x.environments.ncbf_mujoco.robot_locomotion.robots.{config.environment.train_robot}.robot_config").robot_config
     robot_config["directory_path"] = Path(__file__).parent.parent / "robots" / config.environment.train_robot

@@ -259,7 +259,10 @@ def get_config(environment_name):
     }
 
     config = config_dict.ConfigDict(config)
-    if "booster" in environment_name.lower():
+    environment_name_lower = environment_name.lower()
+    if "boosterball" in environment_name_lower or "booster_ball" in environment_name_lower:
+        apply_boosterball_defaults(config)
+    elif "booster" in environment_name_lower:
         apply_booster_defaults(config)
     return config
 
@@ -406,3 +409,63 @@ def apply_booster_defaults(config):
     config.termination.min_height = 0.3
     config.termination.max_height = 1.0
     config.terrain.type = "plane"
+
+
+def apply_boosterball_defaults(config):
+    if not config.get("booster_defaults_applied", False):
+        apply_booster_defaults(config)
+
+    config.boosterball_defaults_applied = True
+    config.ball_plate.update({
+        "enabled": True,
+        "include_observations": True,
+        "plate_home_pos": [0.37, 0.0, 0.99],
+        "plate_home_quat": [1.0, 0.0, 0.0, 0.0],
+        "plate_size": [0.18, 0.24, 0.008],
+        "ball_home_pos": [0.37, 0.0, 1.04],
+        "left_fist_body": "left_hand_link",
+        "right_fist_body": "right_hand_link",
+        "left_fist_pos": [0.40, -0.10, 0.0],
+        "right_fist_pos": [0.40, 0.10, 0.0],
+        "fist_radius": 0.035,
+        "fist_half_length": 0.055,
+        "torso_contact_body": "Trunk",
+        "torso_contact_pos": [0.08, 0.0, 0.15],
+        "torso_contact_size": 0.13,
+        "left_upper_arm_contact_body": "AL3",
+        "right_upper_arm_contact_body": "AR3",
+        "left_upper_arm_contact_fromto": [0.0, 0.02, 0.0, 0.0, 0.13, 0.0],
+        "right_upper_arm_contact_fromto": [0.0, -0.02, 0.0, 0.0, -0.13, 0.0],
+        "left_forearm_contact_body": "left_hand_link",
+        "right_forearm_contact_body": "right_hand_link",
+        "left_forearm_contact_fromto": [0.0, 0.0, 0.0, 0.0, 0.22, 0.0],
+        "right_forearm_contact_fromto": [0.0, 0.0, 0.0, 0.0, -0.22, 0.0],
+        "upper_arm_contact_radius": 0.04,
+        "forearm_contact_radius": 0.04,
+        "plate_torso_contact_friction": [1.5, 1.5, 0.005, 0.0001, 0.0001],
+        "plate_arm_contact_friction": [1.5, 1.5, 0.005, 0.0001, 0.0001],
+        "plate_support_contact_friction": [3.0, 3.0, 0.005, 0.0001, 0.0001],
+        "plate_support_contact_dim": 6,
+        "plate_support_clearance": 0.0,
+    })
+    config.ball_plate.initial_joint_positions = config_dict.ConfigDict({
+        "Left_Shoulder_Pitch": 0.2,
+        "Left_Shoulder_Roll": -1.35,
+        "Left_Elbow_Pitch": 0.0,
+        "Left_Elbow_Yaw": -0.5,
+        "Right_Shoulder_Pitch": 0.2,
+        "Right_Shoulder_Roll": 1.35,
+        "Right_Elbow_Pitch": 0.0,
+        "Right_Elbow_Yaw": 0.5,
+    })
+    config.reward.update({
+        "type": "boosterball",
+        "ball_plate_centering_coeff": 2.0,
+        "ball_plate_center_bonus_coeff": 2.0,
+        "ball_plate_center_bonus_temperature": 0.01,
+        "ball_plate_velocity_coeff": 0.1,
+        "ball_plate_on_plate_coeff": 1.0,
+        "ball_plate_alive_coeff": 0.2,
+        "ball_plate_drop_penalty_coeff": 10.0,
+    })
+    config.termination.type = "boosterball"
