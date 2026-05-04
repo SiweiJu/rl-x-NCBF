@@ -40,6 +40,7 @@ class LocomotionEnv(gym.Env):
         self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations", True))
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
+        self.root_body_name = robot_config.get("root_body_name", "trunk")
 
         self.np_rng = np.random.default_rng(seed)
 
@@ -58,7 +59,7 @@ class LocomotionEnv(gym.Env):
             floor.hfield = "empty_hfield"
         
         if self.should_render and self.add_goal_arrow:
-            trunk = xml_handle.find("body", "trunk")
+            trunk = xml_handle.find("body", self.root_body_name)
             dir_base = trunk.add("body", name="dir_arrow_base", pos="0 0 0.2")
             dir_base.add("geom", name="dir_arrow_ball", type="sphere", size=".035", pos="0 0 0",
                          dclass="visual", rgba="0.1 0.45 1.0 1")
@@ -71,7 +72,7 @@ class LocomotionEnv(gym.Env):
 
         if self.should_render:
             # add the safety light
-            trunk = xml_handle.find("body", "trunk")
+            trunk = xml_handle.find("body", self.root_body_name)
             trunk.add("geom", name="safety_light", pos="0 0 1", type="sphere", dclass="visual", size="0.05", rgba="1 0 0 1", group="0")
             # light_vec = xml_handle.find("body", "safety_light_body")
             # light_vec.add("site", name="safety_light", type="sphere", size="0.2", pos="0 0 0.6", rgba="0 1 0 1")
@@ -91,7 +92,7 @@ class LocomotionEnv(gym.Env):
         mujoco.mj_forward(self.c_model, self.c_data)
         
         self.imu_site_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_SITE, "imu")
-        self.trunk_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, "trunk")
+        self.trunk_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, self.root_body_name)
         self.actuator_joint_max_velocities = np.array(robot_config["actuator_joint_max_velocities"])
         self.initial_qpos = np.array(self.initial_mj_model.keyframe("home").qpos)
         self.initial_imu_orientation_rotation_inverse = Rotation.from_matrix(self.c_data.site_xmat[self.imu_site_id].reshape(3, 3)).inv()
@@ -124,14 +125,29 @@ class LocomotionEnv(gym.Env):
         self.feet_symmetry_pairs = np.array([list(pair) for pair in feet_symmetry_set])
         self.body_ids_of_feet = np.array([self.initial_mj_model.geom(geom_id).bodyid[0] for geom_id in self.foot_geom_indices])
         all_feet_are_sphere = np.all(self.initial_mj_model.geom_type[self.foot_geom_indices] == 2)
+        all_feet_are_capsule = np.all(self.initial_mj_model.geom_type[self.foot_geom_indices] == 3)
         all_feet_are_box = np.all(self.initial_mj_model.geom_type[self.foot_geom_indices] == 6)
-        if not all_feet_are_sphere | all_feet_are_box:
-            raise ValueError("Foot geoms are not all of type sphere or box.")
-        self.foot_type = "sphere" if all_feet_are_sphere else "box"
-        self.foot_type_int = 0 if self.foot_type == "sphere" else 1
+        if not bool(all_feet_are_sphere | all_feet_are_capsule | all_feet_are_box):
+            raise ValueError("Foot geoms are not all of type sphere, capsule or box.")
+        self.foot_type = "sphere" if all_feet_are_sphere else ("capsule" if all_feet_are_capsule else "box")
+        self.foot_type_int = 0 if self.foot_type == "sphere" else (2 if self.foot_type == "capsule" else 1)
 
         feet_global_linear_velocity_sensor_ids = [self.initial_mj_model.sensor(f"{foot_name}_global_linear_velocity").id for foot_name in self.feet_names]
         self.feet_global_linear_velocity_sensor_adrs_start = np.array([self.initial_mj_model.sensor_adr[sensor_id] for sensor_id in feet_global_linear_velocity_sensor_ids])
+        self.left_foot_site_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_SITE, robot_config.get("left_foot_site_name", "left_foot"))
+        self.right_foot_site_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_SITE, robot_config.get("right_foot_site_name", "right_foot"))
+        self.left_foot_geom_indices = np.array([
+            mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            for name in robot_config.get("left_foot_geom_names", [name for name in self.feet_names if "left" in name])
+        ])
+        self.right_foot_geom_indices = np.array([
+            mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            for name in robot_config.get("right_foot_geom_names", [name for name in self.feet_names if "right" in name])
+        ])
+        left_foot_velocity_sensor_id = self.initial_mj_model.sensor(robot_config.get("left_foot_velocity_sensor_name", "left_foot_global_linvel")).id
+        right_foot_velocity_sensor_id = self.initial_mj_model.sensor(robot_config.get("right_foot_velocity_sensor_name", "right_foot_global_linvel")).id
+        self.left_foot_velocity_sensor_adr = self.initial_mj_model.sensor_adr[left_foot_velocity_sensor_id]
+        self.right_foot_velocity_sensor_adr = self.initial_mj_model.sensor_adr[right_foot_velocity_sensor_id]
 
         body_to_parentid = np.array([self.initial_mj_model.body(body_id).parentid[0] for body_id in range(self.initial_mj_model.nbody)])
         body_to_children_count = np.array([np.sum(body_to_parentid == body_id) for body_id in range(self.initial_mj_model.nbody)])
@@ -193,14 +209,23 @@ class LocomotionEnv(gym.Env):
         self.horizon = int(round(env_config["episode_length_in_seconds"] * self.control_frequency_hz))
         self.command_function = get_command_function(env_config["command"]["type"], self)
         self.command_function_type = env_config["command"]["type"]
-        self.command_sampling_function = get_sampling_function(env_config["command"]["sampling_type"], self)
+        self.command_observation_size = getattr(self.command_function, "observation_size", 3)
+        self.command_sampling_function = get_sampling_function(
+            env_config["command"]["sampling_type"],
+            self,
+            probability=env_config["command"].get("sampling_probability", 0.002),
+        )
         self.initial_state_function = get_initial_state_function(env_config["domain_randomization"]["initial_state"]["type"], self)
         self.reward_function = get_reward_function(env_config["reward"]["type"], self)
         self.termination_function = get_termination_function(env_config["termination"]["type"], self)
         self.policy_exteroceptive_observation_function = get_exteroceptive_observation_function(env_config["policy_exteroceptive_observation_type"], self)
         self.critic_exteroceptive_observation_function = get_exteroceptive_observation_function(env_config["critic_exteroceptive_observation_type"], self)
         self.terrain_function = get_terrain_function(env_config["terrain"]["type"], self)
-        self.domain_randomization_sampling_function = get_sampling_function(env_config["domain_randomization"]["sampling_type"], self)
+        self.domain_randomization_sampling_function = get_sampling_function(
+            env_config["domain_randomization"]["sampling_type"],
+            self,
+            probability=env_config["domain_randomization"].get("sampling_probability", 0.002),
+        )
         self.domain_randomization_action_delay_function = get_domain_randomization_action_delay_function(env_config["domain_randomization"]["action_delay"]["type"], self)
         self.domain_randomization_mujoco_model_function = get_domain_randomization_mujoco_model_function(env_config["domain_randomization"]["mujoco_model"]["type"], self)
         self.domain_randomization_seen_robot_function = get_domain_randomization_seen_robot_function(env_config["domain_randomization"]["seen_robot"]["type"], self)
@@ -457,7 +482,7 @@ class LocomotionEnv(gym.Env):
         goal_velocities = np.asarray(self.internal_state["goal_velocities"], dtype=np.float64)
         goal_xy_local = goal_velocities[:2]
         goal_speed = np.linalg.norm(goal_xy_local)
-        arrow_base_pos = data.body("trunk").xpos + np.array([0.0, 0.0, 0.5], dtype=np.float64)
+        arrow_base_pos = data.body(self.root_body_name).xpos + np.array([0.0, 0.0, 0.5], dtype=np.float64)
         trunk_yaw = self.internal_state["imu_orientation_euler"][2]
         cos_yaw = np.cos(trunk_yaw)
         sin_yaw = np.sin(trunk_yaw)
@@ -722,13 +747,22 @@ class LocomotionEnv(gym.Env):
         feet_ground_contact = self.terrain_function.check_feet_floor_contact()
 
         robot_height = self.internal_state["robot_imu_height_over_ground"]
-        robot_height_threshold = self.env_config["termination"]["height_percentage_threshold"] * self.internal_state["robot_nominal_imu_height_over_ground"]
-        robot_height_safe = np.float32(robot_height >= robot_height_threshold)
+        if self.env_config["termination"]["type"] == "booster":
+            robot_height_safe = np.float32(
+                (robot_height >= self.env_config["termination"]["min_height"]) and
+                (robot_height <= self.env_config["termination"]["max_height"])
+            )
+        else:
+            robot_height_threshold = self.env_config["termination"]["height_percentage_threshold"] * self.internal_state["robot_nominal_imu_height_over_ground"]
+            robot_height_safe = np.float32(robot_height >= robot_height_threshold)
 
         body_roll = self.internal_state["imu_orientation_euler"][0]
         body_pitch = self.internal_state["imu_orientation_euler"][1]
         body_tilt = np.sqrt(body_roll ** 2 + body_pitch ** 2)
-        body_tilt_safe = np.float32(body_tilt <= self.internal_state["body_tilt_threshold"])
+        body_tilt_safe = np.float32(True if self.env_config["termination"]["type"] == "booster" else body_tilt <= self.internal_state["body_tilt_threshold"])
+
+        command_observation = self.command_function.get_observation(self.internal_state) \
+            if hasattr(self.command_function, "get_observation") else self.internal_state["goal_velocities"]
 
         if self.use_ball_plate:
             ball_plate_metrics = self.get_ball_plate_metrics()
@@ -747,7 +781,7 @@ class LocomotionEnv(gym.Env):
             self.internal_state["feet_time_in_air"],
             self.internal_state["data"].sensordata[self.imu_linear_velocity_sensor_adr:self.imu_linear_velocity_sensor_adr + self.imu_linear_velocity_sensor_dim],
             self.internal_state["data"].sensordata[self.imu_angular_velocity_sensor_adr:self.imu_angular_velocity_sensor_adr + self.imu_angular_velocity_sensor_dim],
-            self.internal_state["goal_velocities"],
+            command_observation,
             self.internal_state["imu_orientation_rotation_inverse"].apply(np.array([0.0, 0.0, -1.0])),
             self.get_ball_plate_observation(),
             np.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation()]).reshape(-1),
@@ -764,24 +798,25 @@ class LocomotionEnv(gym.Env):
         # Add noise
         self.observation_noise_function.modify_observation(observation)
 
-        # Normalize and clip
-        observation[self.joint_positions_obs_idx] = (observation[self.joint_positions_obs_idx] - self.internal_state["actuator_joint_nominal_positions"]) / 3.14
-        observation[self.joint_velocities_obs_idx] /= 100.0
-        observation[self.joint_previous_actions_obs_idx] /= 10.0
-        observation[self.feet_ground_contact_obs_idx] = (observation[self.feet_ground_contact_obs_idx] / 0.5) - 1.0
-        observation[self.feet_time_on_ground_obs_idx] = np.clip((observation[self.feet_time_on_ground_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0)
-        observation[self.feet_time_in_air_obs_idx] = np.clip((observation[self.feet_time_in_air_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0)
-        observation[self.imu_linear_vel_obs_idx] = np.clip(observation[self.imu_linear_vel_obs_idx] / 10.0, -1.0, 1.0)
-        observation[self.imu_angular_vel_obs_idx] = np.clip(observation[self.imu_angular_vel_obs_idx] / 50.0, -1.0, 1.0)
-        if len(self.ball_plate_obs_idx) > 0:
-            observation[self.ball_plate_obs_idx[:3]] = np.clip(observation[self.ball_plate_obs_idx[:3]] / np.maximum(np.max(self.ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0)
-            observation[self.ball_plate_obs_idx[3:6]] = np.clip(observation[self.ball_plate_obs_idx[3:6]] / 5.0, -10.0, 10.0)
-            observation[self.ball_plate_obs_idx[6:9]] = np.clip(observation[self.ball_plate_obs_idx[6:9]] / np.maximum(np.max(self.ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0)
-            observation[self.ball_plate_obs_idx[9:]] = np.clip(observation[self.ball_plate_obs_idx[9:]] / 5.0, -10.0, 10.0)
-        if len(self.policy_exteroception_obs_idx) > 0:
-            observation[self.policy_exteroception_obs_idx] = np.clip((observation[self.policy_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0)
-        if len(self.critic_exteroception_obs_idx) > 0:
-            observation[self.critic_exteroception_obs_idx] = np.clip((observation[self.critic_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0)
+        if not getattr(self.observation_noise_function, "handles_normalization", False):
+            # Normalize and clip
+            observation[self.joint_positions_obs_idx] = (observation[self.joint_positions_obs_idx] - self.internal_state["actuator_joint_nominal_positions"]) / 3.14
+            observation[self.joint_velocities_obs_idx] /= 100.0
+            observation[self.joint_previous_actions_obs_idx] /= 10.0
+            observation[self.feet_ground_contact_obs_idx] = (observation[self.feet_ground_contact_obs_idx] / 0.5) - 1.0
+            observation[self.feet_time_on_ground_obs_idx] = np.clip((observation[self.feet_time_on_ground_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0)
+            observation[self.feet_time_in_air_obs_idx] = np.clip((observation[self.feet_time_in_air_obs_idx] / (5.0 / 2)) - 1.0, -1.0, 1.0)
+            observation[self.imu_linear_vel_obs_idx] = np.clip(observation[self.imu_linear_vel_obs_idx] / 10.0, -1.0, 1.0)
+            observation[self.imu_angular_vel_obs_idx] = np.clip(observation[self.imu_angular_vel_obs_idx] / 50.0, -1.0, 1.0)
+            if len(self.ball_plate_obs_idx) > 0:
+                observation[self.ball_plate_obs_idx[:3]] = np.clip(observation[self.ball_plate_obs_idx[:3]] / np.maximum(np.max(self.ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0)
+                observation[self.ball_plate_obs_idx[3:6]] = np.clip(observation[self.ball_plate_obs_idx[3:6]] / 5.0, -10.0, 10.0)
+                observation[self.ball_plate_obs_idx[6:9]] = np.clip(observation[self.ball_plate_obs_idx[6:9]] / np.maximum(np.max(self.ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0)
+                observation[self.ball_plate_obs_idx[9:]] = np.clip(observation[self.ball_plate_obs_idx[9:]] / 5.0, -10.0, 10.0)
+            if len(self.policy_exteroception_obs_idx) > 0:
+                observation[self.policy_exteroception_obs_idx] = np.clip((observation[self.policy_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0)
+            if len(self.critic_exteroception_obs_idx) > 0:
+                observation[self.critic_exteroception_obs_idx] = np.clip((observation[self.critic_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0)
 
         observation = np.nan_to_num(observation, nan=0.0, posinf=0.0, neginf=0.0)
         observation = np.clip(observation, -10.0, 10.0)
@@ -989,8 +1024,8 @@ class LocomotionEnv(gym.Env):
         current_observation_idx += self.imu_linear_velocity_sensor_dim
         self.imu_angular_vel_obs_idx = np.array([current_observation_idx + i for i in range(self.imu_angular_velocity_sensor_dim)], dtype=int)
         current_observation_idx += self.imu_angular_velocity_sensor_dim
-        self.goal_velocities_obs_idx = np.array([current_observation_idx + i for i in range(3)], dtype=int)
-        current_observation_idx += 3
+        self.goal_velocities_obs_idx = np.array([current_observation_idx + i for i in range(self.command_observation_size)], dtype=int)
+        current_observation_idx += self.command_observation_size
         self.gravity_vector_obs_idx = np.array([current_observation_idx + i for i in range(3)], dtype=int)
         current_observation_idx += 3
         self.ball_plate_obs_idx = np.array([current_observation_idx + i for i in range(self.nr_ball_plate_observations)], dtype=int)

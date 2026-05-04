@@ -21,7 +21,9 @@ def get_config(algorithm_name):
     config.max_grad_norm = 0.5
     config.std_dev = 1.0
     config.action_clipping_and_rescaling = False
+    config.action_clip = 0.0
     config.nr_hidden_units = 256
+    config.hidden_layers = (256, 128)
     config.evaluation_frequency = 204800  # -1 to disable
     config.evaluation_episodes = 10
 
@@ -74,4 +76,25 @@ def get_config(algorithm_name):
 
     config.action_noise_sampling_ratio = 0.0  # ratio of sampling actions for ncbf evaluation
     config.rollout_save_name = "rollouts"       #  default name for rollout saving
+    if "booster" in algorithm_name.lower():
+        apply_booster_defaults(config)
     return config
+
+
+def apply_booster_defaults(config):
+    config.total_timesteps = 700e6
+    config.learning_rate = 1e-5
+    config.anneal_learning_rate = False
+    config.nr_steps = 50
+    config.nr_epochs = 20
+    config.minibatch_size = 409600
+    config.gamma = 0.995
+    config.gae_lambda = 0.95
+    config.clip_range = 0.2
+    config.entropy_coef = 0.005
+    config.critic_coef = 0.5
+    config.max_grad_norm = 1.0
+    config.std_dev = 0.135
+    config.action_clipping_and_rescaling = False
+    config.action_clip = 1.0
+    config.hidden_layers = (512, 256, 128)

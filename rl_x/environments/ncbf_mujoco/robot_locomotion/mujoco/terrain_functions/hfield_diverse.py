@@ -35,13 +35,17 @@ class HFieldDiverseTerrainGeneration:
     def check_feet_floor_contact(self):
         contact_geom_pairs = self.env.internal_state["data"].contact.geom
         possible_contact_pairs = np.stack([np.full_like(self.env.foot_geom_indices, self.env.floor_geom_id), self.env.foot_geom_indices], axis=1)
-        in_contact = np.any(np.all(contact_geom_pairs == possible_contact_pairs[:, None, :], axis=2), axis=1)
+        possible_contact_pairs_rev = np.stack([self.env.foot_geom_indices, np.full_like(self.env.foot_geom_indices, self.env.floor_geom_id)], axis=1)
+        in_contact = (
+            np.any(np.all(contact_geom_pairs == possible_contact_pairs[:, None, :], axis=2), axis=1) |
+            np.any(np.all(contact_geom_pairs == possible_contact_pairs_rev[:, None, :], axis=2), axis=1)
+        )
 
         return in_contact
 
 
     def check_flat_feet_floor_missing_contacts(self):
-        if self.env.foot_type == "sphere":
+        if self.env.foot_type in ["sphere", "capsule"]:
             return np.zeros(self.env.nr_feet)
         elif self.env.foot_type == "box":
             feet_xpos = self.env.internal_state["data"].geom_xpos[self.env.foot_geom_indices]

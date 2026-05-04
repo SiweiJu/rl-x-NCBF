@@ -1,5 +1,6 @@
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.termination_functions.below_height import BelowHeightTermination
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.termination_functions.G1ball import G1BallTermination
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.termination_functions.booster import BoosterTermination
 
 
 def get_termination_function(name, env, **kwargs):
@@ -10,5 +11,7 @@ def get_termination_function(name, env, **kwargs):
         return BelowHeightTermination(env, **kwargs)
     elif name == "G1ball":
         return G1BallTermination(env, **kwargs)
+    elif name == "booster":
+        return BoosterTermination(env, **kwargs)
     else:
         raise NotImplementedError

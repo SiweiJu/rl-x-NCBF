@@ -2,6 +2,7 @@
 __pycache__/
 dist/
 .vscode
+.idea/
 .DS_Store
 runs/
 wandb/

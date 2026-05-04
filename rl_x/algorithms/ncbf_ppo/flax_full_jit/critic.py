@@ -12,22 +12,19 @@ def get_critic(config, env):
     critic_observation_indices = getattr(env, "critic_observation_indices", jnp.arange(env.single_observation_space.shape[0]))
 
     if observation_space_type == ObservationSpaceType.FLAT_VALUES:
-        return Critic(critic_observation_indices)
+        return Critic(critic_observation_indices, config.algorithm.hidden_layers)
 
 
 class Critic(nn.Module):
     critic_observation_indices: Sequence[int]
+    hidden_layers: Sequence[int]
 
     @nn.compact
     def __call__(self, x):
         x = x[..., self.critic_observation_indices]
         critic = x
-        # critic = nn.Dense(512, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(critic)
-        # critic = nn.LayerNorm()(critic)
-        # critic = nn.elu(critic)
-        critic = nn.Dense(256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(critic)
-        critic = nn.elu(critic)
-        critic = nn.Dense(128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(critic)
-        critic = nn.elu(critic)
+        for hidden_units in self.hidden_layers:
+            critic = nn.Dense(hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(critic)
+            critic = nn.elu(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1), bias_init=constant(0.0))(critic)
         return critic

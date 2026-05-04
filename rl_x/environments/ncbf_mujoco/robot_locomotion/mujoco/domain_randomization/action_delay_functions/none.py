@@ -11,7 +11,7 @@ class NoneActionDelay:
         pass
 
 
-    def sample(self, should_randomize):
+    def sample(self, should_randomize=None):
         pass
 
 

@@ -1,6 +1,7 @@
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.default import DefaultReward
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.defaultG1 import DefaultG1Reward
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.G1ball import G1BallReward
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.booster import BoosterReward
 
 
 def get_reward_function(name, env, **kwargs):
@@ -13,5 +14,7 @@ def get_reward_function(name, env, **kwargs):
         return DefaultG1Reward(env, **kwargs)
     elif name == "G1ball":
         return G1BallReward(env, **kwargs)
+    elif name == "booster":
+        return BoosterReward(env, **kwargs)
     else:
         raise NotImplementedError
