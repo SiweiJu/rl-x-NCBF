@@ -59,11 +59,18 @@ class LocomotionEnv:
             material.remove()
         for mesh in xml_handle.asset.find_all("mesh"):
             mesh.remove()
+        ball_plate_preserved_geom_names = set()
+        if self.use_ball_plate:
+            ball_plate_preserved_geom_names.update(self.ball_plate_config.get("preserve_contact_geom_names", []))
+            ball_plate_preserved_geom_names.update(self.ball_plate_config.get("support_contact_geom_names", []))
+            ball_plate_preserved_geom_names.update(self.ball_plate_config.get("torso_contact_geom_names", []))
+
         for geom in xml_handle.find_all("geom"):
             is_foot_geom = geom.name and "foot" in geom.name
             is_floor_geom = geom.name == "floor"
             is_reward_collision_sphere_geom = geom.dclass and geom.dclass.dclass == "reward_collision_sphere"
-            if not is_foot_geom and not is_floor_geom and not is_reward_collision_sphere_geom:
+            is_ball_plate_contact_geom = geom.name in ball_plate_preserved_geom_names
+            if not is_foot_geom and not is_floor_geom and not is_reward_collision_sphere_geom and not is_ball_plate_contact_geom:
                 geom.remove()
             if is_floor_geom:
                 geom.material = ""
@@ -287,6 +294,13 @@ class LocomotionEnv:
         plate_torso_pair_dim = str(self.ball_plate_config.get("plate_torso_contact_dim", 3))
         plate_arm_pair_friction = " ".join(map(str, self.ball_plate_config.get("plate_arm_contact_friction", [1.0, 1.0, 0.005, 0.0001, 0.0001])))
         plate_arm_pair_dim = str(self.ball_plate_config.get("plate_arm_contact_dim", 3))
+        robot_contact_pair_kwargs = {}
+        if "plate_robot_contact_solref" in self.ball_plate_config:
+            robot_contact_pair_kwargs["solref"] = " ".join(map(str, self.ball_plate_config["plate_robot_contact_solref"]))
+        if "plate_robot_contact_solimp" in self.ball_plate_config:
+            robot_contact_pair_kwargs["solimp"] = " ".join(map(str, self.ball_plate_config["plate_robot_contact_solimp"]))
+        if "plate_robot_contact_margin" in self.ball_plate_config:
+            robot_contact_pair_kwargs["margin"] = str(self.ball_plate_config["plate_robot_contact_margin"])
 
         left_fist = xml_handle.find("body", self.ball_plate_config["left_fist_body"])
         right_fist = xml_handle.find("body", self.ball_plate_config["right_fist_body"])
@@ -317,8 +331,10 @@ class LocomotionEnv:
             dtype=float,
         )
         forearm_contact_radius = float(self.ball_plate_config["forearm_contact_radius"])
-        left_fist.add("geom", name="left_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{left_fist_pos[0] - fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]} {left_fist_pos[0] + fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
-        right_fist.add("geom", name="right_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{right_fist_pos[0] - fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]} {right_fist_pos[0] + fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
+        add_support_fist_geoms = self.ball_plate_config.get("add_support_fist_geoms", True)
+        if add_support_fist_geoms:
+            left_fist.add("geom", name="left_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{left_fist_pos[0] - fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]} {left_fist_pos[0] + fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
+            right_fist.add("geom", name="right_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{right_fist_pos[0] - fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]} {right_fist_pos[0] + fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
         torso_contact_body.add("geom", name="torso_plate_guard", type="sphere", pos=" ".join(map(str, torso_contact_pos)), size=str(torso_contact_size), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
         left_upper_arm_contact_body.add("geom", name="left_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, left_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
         right_upper_arm_contact_body.add("geom", name="right_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, right_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
@@ -365,13 +381,21 @@ class LocomotionEnv:
             solimp=plate_ball_pair_solimp,
             margin=plate_ball_pair_margin,
         )
-        xml_handle.contact.add("pair", geom1="left_plate_support_fist", geom2="ball_plate_geom", condim=plate_support_pair_dim, friction=plate_support_pair_friction)
-        xml_handle.contact.add("pair", geom1="right_plate_support_fist", geom2="ball_plate_geom", condim=plate_support_pair_dim, friction=plate_support_pair_friction)
-        xml_handle.contact.add("pair", geom1="torso_plate_guard", geom2="ball_plate_geom", condim=plate_torso_pair_dim, friction=plate_torso_pair_friction)
-        xml_handle.contact.add("pair", geom1="left_upper_arm_plate_guard", geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction)
-        xml_handle.contact.add("pair", geom1="right_upper_arm_plate_guard", geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction)
-        xml_handle.contact.add("pair", geom1="left_forearm_plate_guard", geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction)
-        xml_handle.contact.add("pair", geom1="right_forearm_plate_guard", geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction)
+        support_contact_geom_names = self.ball_plate_config.get("support_contact_geom_names")
+        if support_contact_geom_names is None:
+            support_contact_geom_names = ["left_plate_support_fist", "right_plate_support_fist"] if add_support_fist_geoms else []
+        for support_geom_name in support_contact_geom_names:
+            xml_handle.contact.add("pair", geom1=support_geom_name, geom2="ball_plate_geom", condim=plate_support_pair_dim, friction=plate_support_pair_friction, **robot_contact_pair_kwargs)
+        for torso_geom_name in ["torso_plate_guard", *self.ball_plate_config.get("torso_contact_geom_names", [])]:
+            xml_handle.contact.add("pair", geom1=torso_geom_name, geom2="ball_plate_geom", condim=plate_torso_pair_dim, friction=plate_torso_pair_friction, **robot_contact_pair_kwargs)
+        for arm_geom_name in [
+            "left_upper_arm_plate_guard",
+            "right_upper_arm_plate_guard",
+            "left_forearm_plate_guard",
+            "right_forearm_plate_guard",
+            *self.ball_plate_config.get("arm_contact_geom_names", []),
+        ]:
+            xml_handle.contact.add("pair", geom1=arm_geom_name, geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction, **robot_contact_pair_kwargs)
         xml_handle.contact.add("pair", geom1="floor", geom2="ball_plate_geom")
         xml_handle.contact.add("pair", geom1="floor", geom2="plate_ball_geom")
 
