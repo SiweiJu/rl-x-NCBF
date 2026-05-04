@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXPERIMENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
+export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
+
+SEED="${SEED:-0}"
+NR_ENVS="${NR_ENVS:-1024}"
+
+cd "${EXPERIMENTS_DIR}"
+
+conda run --no-capture-output -n ncbf-mjx python experiment.py \
+    --algorithm.name="ncbf_ppo.flax_full_jit_booster" \
+    --algorithm.ncbf.use_safety_layer=False \
+    --algorithm.ncbf.H=25 \
+    --algorithm.ncbf.action_clipping=False \
+    --algorithm.ncbf_buffer.neg_buffer_size=1 \
+    --algorithm.ncbf.coef_decay_lambda=0.95 \
+    --algorithm.next_step_predictor.nr_minibatches=50 \
+    --algorithm.next_step_predictor.lr=1e-5 \
+    --algorithm.next_step_predictor.aux_loss_coef=1 \
+    --algorithm.next_step_predictor.pretrain_nr_steps=0 \
+    --algorithm.ncbf.pretrain.nr_steps=0 \
+    --environment.name="ncbf_mujoco.robot_locomotion.mjx_boosterball" \
+    --environment.seed="${SEED}" \
+    --environment.nr_envs="${NR_ENVS}" \
+    --environment.train_robot="booster_t1" \
+    --environment.ncbf_use_policy_observations=True \
+    --environment.episode_length_in_seconds=20 \
+    --environment.env_curriculum_level_success_episode_return=50 \
+    --environment.terrain.type="plane" \
+    --environment.ball_plate.enabled=True \
+    --environment.ball_plate.include_observations=True \
+    --runner.mode="train" \
+    --runner.track_console=False \
+    --runner.track_tb=True \
+    --runner.track_wandb=True \
+    --runner.save_model=True \
+    --runner.wandb_entity="catherineju-rwth-aachen-university" \
+    --runner.project_name="202603_ncbf_booster" \
+    --runner.exp_name="debug"
