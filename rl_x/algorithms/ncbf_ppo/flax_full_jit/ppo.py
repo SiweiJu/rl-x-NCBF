@@ -158,7 +158,7 @@ class PPO:
 
         self.policy_state = TrainState.create(
             apply_fn=self.policy.apply,
-            params=self.policy.init(policy_key, env_state.next_observation),
+            params=self.policy.init(policy_key, env_state.next_observation, dummy_latent),
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
                 optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
@@ -167,7 +167,7 @@ class PPO:
 
         self.critic_state = TrainState.create(
             apply_fn=self.critic.apply,
-            params=self.critic.init(critic_key, env_state.next_observation),
+            params=self.critic.init(critic_key, env_state.next_observation, dummy_latent),
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
                 optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
@@ -237,7 +237,7 @@ class PPO:
                 last_action = env_state.last_action
                 last_state = env_state.last_state
                 latent_z = encoder_state.apply_fn(encoder_state.params, history_stack)
-                action_mean, action_logstd = self.policy.apply(policy_state.params, observation)
+                action_mean, action_logstd = self.policy.apply(policy_state.params, observation, latent_z)
                 action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                 action_std = jnp.exp(action_logstd)
                 action = action_mean + action_std * jax.random.normal(subkey, shape=action_mean.shape)
@@ -252,7 +252,7 @@ class PPO:
                                                                                       params_stack)
                 # contraint_active = 0
                 # delta_u = 0
-                value = self.critic.apply(critic_state.params, observation).squeeze(-1)
+                value = self.critic.apply(critic_state.params, observation, latent_z).squeeze(-1)
 
                 env_action = processed_action
                 env_state = self.env.step(env_state, env_action)
@@ -929,7 +929,7 @@ class PPO:
                     # sample and update
 
                     # Calculating advantages and returns
-                    def calculate_gae_advantages(critic_state, next_states, rewards, values, terminations, dones):
+                    def calculate_gae_advantages(critic_state, encoder_state, next_states, history_stacks, rewards, values, terminations, dones):
                         terminations = terminations.astype(jnp.float32)
                         dones = dones.astype(jnp.float32)
 
@@ -938,7 +938,10 @@ class PPO:
                             advantage = delta[t] + self.gamma * self.gae_lambda * (1.0 - dones[t]) * prev_advantage
                             return (advantage,), advantage
 
-                        next_values = self.critic.apply(critic_state.params, next_states).squeeze(-1)
+                        next_history_stacks = jnp.roll(history_stacks, -1, axis=2)
+                        next_history_stacks = next_history_stacks.at[:, :, -1, :].set(next_states)
+                        next_latents = encoder_state.apply_fn(encoder_state.params, next_history_stacks)
+                        next_values = self.critic.apply(critic_state.params, next_states, next_latents).squeeze(-1)
                         delta = rewards + self.gamma * next_values * (1.0 - terminations) - values
                         init_advantages = delta[-1]
                         _, advantages = jax.lax.scan(compute_advantages, (init_advantages,), jnp.arange(self.nr_steps - 2, -1, -1))
@@ -946,7 +949,7 @@ class PPO:
                         returns = advantages + values
                         return advantages, returns
 
-                    advantages, returns = calculate_gae_advantages(critic_state, next_states, rewards, values, terminations, dones)
+                    advantages, returns = calculate_gae_advantages(critic_state, encoder_state, next_states, history_stacks, rewards, values, terminations, dones)
 
                     # Optimizing
                     def loss_fn(policy_params, critic_params, encoder_params, decoder_params, ncbf_params,
@@ -964,7 +967,7 @@ class PPO:
                         next_history_stack_b = next_history_stack_b.at[:, -1, :].set(next_state_b)
                         next_latent_b = self.encoder.apply(encoder_params, next_history_stack_b)
 
-                        action_mean, action_logstd = self.policy.apply(policy_params, state_b)
+                        action_mean, action_logstd = self.policy.apply(policy_params, state_b, latent_b)
                         action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                         action_std = jnp.exp(action_logstd)
                         new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
@@ -984,7 +987,7 @@ class PPO:
                         entropy_loss = jnp.mean(entropy)
 
                         # Critic loss
-                        new_value = self.critic.apply(critic_params, state_b)
+                        new_value = self.critic.apply(critic_params, state_b, latent_b)
                         critic_loss = 0.5 * jnp.mean((new_value.squeeze(-1) - return_b) ** 2)
 
                         # anticipation loss
@@ -1153,7 +1156,8 @@ class PPO:
                             buffer["history_stack"][replay_indices],
                         )
 
-                    initial_action_mean, initial_action_logstd = self.policy.apply(policy_state.params, batch_states)
+                    initial_policy_latent = encoder_state.apply_fn(encoder_state.params, batch_history_stack)
+                    initial_action_mean, initial_action_logstd = self.policy.apply(policy_state.params, batch_states, initial_policy_latent)
                     initial_action_logstd = jnp.clip(initial_action_logstd, -5.0, 2.0)
                     initial_action_std = jnp.exp(initial_action_logstd)
                     initial_new_log_probs = -0.5 * ((batch_actions - initial_action_mean) / initial_action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - initial_action_logstd
@@ -1327,10 +1331,10 @@ class PPO:
                 if self.evaluation_active:
                     def single_eval_rollout(single_eval_rollout_carry, _):
                         policy_state, ncbf_state, eval_env_state = single_eval_rollout_carry
-                        action_mean, _ = self.policy.apply(policy_state.params, eval_env_state.next_observation)
+                        latent_z = encoder_state.apply_fn(encoder_state.params, eval_env_state.history_stack)
+                        action_mean, _ = self.policy.apply(policy_state.params, eval_env_state.next_observation, latent_z)
                         action = action_mean
                         raw_processed_action = self.get_processed_action(action)
-                        latent_z = encoder_state.apply_fn(encoder_state.params, eval_env_state.history_stack)
                         params_stack = repeat_ncbf_params(ncbf_state)
                         processed_action, _, _ = self.batched_ncbf_safety_layer(
                             raw_processed_action,
@@ -1507,11 +1511,11 @@ class PPO:
         @jax.jit
         def rollout(env_state, key):
             # key, subkey = jax.random.split(key)
-            action_mean, action_logstd = self.policy.apply(self.policy_state.params, env_state.next_observation)
+            latent_z = self.encoder_state.apply_fn(self.encoder_state.params, env_state.history_stack)
+            action_mean, action_logstd = self.policy.apply(self.policy_state.params, env_state.next_observation, latent_z)
             # action_std = jnp.exp(action_logstd)
             action = action_mean # + action_std * jax.random.normal(subkey, shape=action_mean.shape)
             raw_processed_action = self.get_processed_action(action)
-            latent_z = self.encoder_state.apply_fn(self.encoder_state.params, env_state.history_stack)
             params_stack = get_ncbf_params_stack()
             processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
                 raw_processed_action,

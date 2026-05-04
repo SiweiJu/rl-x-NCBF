@@ -25,6 +25,8 @@ def get_config(algorithm_name):
     config.action_clipping_and_rescaling = False
     config.action_clip = 0.0
     config.hidden_layers = (512, 256, 128)
+    config.use_history_latent_for_policy = False
+    config.use_history_latent_for_value = False
     config.evaluation_and_save_frequency = 17301504  # -1 to disable
     config.evaluation_active = True
 

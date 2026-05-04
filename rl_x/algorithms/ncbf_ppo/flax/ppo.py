@@ -134,7 +134,7 @@ class PPO:
 
         self.policy_state = TrainState.create(
             apply_fn=self.policy.apply,
-            params=self.policy.init(policy_key, state),
+            params=self.policy.init(policy_key, state, dummy_latent),
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
                 optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
@@ -143,7 +143,7 @@ class PPO:
 
         self.critic_state = TrainState.create(
             apply_fn=self.critic.apply,
-            params=self.critic.init(critic_key, state),
+            params=self.critic.init(critic_key, state, dummy_latent),
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
                 optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
@@ -256,19 +256,19 @@ class PPO:
             return y, mask
 
         @jax.jit
-        def get_action_and_value(policy_state: TrainState, critic_state: TrainState, state: np.ndarray, key: jax.random.PRNGKey):
-            action_mean, action_logstd = self.policy.apply(policy_state.params, state)
+        def get_action_and_value(policy_state: TrainState, critic_state: TrainState, state: np.ndarray, history_latent: np.ndarray, key: jax.random.PRNGKey):
+            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent)
             action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
             action_std = jnp.exp(action_logstd)
             key, subkey = jax.random.split(key)
             action = action_mean + action_std * jax.random.normal(subkey, shape=action_mean.shape)
             log_prob = -0.5 * ((action - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
-            value = self.critic.apply(critic_state.params, state)
+            value = self.critic.apply(critic_state.params, state, history_latent)
             processed_action = self.get_processed_action(action)
             return processed_action, action, value.reshape(-1), log_prob.sum(1), key
 
         @jax.jit
-        def calculate_gae_advantages(critic_state: TrainState, next_states: np.ndarray, rewards: np.ndarray, terminations: np.ndarray, dones: np.ndarray, values: np.ndarray):
+        def calculate_gae_advantages(critic_state: TrainState, encoder_state: TrainState, next_states: np.ndarray, history_stacks: np.ndarray, rewards: np.ndarray, terminations: np.ndarray, dones: np.ndarray, values: np.ndarray):
             terminations = terminations.astype(jnp.float32)
             dones = dones.astype(jnp.float32)
 
@@ -277,7 +277,10 @@ class PPO:
                 advantage = delta[t] + self.gamma * self.gae_lambda * (1.0 - dones[t]) * prev_advantage
                 return (advantage,), advantage
 
-            next_values = self.critic.apply(critic_state.params, next_states).squeeze(-1)
+            next_history_stacks = jnp.roll(history_stacks, -1, axis=2)
+            next_history_stacks = next_history_stacks.at[:, :, -1, :].set(next_states)
+            next_latents = encoder_state.apply_fn(encoder_state.params, next_history_stacks)
+            next_values = self.critic.apply(critic_state.params, next_states, next_latents).squeeze(-1)
             delta = rewards + self.gamma * next_values * (1.0 - terminations) - values
             init_advantages = delta[-1]
             _, advantages = jax.lax.scan(compute_advantages, (init_advantages,), jnp.arange(self.nr_steps - 2, -1, -1))
@@ -287,12 +290,14 @@ class PPO:
         
 
         @jax.jit
-        def update(policy_state: TrainState, critic_state: TrainState, ncbf_state: TrainState,
+        def update(policy_state: TrainState, critic_state: TrainState, encoder_state: TrainState, ncbf_state: TrainState,
                    states: np.ndarray, actions: np.ndarray, advantages: np.ndarray, returns: np.ndarray, values: np.ndarray, log_probs: np.ndarray,
+                   history_stacks: np.ndarray,
                    key: jax.random.PRNGKey):
-            def loss_fn(policy_params, critic_params, ncbf_params, state_b, action_b, log_prob_b, return_b, advantage_b):
+            def loss_fn(policy_params, critic_params, ncbf_params, state_b, action_b, log_prob_b, return_b, advantage_b, history_stack_b):
+                history_latent_b = encoder_state.apply_fn(encoder_state.params, history_stack_b)
                 # Policy loss
-                action_mean, action_logstd = self.policy.apply(policy_params, state_b)
+                action_mean, action_logstd = self.policy.apply(policy_params, state_b, history_latent_b)
                 action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                 action_std = jnp.exp(action_logstd)
                 new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
@@ -311,7 +316,7 @@ class PPO:
                 entropy_loss = entropy.sum(1)
                 
                 # Critic loss
-                new_value = self.critic.apply(critic_params, state_b)
+                new_value = self.critic.apply(critic_params, state_b, history_latent_b)
                 critic_loss = 0.5 * (new_value - return_b) ** 2
 
                 # anticipation loss
@@ -339,8 +344,9 @@ class PPO:
             batch_advantages = advantages.reshape(-1)
             batch_returns = returns.reshape(-1)
             batch_log_probs = log_probs.reshape(-1)
+            batch_history_stacks = history_stacks.reshape((-1, self.env.nr_history_steps) + self.os_shape)
 
-            vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, 0, 0, 0, 0, 0), out_axes=0)
+            vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, 0, 0, 0, 0, 0, 0), out_axes=0)
             safe_mean = lambda x: jnp.mean(x) if x is not None else x
             mean_vmapped_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
             grad_loss_fn = jax.value_and_grad(mean_vmapped_loss_fn, argnums=(0, 1), has_aux=True)
@@ -365,7 +371,8 @@ class PPO:
                     batch_actions[minibatch_indices],
                     batch_log_probs[minibatch_indices],
                     batch_returns[minibatch_indices],
-                    minibatch_advantages
+                    minibatch_advantages,
+                    batch_history_stacks[minibatch_indices],
                 )
 
                 policy_state = policy_state.apply_gradients(grads=policy_gradients)
@@ -545,8 +552,8 @@ class PPO:
             return ncbf_state, mean_metrics, key
 
         @jax.jit
-        def get_deterministic_action(policy_state: TrainState, state: np.ndarray):
-            action_mean, action_logstd = self.policy.apply(policy_state.params, state)
+        def get_deterministic_action(policy_state: TrainState, state: np.ndarray, history_latent: np.ndarray):
+            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent)
             return self.get_processed_action(action_mean)
 
         def get_safety_layer_curriculum_coeff(step):
@@ -607,8 +614,8 @@ class PPO:
             pretrain_last_actions = np.zeros((self.nr_envs,) + self.as_shape)
 
             for step in range(self.ncbf_pretrain_steps):
-                raw_processed_action, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
                 latent_z = self.encoder.apply(self.encoder_state.params, pretrain_history_stacks)
+                raw_processed_action, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, latent_z, self.key)
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                 processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
                     raw_processed_action,
@@ -746,10 +753,10 @@ class PPO:
             step_info_collection = {}
             safety_layer_curriculum_coeffs = np.zeros(self.nr_steps, dtype=np.float32)
             for step in range(self.nr_steps):
-                _, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, self.key)
+                latent_z = self.encoder.apply(self.encoder_state.params, history_stacks)
+                _, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, latent_z, self.key)
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
 
-                latent_z = self.encoder.apply(self.encoder_state.params, history_stacks)
                 safety_layer_curriculum_coeff = get_safety_layer_curriculum_coeff(global_step)
                 safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
                     action,
@@ -804,7 +811,7 @@ class PPO:
             batch_mean_delta_u = jnp.mean(batch.delta_u)
 
             # Calculating advantages and returns
-            batch.advantages, batch.returns = calculate_gae_advantages(self.critic_state, batch.next_states, batch.rewards, batch.terminations, batch.dones, batch.values)
+            batch.advantages, batch.returns = calculate_gae_advantages(self.critic_state, self.encoder_state, batch.next_states, batch.history_stacks, batch.rewards, batch.terminations, batch.dones, batch.values)
 
             calc_adv_return_end_time = time.time()
             time_metrics["time/calc_adv_and_return_time"] = calc_adv_return_end_time - acting_end_time
@@ -846,8 +853,9 @@ class PPO:
 
             # Optimizing
             self.policy_state, self.critic_state, optimization_metrics, self.key = update(
-                self.policy_state, self.critic_state, self.ncbf_state[0],
+                self.policy_state, self.critic_state, self.encoder_state, self.ncbf_state[0],
                 batch.states, batch.actions, batch.advantages, batch.returns, batch.values, batch.log_probs,
+                batch.history_stacks,
                 self.key
             )
             optimization_metrics = {key: value.item() for key, value in optimization_metrics.items()}
@@ -870,9 +878,9 @@ class PPO:
                 eval_nr_episodes = 0
                 evaluation_metrics = {"eval/episode_return": [], "eval/episode_length": []}
                 while True:
-                    raw_processed_action = get_deterministic_action(self.policy_state, state)
-                    params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                     latent_z = self.encoder.apply(self.encoder_state.params, eval_history_stacks)
+                    raw_processed_action = get_deterministic_action(self.policy_state, state, latent_z)
+                    params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                     safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
                         raw_processed_action,
                         state,
@@ -1118,8 +1126,8 @@ class PPO:
         # return
 
         # @jax.jit
-        def get_action(policy_state: TrainState, state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray):
-            action_mean, action_logstd = self.policy.apply(policy_state.params, state)
+        def get_action(policy_state: TrainState, state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray, history_latent: np.ndarray):
+            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent)
             raw_processed_action = self.get_processed_action(action_mean)
 
             sampling_ratio = self.action_noise_sampling_ratio
@@ -1168,7 +1176,7 @@ class PPO:
             while not done:
                 latent_z = self.encoder.apply(self.encoder_state.params, history_stack[None, ...])
 
-                processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state, previous_state, last_action)
+                processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state, previous_state, last_action, latent_z)
                 # params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                 h_input = jnp.concatenate([state[:, self.env.envs[0].ncbf_observation_indices], processed_action, latent_z], axis=-1)
                 # prediction_mean, prediction_std, predictions = self.ncbf_state.apply_fn(self.ncbf_state.params, h_input)

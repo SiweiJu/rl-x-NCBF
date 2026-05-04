@@ -38,6 +38,6 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --runner.track_wandb=True \
     --runner.save_model=True \
     --runner.wandb_entity="catherineju-rwth-aachen-university" \
-    --runner.project_name="202603_ncbf_booster" \
+    --runner.project_name="202605_ncbf" \
     --runner.exp_name="locomotion" \
     --runner.run_name="${RUN_NAME}"
