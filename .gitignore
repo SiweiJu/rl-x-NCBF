@@ -14,8 +14,8 @@ experiments/*.sh
 !experiments/slurm_experiment.sh
 !experiments/start_experiment.sh
 !experiments/stop_experiment.sh
-!experiments/train_go2_locomotion.sh
-!experiments/train_g1_locomotion.sh
-!experiments/train_g1_ball.sh
-!experiments/train_booster_locomotion.sh
-!experiments/train_booster_ball.sh
+!experiments/ncbf_runners/train_go2_locomotion.sh
+!experiments/ncbf_runners/train_g1_locomotion.sh
+!experiments/ncbf_runners/train_g1_ball.sh
+!experiments/ncbf_runners/train_booster_locomotion.sh
+!experiments/ncbf_runners/train_booster_ball.sh

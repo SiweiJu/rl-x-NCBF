@@ -24,7 +24,7 @@ def get_config(algorithm_name):
     config.std_dev = 1.0
     config.action_clipping_and_rescaling = False
     config.action_clip = 0.0
-    config.hidden_layers = (256, 128)
+    config.hidden_layers = (512, 256, 128)
     config.evaluation_and_save_frequency = 17301504  # -1 to disable
     config.evaluation_active = True
 

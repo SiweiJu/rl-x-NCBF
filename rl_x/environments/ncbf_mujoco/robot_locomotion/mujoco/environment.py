@@ -167,6 +167,15 @@ class LocomotionEnv(gym.Env):
             self.ball_plate_ball_qposadr = self.initial_mj_model.joint("plate_ball_freejoint").qposadr[0]
             self.ball_plate_ball_qveladr = self.initial_mj_model.joint("plate_ball_freejoint").dofadr[0]
             self.ball_plate_plate_size = np.array(self.ball_plate_config["plate_size"], dtype=float)
+            self.ball_plate_plate_mass = float(self.ball_plate_config["plate_mass"])
+            self.ball_plate_plate_mass_range = np.array(
+                self.ball_plate_config.get("plate_mass_range", [self.ball_plate_plate_mass, self.ball_plate_plate_mass]),
+                dtype=float,
+            )
+            self.ball_plate_plate_size_scale_range = np.array(
+                self.ball_plate_config.get("plate_size_scale_range", [1.0, 1.0]),
+                dtype=float,
+            )
             self.ball_plate_ball_radius = float(self.ball_plate_config["ball_radius"])
             self.ball_plate_ball_mass = float(self.ball_plate_config["ball_mass"])
             self.ball_plate_ball_radius_range = np.array(
@@ -178,6 +187,56 @@ class LocomotionEnv(gym.Env):
                 dtype=float,
             )
             self.ball_plate_ball_start_offset = np.array(self.ball_plate_config["ball_start_offset"], dtype=float)
+            self.ball_plate_ball_start_offset_xy_range = np.array(
+                self.ball_plate_config.get("ball_start_offset_xy_range", [0.0, 0.0]),
+                dtype=float,
+            )
+            self.ball_plate_ball_initial_linear_velocity_xy_range = np.array(
+                self.ball_plate_config.get("ball_initial_linear_velocity_xy_range", [0.0, 0.0]),
+                dtype=float,
+            )
+            self.ball_plate_ball_initial_angular_velocity_range = np.array(
+                self.ball_plate_config.get("ball_initial_angular_velocity_range", [0.0, 0.0, 0.0]),
+                dtype=float,
+            )
+            self.ball_plate_ball_pair_ids = np.array(self._get_ball_plate_pair_ids(["plate_ball_geom"]), dtype=int)
+            self.ball_plate_support_pair_ids = np.array(self._get_ball_plate_pair_ids(self._get_ball_plate_support_contact_geom_names()), dtype=int)
+            self.ball_plate_robot_pair_ids = np.array(self._get_ball_plate_pair_ids(self._get_ball_plate_robot_contact_geom_names()), dtype=int)
+            self.ball_plate_all_pair_ids = np.array(sorted(set(np.concatenate([
+                self.ball_plate_ball_pair_ids,
+                self.ball_plate_support_pair_ids,
+                self.ball_plate_robot_pair_ids,
+            ]).tolist())), dtype=int)
+            self.ball_plate_nominal_pair_friction = np.array(self.initial_mj_model.pair_friction, dtype=float)
+            self.ball_plate_nominal_pair_solref = np.array(self.initial_mj_model.pair_solref, dtype=float)
+            self.ball_plate_nominal_plate_ball_friction = (
+                float(self.initial_mj_model.pair_friction[self.ball_plate_ball_pair_ids[0], 0])
+                if len(self.ball_plate_ball_pair_ids) > 0
+                else float(self.ball_plate_config.get("plate_ball_contact_friction", [4.0])[0])
+            )
+            self.ball_plate_nominal_support_friction = float(self.ball_plate_config.get("plate_support_contact_friction", [3.0])[0])
+            self.ball_plate_nominal_robot_friction = float(self.ball_plate_config.get("plate_arm_contact_friction", [1.5])[0])
+            self.ball_plate_nominal_contact_timeconst = (
+                float(self.initial_mj_model.pair_solref[self.ball_plate_all_pair_ids[0], 0])
+                if len(self.ball_plate_all_pair_ids) > 0
+                else float(self.ball_plate_config.get("plate_ball_contact_solref", [0.005])[0])
+            )
+            self.ball_plate_plate_ball_friction_tangential_range = np.array(
+                self.ball_plate_config.get("plate_ball_contact_friction_tangential_range", [self.ball_plate_nominal_plate_ball_friction] * 2),
+                dtype=float,
+            )
+            self.ball_plate_plate_support_friction_tangential_range = np.array(
+                self.ball_plate_config.get("plate_support_contact_friction_tangential_range", [3.0, 3.0]),
+                dtype=float,
+            )
+            self.ball_plate_plate_robot_friction_tangential_range = np.array(
+                self.ball_plate_config.get("plate_robot_contact_friction_tangential_range", [1.5, 1.5]),
+                dtype=float,
+            )
+            self.ball_plate_contact_timeconst_range = np.array(
+                self.ball_plate_config.get("plate_contact_timeconst_range", [0.005, 0.005]),
+                dtype=float,
+            )
             self.ball_plate_drop_margin = float(self.ball_plate_config["drop_margin"])
             self.ball_plate_drop_height = float(self.ball_plate_config["drop_height"])
             self.ball_plate_plate_support_clearance = float(self.ball_plate_config["plate_support_clearance"])
@@ -273,6 +332,12 @@ class LocomotionEnv(gym.Env):
             "max_command_velocity": np.minimum(self.robot_dimensions_mean * self.command_function.max_velocity_per_m_factor, self.command_function.clip_max_velocity),
             "ball_plate_ball_radius": self.ball_plate_ball_radius if self.use_ball_plate else 0.0,
             "ball_plate_ball_mass": self.ball_plate_ball_mass if self.use_ball_plate else 0.0,
+            "ball_plate_plate_size": self.ball_plate_plate_size if self.use_ball_plate else np.zeros(3),
+            "ball_plate_plate_mass": self.ball_plate_plate_mass if self.use_ball_plate else 0.0,
+            "ball_plate_plate_ball_friction_tangential": self.ball_plate_nominal_plate_ball_friction if self.use_ball_plate else 0.0,
+            "ball_plate_plate_support_friction_tangential": self.ball_plate_nominal_support_friction if self.use_ball_plate else 0.0,
+            "ball_plate_plate_robot_friction_tangential": self.ball_plate_nominal_robot_friction if self.use_ball_plate else 0.0,
+            "ball_plate_contact_timeconst": self.ball_plate_nominal_contact_timeconst if self.use_ball_plate else 0.0,
             "ball_plate_ball_dropped": False,
             "ball_plate_plate_dropped": False,
             "ball_plate_dropped": False,
@@ -451,6 +516,44 @@ class LocomotionEnv(gym.Env):
 
         self._append_ball_plate_to_home_key(xml_handle, plate_pos, plate_quat, initial_ball_pos)
         self._apply_ball_plate_initial_joint_positions_to_home_key(xml_handle)
+
+
+    def _get_ball_plate_support_contact_geom_names(self):
+        support_contact_geom_names = self.ball_plate_config.get("support_contact_geom_names")
+        if support_contact_geom_names is not None:
+            return list(support_contact_geom_names)
+
+        if self.ball_plate_config.get("add_support_fist_geoms", True):
+            return ["left_plate_support_fist", "right_plate_support_fist"]
+        return []
+
+
+    def _get_ball_plate_robot_contact_geom_names(self):
+        return [
+            "torso_plate_guard",
+            *self.ball_plate_config.get("torso_contact_geom_names", []),
+            "left_upper_arm_plate_guard",
+            "right_upper_arm_plate_guard",
+            "left_forearm_plate_guard",
+            "right_forearm_plate_guard",
+            *self.ball_plate_config.get("arm_contact_geom_names", []),
+        ]
+
+
+    def _get_ball_plate_pair_ids(self, other_geom_names):
+        other_geom_names = set(other_geom_names)
+        pair_ids = []
+        for pair_id in range(self.initial_mj_model.npair):
+            geom1_id = int(self.initial_mj_model.pair_geom1[pair_id])
+            geom2_id = int(self.initial_mj_model.pair_geom2[pair_id])
+            geom1_name = mujoco.mj_id2name(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, geom1_id)
+            geom2_name = mujoco.mj_id2name(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, geom2_id)
+            if (
+                (geom1_name == "ball_plate_geom" and geom2_name in other_geom_names)
+                or (geom2_name == "ball_plate_geom" and geom1_name in other_geom_names)
+            ):
+                pair_ids.append(pair_id)
+        return pair_ids
 
 
     def _append_ball_plate_to_home_key(self, xml_handle, initial_plate_pos, initial_plate_quat, initial_ball_pos):
@@ -839,9 +942,10 @@ class LocomotionEnv(gym.Env):
             observation[self.imu_linear_vel_obs_idx] = np.clip(observation[self.imu_linear_vel_obs_idx] / 10.0, -1.0, 1.0)
             observation[self.imu_angular_vel_obs_idx] = np.clip(observation[self.imu_angular_vel_obs_idx] / 50.0, -1.0, 1.0)
             if len(self.ball_plate_obs_idx) > 0:
-                observation[self.ball_plate_obs_idx[:3]] = np.clip(observation[self.ball_plate_obs_idx[:3]] / np.maximum(np.max(self.ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0)
+                ball_plate_plate_size = self.internal_state["ball_plate_plate_size"]
+                observation[self.ball_plate_obs_idx[:3]] = np.clip(observation[self.ball_plate_obs_idx[:3]] / np.maximum(np.max(ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0)
                 observation[self.ball_plate_obs_idx[3:6]] = np.clip(observation[self.ball_plate_obs_idx[3:6]] / 5.0, -10.0, 10.0)
-                observation[self.ball_plate_obs_idx[6:9]] = np.clip(observation[self.ball_plate_obs_idx[6:9]] / np.maximum(np.max(self.ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0)
+                observation[self.ball_plate_obs_idx[6:9]] = np.clip(observation[self.ball_plate_obs_idx[6:9]] / np.maximum(np.max(ball_plate_plate_size[:2]), 1e-6), -10.0, 10.0)
                 observation[self.ball_plate_obs_idx[9:]] = np.clip(observation[self.ball_plate_obs_idx[9:]] / 5.0, -10.0, 10.0)
             if len(self.policy_exteroception_obs_idx) > 0:
                 observation[self.policy_exteroception_obs_idx] = np.clip((observation[self.policy_exteroception_obs_idx] / (10.0 / 2)) - 1.0, -1.0, 1.0)
@@ -858,15 +962,19 @@ class LocomotionEnv(gym.Env):
         if not self.use_ball_plate:
             return
 
-        ball_radius, ball_mass = self._sample_ball_plate_size_mass()
-        self._apply_ball_plate_size_mass(self.internal_state["mj_model"], ball_radius, ball_mass)
+        ball_plate_params = self._sample_ball_plate_domain_randomization()
+        ball_radius = ball_plate_params["ball_radius"]
+        ball_mass = ball_plate_params["ball_mass"]
+        plate_size = ball_plate_params["plate_size"]
+        plate_mass = ball_plate_params["plate_mass"]
+        self._apply_ball_plate_domain_randomization(self.internal_state["mj_model"], ball_plate_params)
 
         data = mujoco.MjData(self.internal_state["mj_model"])
         data.qpos = qpos.copy()
         data.qvel = qvel.copy()
         mujoco.mj_forward(self.internal_state["mj_model"], data)
 
-        plate_pos, plate_quat = self._get_ball_plate_supported_pose(data)
+        plate_pos, plate_quat = self._get_ball_plate_supported_pose(data, plate_size)
         qpos[self.ball_plate_qposadr:self.ball_plate_qposadr + 3] = plate_pos
         qpos[self.ball_plate_qposadr + 3:self.ball_plate_qposadr + 7] = plate_quat
         qvel[self.ball_plate_qveladr:self.ball_plate_qveladr + 6] = 0.0
@@ -876,16 +984,23 @@ class LocomotionEnv(gym.Env):
         mujoco.mj_forward(self.internal_state["mj_model"], data)
 
         plate_xmat = data.site_xmat[self.ball_plate_site_id].reshape(3, 3)
-        ball_start_offset = self.ball_plate_ball_start_offset.copy()
+        ball_start_offset = ball_plate_params["ball_start_offset"].copy()
         ball_start_offset[2] = ball_radius
         ball_pos = data.site_xpos[self.ball_plate_site_id] + plate_xmat @ ball_start_offset
         qpos[self.ball_plate_ball_qposadr:self.ball_plate_ball_qposadr + 3] = ball_pos
         qpos[self.ball_plate_ball_qposadr + 3:self.ball_plate_ball_qposadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
-        qvel[self.ball_plate_ball_qveladr:self.ball_plate_ball_qveladr + 6] = 0.0
-        self.ball_plate_ball_radius = ball_radius
-        self.ball_plate_ball_mass = ball_mass
+        ball_qvel = np.zeros(6)
+        ball_qvel[:2] = ball_plate_params["ball_initial_linear_velocity_xy"]
+        ball_qvel[3:] = ball_plate_params["ball_initial_angular_velocity"]
+        qvel[self.ball_plate_ball_qveladr:self.ball_plate_ball_qveladr + 6] = ball_qvel
         self.internal_state["ball_plate_ball_radius"] = ball_radius
         self.internal_state["ball_plate_ball_mass"] = ball_mass
+        self.internal_state["ball_plate_plate_size"] = plate_size
+        self.internal_state["ball_plate_plate_mass"] = plate_mass
+        self.internal_state["ball_plate_plate_ball_friction_tangential"] = ball_plate_params["plate_ball_friction_tangential"]
+        self.internal_state["ball_plate_plate_support_friction_tangential"] = ball_plate_params["plate_support_friction_tangential"]
+        self.internal_state["ball_plate_plate_robot_friction_tangential"] = ball_plate_params["plate_robot_friction_tangential"]
+        self.internal_state["ball_plate_contact_timeconst"] = ball_plate_params["contact_timeconst"]
         self.internal_state["ball_plate_ball_dropped"] = False
         self.internal_state["ball_plate_plate_dropped"] = False
         self.internal_state["ball_plate_dropped"] = False
@@ -899,7 +1014,9 @@ class LocomotionEnv(gym.Env):
         return left_support, right_support
 
 
-    def _get_ball_plate_supported_pose(self, data):
+    def _get_ball_plate_supported_pose(self, data, plate_size=None):
+        if plate_size is None:
+            plate_size = self.ball_plate_plate_size
         left_support, right_support = self._get_ball_plate_support_points(data)
         support_center = 0.5 * (left_support + right_support)
         plate_pos = support_center.copy()
@@ -907,26 +1024,144 @@ class LocomotionEnv(gym.Env):
         plate_pos[2] = (
             support_height
             + float(self.ball_plate_config["fist_radius"])
-            + self.ball_plate_plate_size[2]
+            + plate_size[2]
             + self.ball_plate_plate_support_clearance
         )
         return plate_pos, np.array(self.ball_plate_config["plate_home_quat"], dtype=float)
 
 
-    def _sample_ball_plate_size_mass(self):
-        if not self.ball_plate_config.get("randomize_ball_size_mass", True):
-            return float(self.ball_plate_config["ball_radius"]), float(self.ball_plate_config["ball_mass"])
-
-        ball_radius = self.np_rng.uniform(self.ball_plate_ball_radius_range[0], self.ball_plate_ball_radius_range[1])
-        ball_mass = self.np_rng.uniform(self.ball_plate_ball_mass_range[0], self.ball_plate_ball_mass_range[1])
-        return float(ball_radius), float(ball_mass)
+    def _sample_curriculum_scalar(self, nominal, value_range, curriculum_coeff, randomize):
+        if not randomize:
+            return float(nominal)
+        sampled = self.np_rng.uniform(value_range[0], value_range[1])
+        return float(nominal + curriculum_coeff * (sampled - nominal))
 
 
-    def _apply_ball_plate_size_mass(self, model, ball_radius, ball_mass):
+    def _sample_ball_plate_domain_randomization(self):
+        curriculum_coeff = self.internal_state["env_curriculum_coeff"]
+        if not self.ball_plate_config.get("randomize_ball_plate_domain", True):
+            curriculum_coeff = 0.0
+
+        ball_radius = self._sample_curriculum_scalar(
+            self.ball_plate_ball_radius,
+            self.ball_plate_ball_radius_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_ball_size_mass", True),
+        )
+        ball_mass = self._sample_curriculum_scalar(
+            self.ball_plate_ball_mass,
+            self.ball_plate_ball_mass_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_ball_size_mass", True),
+        )
+        plate_mass = self._sample_curriculum_scalar(
+            self.ball_plate_plate_mass,
+            self.ball_plate_plate_mass_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_plate_mass", True),
+        )
+        plate_size_scale = self._sample_curriculum_scalar(
+            1.0,
+            self.ball_plate_plate_size_scale_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_plate_size", True),
+        )
+        plate_size = self.ball_plate_plate_size.copy()
+        plate_size[:2] *= plate_size_scale
+
+        if self.ball_plate_config.get("randomize_ball_initial_state", True):
+            ball_start_offset_xy = curriculum_coeff * self.np_rng.uniform(
+                -self.ball_plate_ball_start_offset_xy_range,
+                self.ball_plate_ball_start_offset_xy_range,
+            )
+            ball_initial_linear_velocity_xy = curriculum_coeff * self.np_rng.uniform(
+                -self.ball_plate_ball_initial_linear_velocity_xy_range,
+                self.ball_plate_ball_initial_linear_velocity_xy_range,
+            )
+            ball_initial_angular_velocity = curriculum_coeff * self.np_rng.uniform(
+                -self.ball_plate_ball_initial_angular_velocity_range,
+                self.ball_plate_ball_initial_angular_velocity_range,
+            )
+        else:
+            ball_start_offset_xy = np.zeros(2)
+            ball_initial_linear_velocity_xy = np.zeros(2)
+            ball_initial_angular_velocity = np.zeros(3)
+        ball_start_offset = self.ball_plate_ball_start_offset.copy()
+        ball_start_offset[:2] += ball_start_offset_xy
+
+        plate_ball_friction_tangential = self._sample_curriculum_scalar(
+            self.ball_plate_nominal_plate_ball_friction,
+            self.ball_plate_plate_ball_friction_tangential_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_plate_ball_friction", True),
+        )
+        plate_support_friction_tangential = self._sample_curriculum_scalar(
+            self.ball_plate_nominal_support_friction,
+            self.ball_plate_plate_support_friction_tangential_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_plate_support_friction", True),
+        )
+        plate_robot_friction_tangential = self._sample_curriculum_scalar(
+            self.ball_plate_nominal_robot_friction,
+            self.ball_plate_plate_robot_friction_tangential_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_plate_robot_friction", True),
+        )
+        contact_timeconst = self._sample_curriculum_scalar(
+            self.ball_plate_nominal_contact_timeconst,
+            self.ball_plate_contact_timeconst_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_plate_contact_stiffness", True),
+        )
+
+        return {
+            "ball_radius": ball_radius,
+            "ball_mass": ball_mass,
+            "plate_size": plate_size,
+            "plate_mass": plate_mass,
+            "ball_start_offset": ball_start_offset,
+            "ball_initial_linear_velocity_xy": ball_initial_linear_velocity_xy,
+            "ball_initial_angular_velocity": ball_initial_angular_velocity,
+            "plate_ball_friction_tangential": plate_ball_friction_tangential,
+            "plate_support_friction_tangential": plate_support_friction_tangential,
+            "plate_robot_friction_tangential": plate_robot_friction_tangential,
+            "contact_timeconst": contact_timeconst,
+        }
+
+
+    def _set_pair_tangential_friction(self, model, pair_ids, value):
+        if len(pair_ids) == 0:
+            return
+        model.pair_friction[pair_ids, 0] = value
+        model.pair_friction[pair_ids, 1] = value
+
+
+    def _apply_ball_plate_domain_randomization(self, model, params):
+        ball_radius = params["ball_radius"]
+        ball_mass = params["ball_mass"]
+        plate_size = params["plate_size"]
+        plate_mass = params["plate_mass"]
+
         model.geom_size[self.ball_plate_ball_geom_id, 0] = ball_radius
+        model.geom_size[self.ball_plate_geom_id] = plate_size
         model.geom_rbound[self.ball_plate_ball_geom_id] = ball_radius
+        model.geom_rbound[self.ball_plate_geom_id] = np.linalg.norm(plate_size)
+        model.site_pos[self.ball_plate_site_id, 2] = plate_size[2]
+
         model.body_mass[self.ball_plate_ball_body_id] = ball_mass
+        model.body_mass[self.ball_plate_body_id] = plate_mass
         model.body_inertia[self.ball_plate_ball_body_id] = np.full(3, 0.4 * ball_mass * ball_radius ** 2)
+        model.body_inertia[self.ball_plate_body_id] = (plate_mass / 3.0) * np.array([
+            plate_size[1] ** 2 + plate_size[2] ** 2,
+            plate_size[0] ** 2 + plate_size[2] ** 2,
+            plate_size[0] ** 2 + plate_size[1] ** 2,
+        ])
+
+        self._set_pair_tangential_friction(model, self.ball_plate_ball_pair_ids, params["plate_ball_friction_tangential"])
+        self._set_pair_tangential_friction(model, self.ball_plate_support_pair_ids, params["plate_support_friction_tangential"])
+        self._set_pair_tangential_friction(model, self.ball_plate_robot_pair_ids, params["plate_robot_friction_tangential"])
+        if len(self.ball_plate_all_pair_ids) > 0:
+            model.pair_solref[self.ball_plate_all_pair_ids, 0] = params["contact_timeconst"]
 
 
     def get_ball_plate_metrics(self):
@@ -956,8 +1191,9 @@ class LocomotionEnv(gym.Env):
         plate_velocity = data.qvel[self.ball_plate_qveladr:self.ball_plate_qveladr + 3]
         plate_up = plate_xmat[:, 2]
 
-        outside_x = np.abs(relative_position[0]) > (self.ball_plate_plate_size[0] + self.ball_plate_drop_margin)
-        outside_y = np.abs(relative_position[1]) > (self.ball_plate_plate_size[1] + self.ball_plate_drop_margin)
+        plate_size = self.internal_state["ball_plate_plate_size"]
+        outside_x = np.abs(relative_position[0]) > (plate_size[0] + self.ball_plate_drop_margin)
+        outside_y = np.abs(relative_position[1]) > (plate_size[1] + self.ball_plate_drop_margin)
         below_plate = relative_position[2] < -self.ball_plate_drop_height
         ball_radius = self.internal_state.get("ball_plate_ball_radius", self.ball_plate_ball_radius)
         near_plate_height = relative_position[2] <= (ball_radius * 3.0)
@@ -1025,11 +1261,16 @@ class LocomotionEnv(gym.Env):
             self.joint_dropout_function.sample()
             self.reward_function.handle_model_change()
             if self.use_ball_plate:
-                self._apply_ball_plate_size_mass(
-                    self.internal_state["mj_model"],
-                    self.internal_state["ball_plate_ball_radius"],
-                    self.internal_state["ball_plate_ball_mass"],
-                )
+                self._apply_ball_plate_domain_randomization(self.internal_state["mj_model"], {
+                    "ball_radius": self.internal_state["ball_plate_ball_radius"],
+                    "ball_mass": self.internal_state["ball_plate_ball_mass"],
+                    "plate_size": self.internal_state["ball_plate_plate_size"],
+                    "plate_mass": self.internal_state["ball_plate_plate_mass"],
+                    "plate_ball_friction_tangential": self.internal_state["ball_plate_plate_ball_friction_tangential"],
+                    "plate_support_friction_tangential": self.internal_state["ball_plate_plate_support_friction_tangential"],
+                    "plate_robot_friction_tangential": self.internal_state["ball_plate_plate_robot_friction_tangential"],
+                    "contact_timeconst": self.internal_state["ball_plate_contact_timeconst"],
+                })
         
         if should_randomize_domain_perturbation:
             self.domain_randomization_perturbation_function.sample()
