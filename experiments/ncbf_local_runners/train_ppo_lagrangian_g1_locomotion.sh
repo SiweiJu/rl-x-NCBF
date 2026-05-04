@@ -37,7 +37,7 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --environment.reward.type="defaultG1" \
     --environment.ncbf_use_policy_observations=True \
     --environment.episode_length_in_seconds=20 \
-    --environment.env_curriculum_level_success_episode_return=50 \
+    --environment.env_curriculum_level_success_episode_return=30 \
     --environment.terrain.type="plane" \
     --runner.mode="train" \
     --runner.track_console=False \

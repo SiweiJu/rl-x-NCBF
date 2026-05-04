@@ -587,17 +587,14 @@ class PPO:
                 }
                 return buffer
 
-            # # initialize two ncbf replay buffers
-            ncbf_neg_buffer = _init_buffer(self.ncbf_neg_buffer_size)
-
-            ncbf_replay_buffer = (None, ncbf_neg_buffer)
+            ncbf_replay_buffer = _init_buffer(self.ncbf_neg_buffer_size)
 
             def multi_learning_and_eval_save_iteration(multi_learning_and_eval_save_iteration_carry, multi_learning_iteration_step):
                 policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = multi_learning_and_eval_save_iteration_carry
 
                 def learning_iteration(learning_iteration_carry, learning_iteration_step):
                     policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
-                    ncbf_pos_buffer, ncbf_neg_buffer = ncbf_replay_buffer
+                    ncbf_neg_buffer = ncbf_replay_buffer
                     current_learning_update = (multi_learning_iteration_step * self.nr_updates_per_multi_learning_iteration) + learning_iteration_step
                     curriculum_denominator = jnp.maximum(jnp.asarray(self.nr_updates - 1, dtype=jnp.float32), 1.0)
                     safety_layer_curriculum_coeff = jnp.clip(
@@ -1167,7 +1164,7 @@ class PPO:
 
                     jax.debug.callback(callback, (combined_metrics, parallel_seed_id))
 
-                    ncbf_replay_buffer = (ncbf_pos_buffer, ncbf_neg_buffer)
+                    ncbf_replay_buffer = ncbf_neg_buffer
                     return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key), None
 
                 key, subkey = jax.random.split(key)

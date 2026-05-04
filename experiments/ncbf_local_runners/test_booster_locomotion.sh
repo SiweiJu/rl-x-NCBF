@@ -60,6 +60,7 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.command.type="booster" \
     --environment.add_goal_arrow=True \
     --environment.episode_length_in_seconds="${EPISODE_SECONDS}" \
+    --environment.env_curriculum_level_success_episode_return=30 \
     --environment.ncbf_use_policy_observations=True \
     --environment.train_robot="booster_t1" \
     --runner.mode="test" \
