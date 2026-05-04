@@ -69,10 +69,8 @@ class PPO:
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
         self.nr_minibatches = self.batch_size // self.minibatch_size
 
-        self.next_step_predictor_pretrain_steps = config.algorithm.next_step_predictor.pretrain_nr_steps * self.nr_steps
         self.next_step_predictor_lr = config.algorithm.next_step_predictor.lr
         self.next_step_predictor_output_indices = env.next_state_indices
-        self.next_step_predictor_pretrain_nr_minibatches = config.algorithm.next_step_predictor.pretrain_nr_minibatches
         self.next_step_predictor_nr_minibatches = config.algorithm.next_step_predictor.nr_minibatches
         self.next_step_predictor_minibatch_size = config.algorithm.minibatch_size
 
@@ -92,9 +90,7 @@ class PPO:
         self.ncbf_min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
         self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
 
-        self.ncbf_buffer_size = config.algorithm.ncbf_buffer.buffer_size
-        self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps
-        self.ncbf_pretrain_nr_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
+        self.ncbf_neg_buffer_size = config.algorithm.ncbf_buffer.neg_buffer_size * self.nr_steps * self.nr_envs
 
         self.action_noise_sampling_ratio = config.algorithm.action_noise_sampling_ratio
         self.rollout_save_name = config.algorithm.rollout_save_name
@@ -116,7 +112,7 @@ class PPO:
         self.critic = get_critic(config, env)
         self.encoder = get_history_encoder(self.config, self.env)
         self.decoder = get_decoder(self.config, self.env)
-        self.replay_buffer = ReplayBuffer(capacity=config.algorithm.ncbf_buffer.buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=ncbf_key)
+        self.replay_buffer = ReplayBuffer(capacity=self.ncbf_neg_buffer_size, nr_envs=self.nr_envs, os_shape=self.os_shape, as_shape=self.as_shape, rng=ncbf_key)
 
         self.policy.apply = jax.jit(self.policy.apply)
         self.critic.apply = jax.jit(self.critic.apply)
@@ -584,154 +580,6 @@ class PPO:
 
         saving_return_buffer = deque(maxlen=100 * self.nr_envs)
 
-        # pre-sampling and pretrain ncbf
-        state, info = self.env.reset()
-        if self.ncbf_pretrain_steps > 0:
-            # initialize a temporary buffer to collect ncbf pretrian data
-            ncbf_batch = Batch(
-                states=np.zeros((self.ncbf_pretrain_steps, self.nr_envs) + self.os_shape),
-                next_states=np.zeros((self.ncbf_pretrain_steps, self.nr_envs) + self.os_shape),
-                actions=np.zeros((self.ncbf_pretrain_steps, self.nr_envs) + self.as_shape),
-                rewards=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
-                values=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
-                terminations=np.zeros((self.ncbf_pretrain_steps, self.nr_envs), dtype=bool),
-                dones=np.zeros((self.ncbf_pretrain_steps, self.nr_envs), dtype=bool),
-                log_probs=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
-                advantages=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
-                returns=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
-                masks=np.zeros((self.ncbf_pretrain_steps, self.nr_envs), dtype=bool),
-                y_targets=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
-                constraint_violated=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
-                delta_u=np.zeros((self.ncbf_pretrain_steps, self.nr_envs)),
-                history_stacks=np.zeros((self.ncbf_pretrain_steps, self.nr_envs, self.env.nr_history_steps) + self.os_shape)
-            )
-
-            # Initialize history stacks for pretraining
-            pretrain_history_stacks = np.tile(state[:, None, :], (1, self.env.nr_history_steps, 1))
-            if "history_stack" in info:
-                pretrain_history_stacks = np.asarray(info["history_stack"])
-            pretrain_last_states = state.copy()
-            pretrain_last_actions = np.zeros((self.nr_envs,) + self.as_shape)
-
-            for step in range(self.ncbf_pretrain_steps):
-                latent_z = self.encoder.apply(self.encoder_state.params, pretrain_history_stacks)
-                raw_processed_action, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, latent_z, self.key)
-                params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
-                processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
-                    raw_processed_action,
-                    state,
-                    pretrain_last_actions,
-                    pretrain_last_states,
-                    latent_z,
-                    np.float32(0.0),
-                    params_stack,
-                )
-                processed_action = jax.device_get(processed_action)
-                next_state, reward, terminated, truncated, info = self.env.step(processed_action)
-                done = terminated | truncated
-                actual_next_state = next_state.copy()
-                for i, single_done in enumerate(done):
-                    if single_done:
-                        actual_next_state[i] = np.array(self.env.get_final_observation_at_index(info, i))
-                        saving_return_buffer.append(self.env.get_final_info_value_at_index(info, "episode_return", i))
-
-                ncbf_batch.states[step] = state
-                ncbf_batch.next_states[step] = actual_next_state
-                ncbf_batch.actions[step] = processed_action
-                ncbf_batch.rewards[step] = reward
-                ncbf_batch.values[step] = value
-                ncbf_batch.history_stacks[step] = pretrain_history_stacks
-                
-                # Update history stacks for next step (sliding window with new observation)
-                next_pretrain_history_stacks = np.roll(pretrain_history_stacks, shift=-1, axis=1)
-                next_pretrain_history_stacks[:, -1] = next_state
-                reset_history_stacks = np.tile(next_state[:, None, :], (1, self.env.nr_history_steps, 1))
-                pretrain_history_stacks = np.where(done[:, None, None], reset_history_stacks, next_pretrain_history_stacks)
-                pretrain_last_states = np.where(done[:, None], next_state, state)
-                pretrain_last_actions = np.where(done[:, None], np.zeros_like(pretrain_last_actions), processed_action)
-                ncbf_batch.terminations[step] = terminated
-                ncbf_batch.dones[step] = done
-                ncbf_batch.log_probs[step] = log_prob
-                state = next_state
-
-            # calculate y labels and masks
-            y_bool, masks = window_any_done_next_H(ncbf_batch.dones, ncbf_batch.terminations, self.ncbf_H)
-            y = y_bool.astype(jnp.float32)
-            ncbf_batch.masks = masks
-            ncbf_batch.y_targets = y
-
-            # add batch to buffer
-            self.replay_buffer.add_batch(
-                states=ncbf_batch.states,
-                next_states=ncbf_batch.next_states,
-                actions=ncbf_batch.actions,
-                rewards=ncbf_batch.rewards,
-                terminations=ncbf_batch.terminations,
-                masks=ncbf_batch.masks,
-                y_targets=ncbf_batch.y_targets,
-            )
-            # pretrain ncbf
-            keys = jax.random.split(self.key, 5 + 1)
-            self.key = keys[0]
-
-            self.ncbf_state[0], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[0],
-                                                                 self.replay_buffer.states,
-                                                                 self.replay_buffer.next_states,
-                                                                 self.replay_buffer.actions,
-                                                                 self.replay_buffer.y_targets,
-                                                                 self.replay_buffer.masks,
-                                                                 keys[1],
-                                                                 self.ncbf_pretrain_nr_minibatches)
-
-            self.ncbf_state[1], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[1],
-                                                                 self.replay_buffer.states,
-                                                                 self.replay_buffer.next_states,
-                                                                 self.replay_buffer.actions,
-                                                                 self.replay_buffer.y_targets,
-                                                                 self.replay_buffer.masks,
-                                                                 keys[2],
-                                                                 self.ncbf_pretrain_nr_minibatches)
-
-            self.ncbf_state[2], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[2],
-                                                                 self.replay_buffer.states,
-                                                                 self.replay_buffer.next_states,
-                                                                 self.replay_buffer.actions,
-                                                                 self.replay_buffer.y_targets,
-                                                                 self.replay_buffer.masks,
-                                                                 keys[2],
-                                                                 self.ncbf_pretrain_nr_minibatches)
-
-            self.ncbf_state[3], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[3],
-                                                                 self.replay_buffer.states,
-                                                                 self.replay_buffer.next_states,
-                                                                 self.replay_buffer.actions,
-                                                                 self.replay_buffer.y_targets,
-                                                                 self.replay_buffer.masks,
-                                                                 keys[3],
-                                                                 self.ncbf_pretrain_nr_minibatches)
-
-            self.ncbf_state[4], ncbf_metrics, self.key = train_ncbf(self.ncbf_state[4],
-                                                                 self.replay_buffer.states,
-                                                                 self.replay_buffer.next_states,
-                                                                 self.replay_buffer.actions,
-                                                                 self.replay_buffer.y_targets,
-                                                                 self.replay_buffer.masks,
-                                                                 keys[4],
-                                                                 self.ncbf_pretrain_nr_minibatches)
-
-            # get scalar mean from ncbf_metrics
-            for key, value in ncbf_metrics.items():
-                ncbf_metrics[key] = value.item()
-
-            mean_y = jnp.mean(ncbf_batch.y_targets)
-            ncbf_metrics['ncbf/mean_y'] = mean_y.item()
-
-            # log ncbf pretrain metrics
-            for key, value in ncbf_metrics.items():
-                self.log(key, value, 0)
-
-            self.start_logging_ncbf_pretrain(self.ncbf_pretrain_steps)
-
         state, info = self.env.reset()
         global_step = 0
         nr_updates = 0
@@ -973,9 +821,6 @@ class PPO:
             rlx_logger.info("┌" + "─" * 31 + "┬" + "─" * 16 + "┐", flush=False)
         else:
             rlx_logger.info(f"Step: {step}")
-
-    def start_logging_ncbf_pretrain(self, steps):
-        rlx_logger.info(f"pretrained NCBF for {steps} steps")
 
     def end_logging(self):
         if self.track_console:

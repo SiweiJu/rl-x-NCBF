@@ -70,10 +70,8 @@ class PPO:
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
         self.nr_minibatches = self.batch_size // self.minibatch_size
 
-        self.next_step_predictor_pretrain_steps = config.algorithm.next_step_predictor.pretrain_nr_steps * self.nr_steps
         self.next_step_predictor_lr = config.algorithm.next_step_predictor.lr
         self.next_step_predictor_output_indices = env.next_state_indices
-        self.next_step_predictor_pretrain_nr_minibatches = config.algorithm.next_step_predictor.pretrain_nr_minibatches
         self.next_step_predictor_nr_minibatches = config.algorithm.next_step_predictor.nr_minibatches
         self.next_step_predictor_minibatch_size = config.algorithm.minibatch_size
 
@@ -93,24 +91,16 @@ class PPO:
         self.ncbf_min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
         self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
-        self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
 
-        self.ncbf_pos_buffer_size = config.algorithm.ncbf_buffer.pos_buffer_size * self.nr_steps * self.nr_envs
         self.ncbf_neg_buffer_size = config.algorithm.ncbf_buffer.neg_buffer_size * self.nr_steps * self.nr_envs
         self.ncbf_neg_sampling_ratio = config.algorithm.ncbf_buffer.neg_sampling_ratio
         self.ncbf_replay_neg_minibatch_size = int(self.minibatch_size * self.ncbf_neg_sampling_ratio)
 
-        self.ncbf_pretrain_steps = config.algorithm.ncbf.pretrain.nr_steps * self.nr_steps
         self.ncbf_observation_indices = env.ncbf_observation_indices
 
-        self.nr_pretrain_steps = max(self.next_step_predictor_pretrain_steps, self.ncbf_pretrain_steps)
-
-        rlx_logger.info(f"NCBF pretrain steps:{self.ncbf_pretrain_steps * self.nr_envs}")
-        rlx_logger.info(f"INFO - NCBF pos buffer size:{self.ncbf_pos_buffer_size}")
         rlx_logger.info(f"INFO - NCBF neg buffer size:{self.ncbf_neg_buffer_size}")
 
-        self.ncbf_pretrain_nr_minibatches = config.algorithm.ncbf.pretrain.nr_minibatches
 
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
         if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
@@ -227,7 +217,7 @@ class PPO:
                     ncbf_state.params,
                 )
 
-            # Single step rollout, used for training and ncbf pretraining, therefore defined at first
+            # Single step rollout, shared by policy and NCBF training.
             def single_rollout(single_rollout_carry, _):
                 policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff = single_rollout_carry
 
@@ -519,148 +509,6 @@ class PPO:
                 )
                 return total, metrics
 
-            grad_ncbf_loss_fn = jax.value_and_grad(ncbf_loss_fn, argnums=0, has_aux=True)
-
-            # @partial(jax.jit, static_argnums=(4,))
-            # def train_ncbf(ncbf_state: TrainState, pos_buffer: dict, neg_buffer: dict,
-            #                key: jax.random.PRNGKey, nr_minibatches: int):
-            #     """
-            #     ncbf_state: TrainState
-            #     states: (T, E, D)
-            #     next_states: (T, E, D)
-            #     dones: (T, E)
-            #     terminates: (T, E)
-            #     """
-            #     def do_train(carry):
-            #         ncbf_state, key = carry
-            #
-            #         # ---------- one minibatch step ----------
-            #         @jax.jit
-            #         def ncbf_minibatch_update(carry, _):
-            #             ncbf_state, key = carry
-            #
-            #             key, replay_buffer_key  = jax.random.split(key, 2)
-            #
-            #             @jax.jit
-            #             def sample_and_merge(pos_buffer, neg_buffer, key):
-            #                 batch_size = self.ncbf_minibatch_size
-            #                 nr_neg_samples = int(batch_size * self.ncbf_neg_sampling_ratio)
-            #                 nr_pos_samples = batch_size - nr_neg_samples
-            #
-            #                 key, subkey1, subkey2 = jax.random.split(key, 3)
-            #                 pos_indices = jax.random.randint(subkey1, (nr_pos_samples,), 0, pos_buffer["size"])
-            #                 neg_indices = jax.random.randint(subkey2, (nr_neg_samples,), 0, neg_buffer["size"])
-            #
-            #                 states_pos = pos_buffer["states"][pos_indices]
-            #                 next_states_pos = pos_buffer["next_states"][pos_indices]
-            #                 actions_pos = pos_buffer["actions"][pos_indices]
-            #                 y_target_pos = pos_buffer["y_target"][pos_indices]
-            #                 masks_pos = pos_buffer["masks"][pos_indices]
-            #                 indices_to_term_pos = pos_buffer["indices_to_term"][pos_indices]
-            #                 last_state_pos = pos_buffer["last_state"][pos_indices]
-            #                 last_action_pos = pos_buffer["last_action"][pos_indices]
-            #                 history_stack_pos = pos_buffer["history_stack"][pos_indices]
-            #
-            #                 states_neg = neg_buffer["states"][neg_indices]
-            #                 next_states_neg = neg_buffer["next_states"][neg_indices]
-            #                 actions_neg = neg_buffer["actions"][neg_indices]
-            #                 y_target_neg = neg_buffer["y_target"][neg_indices]
-            #                 masks_neg = neg_buffer["masks"][neg_indices]
-            #                 indices_to_term_neg = neg_buffer["indices_to_term"][neg_indices]
-            #                 last_state_neg = neg_buffer["last_state"][neg_indices]
-            #                 last_action_neg = neg_buffer["last_action"][neg_indices]
-            #                 history_stack_neg = neg_buffer["history_stack"][neg_indices]
-            #
-            #                 states = jnp.concatenate([states_pos, states_neg], axis=0)
-            #                 next_states = jnp.concatenate([next_states_pos, next_states_neg], axis=0)
-            #                 actions = jnp.concatenate([actions_pos, actions_neg], axis=0)
-            #                 y_target = jnp.concatenate([y_target_pos, y_target_neg], axis=0)
-            #                 masks = jnp.concatenate([masks_pos, masks_neg], axis=0)
-            #                 indices_to_term = jnp.concatenate([indices_to_term_pos, indices_to_term_neg], axis=0)
-            #                 last_states = jnp.concatenate([last_state_pos, last_state_neg], axis=0)
-            #                 last_actions = jnp.concatenate([last_action_pos, last_action_neg], axis=0)
-            #                 history_stacks = jnp.concatenate([history_stack_pos, history_stack_neg], axis=0)
-            #
-            #                 # shuffle
-            #                 perm_key, _ = jax.random.split(key)
-            #                 perm = jax.random.permutation(perm_key, states.shape[0])
-            #                 states = states[perm]
-            #                 next_states = next_states[perm]
-            #                 y_target = y_target[perm]
-            #                 masks = masks[perm]
-            #                 indices_to_term = indices_to_term[perm]
-            #                 last_states = last_states[perm]
-            #                 last_actions = last_actions[perm]
-            #                 history_stacks = history_stacks[perm]
-            #                 return states, next_states, actions, y_target, masks, indices_to_term, last_states, last_actions, history_stacks
-            #
-            #             states, next_states, actions, y_targets, masks, indices_to_term, last_states, last_actions, history_stacks = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
-            #
-            #             latent = encoder_state.apply_fn(encoder_state.params, history_stacks)
-            #
-            #             # Remove the first observation in history and append the next observation
-            #             minib_history_stack_next = jnp.concatenate(
-            #                 [history_stacks[:, 1:, :], next_states[:, None, :]], axis=1)
-            #             latent_next = encoder_state.apply_fn(encoder_state.params, minib_history_stack_next)
-            #
-            #             (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
-            #                 ncbf_state.params,
-            #                 states,
-            #                 next_states,
-            #                 actions,
-            #                 y_targets,
-            #                 masks,
-            #                 indices_to_term,
-            #                 last_states,
-            #                 last_actions,
-            #                 latent,
-            #                 latent_next,
-            #             )
-            #             metrics["grad_norm"] = optax.global_norm(ncbf_grads)
-            #             new_state = ncbf_state.apply_gradients(grads=ncbf_grads)
-            #
-            #             carry = (new_state, key)
-            #             return carry, metrics
-            #
-            #         init_carry = (ncbf_state, key)
-            #         (ncbf_state, key), metrics = jax.lax.scan(ncbf_minibatch_update, init_carry, jnp.arange(nr_minibatches))
-            #
-            #         safe_mean = lambda x: jnp.mean(x) if x is not None else x
-            #         mean_metrics = {f"ncbf/{k}": safe_mean(v) for k, v in metrics.items()}
-            #         mean_metrics["ncbf/lr"] = ncbf_state.opt_state[1].hyperparams["learning_rate"]
-            #
-            #         return (ncbf_state, key), mean_metrics
-            #
-            #     def skip_train(carry):
-            #         ncbf_state, key = carry
-            #         # filling dummy metrics with zeros for logging consistency
-            #         zero_metrics = {
-            #             "ncbf/clf_loss": jnp.array(0.0),
-            #             "ncbf/cbf_loss": jnp.array(0.0),
-            #             "ncbf/lip_loss": jnp.array(0.0),
-            #             "ncbf/wd_loss": jnp.array(0.0),
-            #             "ncbf/total_loss": jnp.array(0.0),
-            #             "ncbf/grad_norm": jnp.array(0.0),
-            #             "ncbf/mse_all": jnp.array(0.0),
-            #             "ncbf/mse_pos": jnp.array(0.0),
-            #             "ncbf/mse_neg": jnp.array(0.0),
-            #             "ncbf/mse_neg_weighted": jnp.array(0.0),
-            #             "ncbf/neg_coef": jnp.array(0.0),
-            #             "ncbf/max_neg_coef": jnp.array(0.0),
-            #             "ncbf/min_neg_coef": jnp.array(0.0),
-            #             "ncbf/n_neg_samples": jnp.array(0.0),
-            #             "ncbf/lr": ncbf_state.opt_state[1].hyperparams["learning_rate"],
-            #         }
-            #         return (ncbf_state, key), zero_metrics
-            #
-            #     (ncbf_state, key), mean_metrics = jax.lax.cond(
-            #         nr_minibatches > 0,
-            #         do_train,
-            #         skip_train,
-            #         operand=(ncbf_state, key),
-            #     )
-            #     return ncbf_state, mean_metrics, key
-
             @partial(jax.jit, static_argnums=(8,))
             def train_next_step_predictor(encoder_state, decoder_state, states, next_states, actions, masks, history_stacks, key: jax.random.PRNGKey, nr_minibatches: int):
                 @jax.jit
@@ -740,7 +588,6 @@ class PPO:
                 return buffer
 
             # # initialize two ncbf replay buffers
-            # ncbf_pos_buffer = _init_buffer(self.ncbf_pos_buffer_size)
             ncbf_neg_buffer = _init_buffer(self.ncbf_neg_buffer_size)
 
             ncbf_replay_buffer = (None, ncbf_neg_buffer)
@@ -1404,9 +1251,6 @@ class PPO:
     def log_console(self, name, value):
         value = np.format_float_positional(value, trim="-")
         rlx_logger.info(f"│ {name.ljust(30)}│ {str(value).ljust(14)[:14]} │", flush=False)
-
-    def start_logging_ncbf_pretrain(self, steps):
-        rlx_logger.info(f"pretrained NCBF for {steps} steps")
 
     def start_logging(self, step):
         if self.track_console:
