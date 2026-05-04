@@ -116,7 +116,7 @@ class PPO:
         self.nr_history_steps = env.nr_history_steps
 
         if self.evaluation_and_save_frequency % self.batch_size != 0:
-            raise ValueError("Evaluation and save frequency must be a multiple of batch size")
+            self.evaluation_and_save_frequency = self.batch_size * (self.evaluation_and_save_frequency // self.batch_size)
 
         if self.nr_parallel_seeds > 1:
             raise ValueError("Parallel seeds are not supported yet. This is mainly limited by not being able to log mutliple wandb runs at the same time.")
