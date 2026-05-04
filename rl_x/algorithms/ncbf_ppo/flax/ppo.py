@@ -555,7 +555,7 @@ class PPO:
         def get_safety_layer_curriculum_coeff(step):
             if not self.ncbf_use_safety_layer:
                 return np.float32(0.0)
-            denominator = max(float(self.total_timesteps) - float(self.nr_envs), 1.0)
+            denominator = max(0.2 * (float(self.total_timesteps) - float(self.nr_envs)), 1.0)
             return np.float32(np.clip(float(step) / denominator, 0.0, 1.0))
 
         self.set_train_mode()

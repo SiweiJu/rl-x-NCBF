@@ -596,7 +596,7 @@ class PPO:
                     policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
                     ncbf_neg_buffer = ncbf_replay_buffer
                     current_learning_update = (multi_learning_iteration_step * self.nr_updates_per_multi_learning_iteration) + learning_iteration_step
-                    curriculum_denominator = jnp.maximum(jnp.asarray(self.nr_updates - 1, dtype=jnp.float32), 1.0)
+                    curriculum_denominator = jnp.maximum(0.2 * jnp.asarray(self.nr_updates - 1, dtype=jnp.float32), 1.0)
                     safety_layer_curriculum_coeff = jnp.clip(
                         jnp.asarray(current_learning_update, dtype=jnp.float32) / curriculum_denominator,
                         0.0,
