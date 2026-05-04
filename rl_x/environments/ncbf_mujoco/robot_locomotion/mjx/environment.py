@@ -259,7 +259,7 @@ class LocomotionEnv:
             self.ball_plate_right_fist_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, self.ball_plate_config["right_fist_body"])
             self.ball_plate_left_fist_pos = jnp.array(self.ball_plate_config["left_fist_pos"], dtype=jnp.float32)
             self.ball_plate_right_fist_pos = jnp.array(self.ball_plate_config["right_fist_pos"], dtype=jnp.float32)
-            self.nr_ball_plate_observations = 12 if self.include_ball_plate_observations else 0
+            self.nr_ball_plate_observations = 12
         else:
             self.nr_ball_plate_observations = 0
 
@@ -1271,7 +1271,7 @@ class LocomotionEnv:
 
 
     def get_ball_plate_observation(self, data, internal_state):
-        if not self.include_ball_plate_observations:
+        if not self.use_ball_plate:
             return jnp.zeros(0)
 
         metrics = self.get_ball_plate_metrics(data, internal_state)
@@ -1384,6 +1384,8 @@ class LocomotionEnv:
             self.ball_not_falling_obs_idx = jnp.array([], dtype=int)
             self.plate_not_falling_obs_idx = jnp.array([], dtype=int)
 
+        ball_plate_policy_obs_idx = self.ball_plate_obs_idx if self.include_ball_plate_observations else jnp.array([], dtype=int)
+
         self.policy_observation_indices = jnp.concatenate([
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
@@ -1391,7 +1393,7 @@ class LocomotionEnv:
             self.imu_angular_vel_obs_idx,
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
-            self.ball_plate_obs_idx,
+            ball_plate_policy_obs_idx,
             self.policy_exteroception_obs_idx,
         ], dtype=int)
 
@@ -1407,7 +1409,7 @@ class LocomotionEnv:
             self.imu_angular_vel_obs_idx,
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
-            self.ball_plate_obs_idx,
+            ball_plate_policy_obs_idx,
             self.critic_exteroception_obs_idx,
         ], dtype=int)
 
@@ -1436,6 +1438,7 @@ class LocomotionEnv:
             self.qvel_observation_idx[:3],
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
+            self.ball_plate_obs_idx,
         ], dtype=int
         )
 
