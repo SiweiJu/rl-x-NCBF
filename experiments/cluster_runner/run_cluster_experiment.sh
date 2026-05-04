@@ -32,10 +32,10 @@ NEXT_STEP_PREDICTOR_NR_MINIBATCHES="${NEXT_STEP_PREDICTOR_NR_MINIBATCHES:-50}"
 NEXT_STEP_PREDICTOR_AUX_LOSS_COEF="${NEXT_STEP_PREDICTOR_AUX_LOSS_COEF:-1}"
 EPISODE_SECONDS="${EPISODE_SECONDS:-20}"
 TERRAIN_TYPE="${TERRAIN_TYPE:-plane}"
-PROJECT_NAME="${PROJECT_NAME:-202603_ncbf_cluster}"
-EXP_NAME="${EXP_NAME:-merge test}"
+PROJECT_NAME="${PROJECT_NAME:-202605_ncbf}"
+EXP_NAME="${EXP_NAME:-LN}"
 WANDB_ENTITY="${WANDB_ENTITY:-catherineju-rwth-aachen-university}"
-RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-}"
+RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-LN}"
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
@@ -65,6 +65,7 @@ python experiment.py \
     --algorithm.nr_steps="${NR_STEPS}" \
     --algorithm.nr_epochs="${NR_EPOCHS}" \
     --algorithm.ncbf.use_safety_layer="${USE_SAFETY_LAYER}" \
+    --algorithm.ncbf.target_distribution="logistic=_normal" \
     --algorithm.ncbf.gamma_c="${NCBF_GAMMA_C}" \
     --algorithm.ncbf.H="${NCBF_H}" \
     --algorithm.ncbf_buffer.neg_buffer_size="${NCBF_NEG_BUFFER_SIZE}" \
