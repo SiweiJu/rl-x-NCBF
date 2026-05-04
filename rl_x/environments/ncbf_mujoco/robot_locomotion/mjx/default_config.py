@@ -257,6 +257,9 @@ def get_config(environment_name):
             "height_percentage_threshold": 0.8,
             "body_tilt_threshold": 0.4,
         },
+        "safety": {
+            "safe_time_limit_seconds": 0.0,
+        },
         "terrain": {
             "type": "hfield_diverse",
             "wave_fn_min": 0,
