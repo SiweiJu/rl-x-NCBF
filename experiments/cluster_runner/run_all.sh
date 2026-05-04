@@ -1,8 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" && -d "${SLURM_SUBMIT_DIR}/cluster_runner" ]]; then
+    EXPERIMENTS_DIR="${SLURM_SUBMIT_DIR}"
+    SCRIPT_DIR="${EXPERIMENTS_DIR}/cluster_runner"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    EXPERIMENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+cd "${EXPERIMENTS_DIR}"
 
 mkdir -p log
 
@@ -25,5 +31,5 @@ scripts=(
 
 for script in "${scripts[@]}"; do
     echo "Submitting ${script}"
-    sbatch "${script}"
+    sbatch "cluster_runner/${script}"
 done

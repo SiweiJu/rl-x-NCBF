@@ -32,7 +32,7 @@ PROJECT_NAME="${PROJECT_NAME:-debug}"
 EXP_NAME="${EXP_NAME:-g1_ball_test}"
 MODEL_TAG="$(basename "${MODEL_PATH}")"
 MODEL_TAG="${MODEL_TAG%.*}"
-RUN_NAME="${RUN_NAME:-g1_ball_${MODEL_TAG}}"
+RUN_NAME="${RUN_NAME:-debug_g1_ball_${MODEL_TAG}}"
 
 cd "${EXPERIMENTS_DIR}"
 

@@ -8,7 +8,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-safety_on}"
+RUN_NAME="${RUN_NAME:-debug_safety_on}"
 
 cd "${EXPERIMENTS_DIR}"
 

@@ -13,7 +13,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+CLUSTER_RUNNER_DIR="${SUBMIT_DIR}"
+if [[ ! -f "${CLUSTER_RUNNER_DIR}/run_cluster_experiment.sh" && -f "${CLUSTER_RUNNER_DIR}/cluster_runner/run_cluster_experiment.sh" ]]; then
+    CLUSTER_RUNNER_DIR="${CLUSTER_RUNNER_DIR}/cluster_runner"
+fi
 export ALGORITHM_NAME="ncbf_ppo.flax_full_jit"
 export ENVIRONMENT_NAME="ncbf_mujoco.robot_locomotion.mjx"
 export TRAIN_ROBOT="unitree_g1"
@@ -23,4 +27,4 @@ export CURRICULUM_RETURN="40"
 export BALL_PLATE_ENABLED="True"
 export BALL_PLATE_INCLUDE_OBSERVATIONS="False"
 
-"${SCRIPT_DIR}/run_cluster_experiment.sh"
+"${CLUSTER_RUNNER_DIR}/run_cluster_experiment.sh"
