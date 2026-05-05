@@ -51,6 +51,104 @@ def to_time_series(sequence):
     return arr.squeeze()
 
 
+def as_2d_time_series(sequence):
+    arr = np.asarray(sequence, dtype=float)
+    if arr.ndim == 0:
+        return arr.reshape(1, 1)
+    if arr.ndim == 1:
+        return arr.reshape(1, -1)
+    return arr.reshape(arr.shape[0], -1)
+
+
+def get_ball_plate_prediction_names(episode, dim):
+    metadata = episode.get("prediction_metadata", {})
+    names = metadata.get("ball_plate_prediction_names", [])
+    names = [name.replace("ball_plate/", "") for name in names]
+    if len(names) == dim:
+        return names
+
+    fallback_names = [
+        "plate_support_relative_position_x",
+        "plate_support_relative_position_y",
+        "plate_support_relative_position_z",
+        "plate_velocity_x",
+        "plate_velocity_y",
+        "plate_velocity_z",
+        "ball_relative_position_x",
+        "ball_relative_position_y",
+        "ball_relative_position_z",
+        "ball_relative_velocity_x",
+        "ball_relative_velocity_y",
+        "ball_relative_velocity_z",
+    ]
+    fallback_names.extend(f"ball_plate_{idx}" for idx in range(len(fallback_names), dim))
+    return fallback_names[:dim]
+
+
+def plot_ball_plate_next_step_prediction(episode, episode_idx: int, plot_dir: Path):
+    if len(episode.get("ball_plate_next_step_pred", [])) == 0:
+        return
+
+    pred_key = "ball_plate_next_step_pred_physical"
+    true_key = "ball_plate_next_step_true_physical"
+    if pred_key not in episode or true_key not in episode or len(episode[pred_key]) == 0:
+        pred_key = "ball_plate_next_step_pred"
+        true_key = "ball_plate_next_step_true"
+
+    predictions = as_2d_time_series(episode[pred_key])
+    targets = as_2d_time_series(episode[true_key])
+    timesteps = min(predictions.shape[0], targets.shape[0])
+    predictions = predictions[:timesteps]
+    targets = targets[:timesteps]
+    if timesteps == 0:
+        return
+
+    names = get_ball_plate_prediction_names(episode, predictions.shape[1])
+    x = np.arange(timesteps)
+
+    ball_plate_dir = plot_dir / "ball_plate_next_step"
+    ball_plate_dir.mkdir(parents=True, exist_ok=True)
+
+    cols = 3
+    rows = int(np.ceil(predictions.shape[1] / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(13, 2.8 * rows), sharex=True)
+    axes = np.asarray(axes).reshape(-1)
+
+    for dim_idx in range(predictions.shape[1]):
+        ax = axes[dim_idx]
+        ax.plot(x, targets[:, dim_idx], label="true", linewidth=1.2)
+        ax.plot(x, predictions[:, dim_idx], label="pred", linewidth=1.0)
+        ax.set_title(names[dim_idx])
+        ax.grid(True, linestyle="--", alpha=0.3)
+        if dim_idx == 0:
+            ax.legend(loc="upper left")
+
+    for ax in axes[predictions.shape[1]:]:
+        ax.axis("off")
+    for ax in axes[-cols:]:
+        ax.set_xlabel("Timestep")
+
+    fig.suptitle(f"Episode {episode_idx + 1} ball-plate next-step prediction", y=0.995)
+    fig.tight_layout()
+    fig.savefig(ball_plate_dir / f"episode_{episode_idx + 1:03d}_ball_plate_next_step.png", dpi=200)
+    plt.close(fig)
+
+    if predictions.shape[1] >= 12:
+        error = predictions - targets
+        fig_error, ax_error = plt.subplots(figsize=(10, 4))
+        ax_error.plot(x, np.linalg.norm(error[:, :3], axis=-1), label="plate support rel pos")
+        ax_error.plot(x, np.linalg.norm(error[:, 3:6], axis=-1), label="plate velocity")
+        ax_error.plot(x, np.linalg.norm(error[:, 6:9], axis=-1), label="ball rel pos")
+        ax_error.plot(x, np.linalg.norm(error[:, 9:12], axis=-1), label="ball rel velocity")
+        ax_error.set_xlabel("Timestep")
+        ax_error.set_ylabel("L2 error")
+        ax_error.grid(True, linestyle="--", alpha=0.3)
+        ax_error.legend(loc="upper left")
+        fig_error.tight_layout()
+        fig_error.savefig(ball_plate_dir / f"episode_{episode_idx + 1:03d}_ball_plate_error.png", dpi=200)
+        plt.close(fig_error)
+
+
 def plot_episode(episode, episode_idx: int, plot_dir: Path):
     predictions = np.array(episode["predictions"])
     timesteps = predictions.shape[0]
@@ -88,7 +186,7 @@ def plot_episode(episode, episode_idx: int, plot_dir: Path):
     ax_pred.grid(True, linestyle="--", alpha=0.3)
 
     ax_done = ax_pred.twinx()
-    ax_done.step(x, np.std(predictions.squeeze(), axis=-1), where="post", color="red", label="std", linewidth=1)
+    ax_done.step(x, np.std(prediction_series, axis=-1), where="post", color="red", label="std", linewidth=1)
     ax_done.set_ylabel("Done flag")
     # ax_done.set_ylim(0.0, 1.0)
 
@@ -211,6 +309,8 @@ def plot_episode(episode, episode_idx: int, plot_dir: Path):
         # else:
         #     print("joint_position_obs within specified limits")
 
+    plot_ball_plate_next_step_prediction(episode, episode_idx, plot_dir)
+
 
 def plot_one_exp(rollout_file):
     # print summary of episode
@@ -233,9 +333,6 @@ def plot_one_exp(rollout_file):
     print(f"Episodes < 250 steps: {less_than_1000}")
     print(f"Average episode length: {avg_length:.2f}")
     print(f"Average episode return: {avg_ret:.2f}")
-
-    for idx, episode in enumerate(rollouts):
-        plot_episode(episode, idx, plot_dir)
 
     print(f"Saved {len(rollouts)} episode plots to {plot_dir}")
 

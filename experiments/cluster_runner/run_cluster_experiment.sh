@@ -65,7 +65,7 @@ python experiment.py \
     --algorithm.nr_steps="${NR_STEPS}" \
     --algorithm.nr_epochs="${NR_EPOCHS}" \
     --algorithm.ncbf.use_safety_layer="${USE_SAFETY_LAYER}" \
-    --algorithm.ncbf.target_distribution="logistic=_normal" \
+    --algorithm.ncbf.output_distribution="logistic_normal" \
     --algorithm.ncbf.gamma_c="${NCBF_GAMMA_C}" \
     --algorithm.ncbf.H="${NCBF_H}" \
     --algorithm.ncbf_buffer.neg_buffer_size="${NCBF_NEG_BUFFER_SIZE}" \

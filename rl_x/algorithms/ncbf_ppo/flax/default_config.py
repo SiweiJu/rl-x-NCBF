@@ -26,6 +26,7 @@ def get_config(algorithm_name):
     config.hidden_layers = (256, 128)
     config.use_history_latent_for_policy = False
     config.use_history_latent_for_value = False
+    config.use_decoder_output_for_policy = False
     config.evaluation_frequency = 204800  # -1 to disable
     config.evaluation_episodes = 10
 

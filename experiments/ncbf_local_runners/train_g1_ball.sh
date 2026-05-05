@@ -8,7 +8,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-debug_safety_on}"
+RUN_NAME="${RUN_NAME:-decoder_output_for_policy}"
 
 cd "${EXPERIMENTS_DIR}"
 
@@ -26,6 +26,7 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.ncbf.coef_decay_lambda=0.95 \
     --algorithm.next_step_predictor.lr=1e-5 \
     --algorithm.next_step_predictor.aux_loss_coef=1 \
+    --algorithm.use_decoder_output_for_policy=True \
     --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
     --environment.seed="${SEED}" \
     --environment.nr_envs="${NR_ENVS}" \
@@ -35,7 +36,7 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --environment.env_curriculum_level_success_episode_return=40 \
     --environment.terrain.type="plane" \
     --environment.ball_plate.enabled=True \
-    --environment.ball_plate.include_observations=True \
+    --environment.ball_plate.include_observations=False \
     --runner.mode="train" \
     --runner.track_console=False \
     --runner.track_tb=True \

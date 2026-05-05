@@ -74,9 +74,6 @@ def get_ncbf(config, env):
     min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
     max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
 
-    if output_distribution not in ("deterministic", "logistic_normal"):
-        raise ValueError("algorithm.ncbf.output_distribution must be 'deterministic' or 'logistic_normal'.")
-
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 

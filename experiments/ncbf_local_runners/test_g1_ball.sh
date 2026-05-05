@@ -6,7 +6,7 @@ EXPERIMENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
-MODEL_PATH="/home/siwei/Downloads/ball_g1.model"
+MODEL_PATH="/home/siwei/Downloads/latest(44).model"
 EXTRA_ARGS=("$@")
 if [[ "$#" -gt 0 && "$1" != --* ]]; then
     MODEL_PATH="$1"
@@ -26,13 +26,17 @@ RENDER="${RENDER:-True}"
 ACTION_NOISE_SAMPLING_RATIO="${ACTION_NOISE_SAMPLING_RATIO:-0.0}"
 USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-False}"
 NCBF_GAMMA_C="${NCBF_GAMMA_C:-0}"
-NCBF_OUTPUT_DISTRIBUTION="${NCBF_OUTPUT_DISTRIBUTION:-deterministic}"
+NCBF_OUTPUT_DISTRIBUTION="${NCBF_OUTPUT_DISTRIBUTION:-}"
 ROLLOUT_SAVE_NAME="${ROLLOUT_SAVE_NAME:-g1_ball_rollout}"
 PROJECT_NAME="${PROJECT_NAME:-debug}"
 EXP_NAME="${EXP_NAME:-g1_ball_test}"
 MODEL_TAG="$(basename "${MODEL_PATH}")"
 MODEL_TAG="${MODEL_TAG%.*}"
 RUN_NAME="${RUN_NAME:-debug_g1_ball_${MODEL_TAG}}"
+NCBF_OUTPUT_DISTRIBUTION_ARGS=()
+if [[ -n "${NCBF_OUTPUT_DISTRIBUTION}" ]]; then
+    NCBF_OUTPUT_DISTRIBUTION_ARGS=(--algorithm.ncbf.output_distribution="${NCBF_OUTPUT_DISTRIBUTION}")
+fi
 
 cd "${EXPERIMENTS_DIR}"
 
@@ -47,7 +51,7 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --algorithm.ncbf.lambda_slack=10 \
     --algorithm.ncbf.H=25 \
     --algorithm.ncbf.action_clipping=False \
-    --algorithm.ncbf.output_distribution="${NCBF_OUTPUT_DISTRIBUTION}" \
+    "${NCBF_OUTPUT_DISTRIBUTION_ARGS[@]}" \
     --algorithm.next_step_predictor.history_encoder_hidden_size=64 \
     --algorithm.rollout_save_name="${ROLLOUT_SAVE_NAME}" \
     --algorithm.action_noise_sampling_ratio="${ACTION_NOISE_SAMPLING_RATIO}" \
@@ -64,7 +68,7 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.train_robot="unitree_g1" \
     --environment.termination.height_percentage_threshold=0.6 \
     --environment.ball_plate.enabled=True \
-    --environment.ball_plate.include_observations=True \
+    --environment.ball_plate.include_observations=False \
     --runner.mode="test" \
     --runner.nr_test_episodes="${NR_TEST_EPISODES}" \
     --runner.load_model="${MODEL_PATH}" \

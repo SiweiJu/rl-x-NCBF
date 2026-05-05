@@ -1,5 +1,6 @@
 import glfw
 import mujoco
+import numpy as np
 import time
 from itertools import cycle
 
@@ -19,6 +20,8 @@ class MujocoViewer:
         self.paused = False
         self.hide_menu = False
         self.overlay = {}
+        self.extra_overlay = None
+        self.extra_geoms = []
         self.font_scale = 100
 
         glfw.init()
@@ -110,6 +113,7 @@ class MujocoViewer:
             mujoco.mjv_updateScene(self.model, data, self.scene_option, None, self.camera,
                                    mujoco.mjtCatBit.mjCAT_ALL,
                                    self.scene)
+            self.add_extra_geoms()
             self.viewport.width, self.viewport.height = glfw.get_framebuffer_size(self.window)
             mujoco.mjr_render(self.viewport, self.scene, self.context)
 
@@ -153,8 +157,57 @@ class MujocoViewer:
         glfw.set_window_should_close(self.window, True)
 
 
+    def set_extra_geoms(self, geoms):
+        self.extra_geoms = geoms or []
+
+
+    def add_extra_geoms(self):
+        for extra_geom in self.extra_geoms:
+            if self.scene.ngeom >= len(self.scene.geoms):
+                break
+
+            geom = self.scene.geoms[self.scene.ngeom]
+            self.scene.ngeom += 1
+            rgba = extra_geom.get("rgba", [0.0, 1.0, 0.0, 0.6])
+            rgba = np.asarray(rgba, dtype=np.float32)
+            mat = np.asarray(
+                extra_geom.get("mat", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
+                dtype=np.float64,
+            )
+            geom_type = extra_geom["type"]
+
+            if geom_type == "sphere":
+                mujoco.mjv_initGeom(
+                    geom,
+                    mujoco.mjtGeom.mjGEOM_SPHERE,
+                    np.asarray(extra_geom["size"], dtype=np.float64),
+                    np.asarray(extra_geom["pos"], dtype=np.float64),
+                    mat,
+                    rgba,
+                )
+            elif geom_type == "box":
+                mujoco.mjv_initGeom(
+                    geom,
+                    mujoco.mjtGeom.mjGEOM_BOX,
+                    np.asarray(extra_geom["size"], dtype=np.float64),
+                    np.asarray(extra_geom["pos"], dtype=np.float64),
+                    mat,
+                    rgba,
+                )
+            elif geom_type == "capsule":
+                mujoco.mjv_connector(
+                    geom,
+                    mujoco.mjtGeom.mjGEOM_CAPSULE,
+                    float(extra_geom.get("width", 0.006)),
+                    np.asarray(extra_geom["from"], dtype=np.float64),
+                    np.asarray(extra_geom["to"], dtype=np.float64),
+                )
+                geom.rgba[:] = rgba
+
+
     def create_overlay(self):
         topleft = mujoco.mjtGridPos.mjGRID_TOPLEFT
+        bottomleft = mujoco.mjtGridPos.mjGRID_BOTTOMLEFT
         bottomright = mujoco.mjtGridPos.mjGRID_BOTTOMRIGHT
 
         self.overlay[bottomright] = ["Framerate:", str(int(1/self.time_per_render * self.run_speed_factor))]
@@ -169,6 +222,8 @@ class MujocoViewer:
         self.overlay[topleft][1] += self.camera_mode+"\n"
         self.overlay[topleft][0] += "Run speed = %.3f x real time" % self.run_speed_factor
         self.overlay[topleft][1] += "[S]lower, [F]aster"
+        if self.extra_overlay is not None:
+            self.overlay[bottomleft] = self.extra_overlay
 
 
     def set_camera(self):

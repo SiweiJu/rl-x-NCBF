@@ -74,6 +74,7 @@ class PPO:
         self.next_step_predictor_output_indices = env.next_state_indices
         self.next_step_predictor_nr_minibatches = config.algorithm.next_step_predictor.nr_minibatches
         self.next_step_predictor_minibatch_size = config.algorithm.minibatch_size
+        self.use_decoder_output_for_policy = bool(getattr(config.algorithm, "use_decoder_output_for_policy", False))
 
         self.ncbf_n_ensemble = config.algorithm.ncbf.n_ensemble
         self.ncbf_H = config.algorithm.ncbf.H
@@ -145,10 +146,13 @@ class PPO:
         env_state = self.env.reset(reset_key, False)
 
         dummy_latent = jnp.zeros((1, self.encoder.hidden_size))
+        dummy_decoder_output = None
+        if self.use_decoder_output_for_policy:
+            dummy_decoder_output = jnp.zeros((1, self.next_step_predictor_output_indices.shape[0]))
 
         self.policy_state = TrainState.create(
             apply_fn=self.policy.apply,
-            params=self.policy.init(policy_key, env_state.next_observation, dummy_latent),
+            params=self.policy.init(policy_key, env_state.next_observation, dummy_latent, dummy_decoder_output),
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
                 optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
@@ -209,6 +213,19 @@ class PPO:
             self.latest_model_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 
 
+    def _get_policy_decoder_output(self, decoder_params, history_latent, state, action):
+        if not self.use_decoder_output_for_policy:
+            return None
+
+        decoder_output = self.decoder.apply(
+            decoder_params,
+            jax.lax.stop_gradient(history_latent),
+            state,
+            action,
+        )
+        return jax.lax.stop_gradient(decoder_output)
+
+
     def train(self):
         def jitable_train_function(key, parallel_seed_id):
             def repeat_ncbf_params(ncbf_state):
@@ -227,7 +244,8 @@ class PPO:
                 last_action = env_state.last_action
                 last_state = env_state.last_state
                 latent_z = encoder_state.apply_fn(encoder_state.params, history_stack)
-                action_mean, action_logstd = self.policy.apply(policy_state.params, observation, latent_z)
+                policy_decoder_output = self._get_policy_decoder_output(decoder_state.params, latent_z, last_state, last_action)
+                action_mean, action_logstd = self.policy.apply(policy_state.params, observation, latent_z, policy_decoder_output)
                 action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                 action_std = jnp.exp(action_logstd)
                 action = action_mean + action_std * jax.random.normal(subkey, shape=action_mean.shape)
@@ -811,7 +829,14 @@ class PPO:
                         next_history_stack_b = next_history_stack_b.at[:, -1, :].set(next_state_b)
                         next_latent_b = self.encoder.apply(encoder_params, next_history_stack_b)
 
-                        action_mean, action_logstd = self.policy.apply(policy_params, state_b, latent_b)
+                        policy_latent_b = jax.lax.stop_gradient(latent_b)
+                        policy_decoder_output_b = self._get_policy_decoder_output(
+                            decoder_params,
+                            policy_latent_b,
+                            last_state_b,
+                            last_action_b,
+                        )
+                        action_mean, action_logstd = self.policy.apply(policy_params, state_b, policy_latent_b, policy_decoder_output_b)
                         action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                         action_std = jnp.exp(action_logstd)
                         new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
@@ -1000,8 +1025,19 @@ class PPO:
                             buffer["history_stack"][replay_indices],
                         )
 
-                    initial_policy_latent = encoder_state.apply_fn(encoder_state.params, batch_history_stack)
-                    initial_action_mean, initial_action_logstd = self.policy.apply(policy_state.params, batch_states, initial_policy_latent)
+                    initial_policy_latent = jax.lax.stop_gradient(encoder_state.apply_fn(encoder_state.params, batch_history_stack))
+                    initial_policy_decoder_output = self._get_policy_decoder_output(
+                        decoder_state.params,
+                        initial_policy_latent,
+                        batch_last_states,
+                        batch_last_actions,
+                    )
+                    initial_action_mean, initial_action_logstd = self.policy.apply(
+                        policy_state.params,
+                        batch_states,
+                        initial_policy_latent,
+                        initial_policy_decoder_output,
+                    )
                     initial_action_logstd = jnp.clip(initial_action_logstd, -5.0, 2.0)
                     initial_action_std = jnp.exp(initial_action_logstd)
                     initial_new_log_probs = -0.5 * ((batch_actions - initial_action_mean) / initial_action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - initial_action_logstd
@@ -1176,7 +1212,13 @@ class PPO:
                     def single_eval_rollout(single_eval_rollout_carry, _):
                         policy_state, ncbf_state, eval_env_state = single_eval_rollout_carry
                         latent_z = encoder_state.apply_fn(encoder_state.params, eval_env_state.history_stack)
-                        action_mean, _ = self.policy.apply(policy_state.params, eval_env_state.next_observation, latent_z)
+                        policy_decoder_output = self._get_policy_decoder_output(
+                            decoder_state.params,
+                            latent_z,
+                            eval_env_state.last_state,
+                            eval_env_state.last_action,
+                        )
+                        action_mean, _ = self.policy.apply(policy_state.params, eval_env_state.next_observation, latent_z, policy_decoder_output)
                         action = action_mean
                         raw_processed_action = self.get_processed_action(action)
                         params_stack = repeat_ncbf_params(ncbf_state)
@@ -1353,7 +1395,13 @@ class PPO:
         def rollout(env_state, key):
             # key, subkey = jax.random.split(key)
             latent_z = self.encoder_state.apply_fn(self.encoder_state.params, env_state.history_stack)
-            action_mean, action_logstd = self.policy.apply(self.policy_state.params, env_state.next_observation, latent_z)
+            policy_decoder_output = self._get_policy_decoder_output(
+                self.decoder_state.params,
+                latent_z,
+                env_state.last_state,
+                env_state.last_action,
+            )
+            action_mean, action_logstd = self.policy.apply(self.policy_state.params, env_state.next_observation, latent_z, policy_decoder_output)
             # action_std = jnp.exp(action_logstd)
             action = action_mean # + action_std * jax.random.normal(subkey, shape=action_mean.shape)
             raw_processed_action = self.get_processed_action(action)

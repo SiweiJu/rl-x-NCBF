@@ -719,6 +719,7 @@ class LocomotionEnv(gym.Env):
         # write RGBA into the model array
         self.initial_mj_model.geom_rgba[self.safety_light_site_id] = safety_color
 
+        self._update_prediction_visualization_overlay()
         self.viewer.render(self.internal_state["data"])
 
 
@@ -1231,6 +1232,108 @@ class LocomotionEnv(gym.Env):
             metrics["relative_position"],
             metrics["relative_velocity"],
         ])
+
+
+    def get_ball_plate_observation_names(self):
+        return [
+            "plate_support_relative_position_x",
+            "plate_support_relative_position_y",
+            "plate_support_relative_position_z",
+            "plate_velocity_x",
+            "plate_velocity_y",
+            "plate_velocity_z",
+            "ball_relative_position_x",
+            "ball_relative_position_y",
+            "ball_relative_position_z",
+            "ball_relative_velocity_x",
+            "ball_relative_velocity_y",
+            "ball_relative_velocity_z",
+        ]
+
+
+    def denormalize_ball_plate_observation(self, observation):
+        observation = np.asarray(observation, dtype=float).copy()
+        if not self.use_ball_plate or observation.size == 0:
+            return observation
+
+        if getattr(self.observation_noise_function, "handles_normalization", False):
+            return observation
+
+        plate_size = self.internal_state.get("ball_plate_plate_size", self.ball_plate_plate_size)
+        position_scale = np.maximum(np.max(plate_size[:2]), 1e-6)
+        observation[:3] *= position_scale
+        observation[3:6] *= 5.0
+        observation[6:9] *= position_scale
+        observation[9:] *= 5.0
+        return observation
+
+
+    def _update_prediction_visualization_overlay(self):
+        if not self.should_render or not self.use_ball_plate:
+            return
+
+        visualization = self.internal_state.get("next_step_prediction_visualization")
+        if not visualization:
+            self.viewer.extra_overlay = None
+            self.viewer.set_extra_geoms([])
+            return
+
+        predicted = np.asarray(visualization.get("ball_plate_prediction", []), dtype=float).reshape(-1)
+        if predicted.size != self.nr_ball_plate_observations:
+            self.viewer.extra_overlay = None
+            self.viewer.set_extra_geoms([])
+            return
+
+        actual = np.asarray(self.internal_state["last_state"][self.ball_plate_obs_idx], dtype=float).reshape(-1)
+        predicted = self.denormalize_ball_plate_observation(predicted)
+        actual = self.denormalize_ball_plate_observation(actual)
+        error = predicted - actual
+        self.viewer.set_extra_geoms(self._get_ball_plate_prediction_geoms(predicted))
+
+        def fmt(vec):
+            return "[" + ", ".join(f"{value:+.3f}" for value in vec) + "]"
+
+        title = "Next-step ball plate prediction\n"
+        values = "\n"
+        title += "ball rel pos pred/real/error\n"
+        values += f"{fmt(predicted[6:9])} / {fmt(actual[6:9])} / {fmt(error[6:9])}\n"
+        title += "ball rel vel pred/real/error\n"
+        values += f"{fmt(predicted[9:12])} / {fmt(actual[9:12])} / {fmt(error[9:12])}\n"
+        title += "plate support rel pred/real/error\n"
+        values += f"{fmt(predicted[:3])} / {fmt(actual[:3])} / {fmt(error[:3])}\n"
+        title += "plate vel pred/real/error\n"
+        values += f"{fmt(predicted[3:6])} / {fmt(actual[3:6])} / {fmt(error[3:6])}"
+        self.viewer.extra_overlay = [title, values]
+
+
+    def _get_ball_plate_prediction_geoms(self, predicted_observation):
+        data = self.internal_state["data"]
+        plate_xmat = data.site_xmat[self.ball_plate_site_id].reshape(3, 3)
+        left_support, right_support = self._get_ball_plate_support_points(data)
+        support_center = 0.5 * (left_support + right_support)
+
+        plate_size = np.asarray(self.internal_state["ball_plate_plate_size"], dtype=float)
+        ball_radius = float(self.internal_state.get("ball_plate_ball_radius", self.ball_plate_ball_radius))
+        predicted_plate_top_pos = support_center + predicted_observation[:3]
+        predicted_plate_geom_pos = predicted_plate_top_pos - plate_xmat[:, 2] * plate_size[2]
+        predicted_ball_pos = predicted_plate_top_pos + plate_xmat @ predicted_observation[6:9]
+        predicted_rgba = [1.0, 0.55, 0.05, 0.55]
+
+        return [
+            {
+                "type": "box",
+                "pos": predicted_plate_geom_pos,
+                "size": plate_size,
+                "mat": plate_xmat.reshape(-1),
+                "rgba": predicted_rgba,
+            },
+            {
+                "type": "sphere",
+                "pos": predicted_ball_pos,
+                "size": [ball_radius, 0.0, 0.0],
+                "rgba": predicted_rgba,
+            },
+        ]
 
 
     def ball_plate_has_dropped(self):

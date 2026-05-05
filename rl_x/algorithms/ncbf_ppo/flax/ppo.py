@@ -73,6 +73,7 @@ class PPO:
         self.next_step_predictor_output_indices = env.next_state_indices
         self.next_step_predictor_nr_minibatches = config.algorithm.next_step_predictor.nr_minibatches
         self.next_step_predictor_minibatch_size = config.algorithm.minibatch_size
+        self.use_decoder_output_for_policy = bool(getattr(config.algorithm, "use_decoder_output_for_policy", False))
 
         self.ncbf_n_ensemble = config.algorithm.ncbf.n_ensemble
         self.ncbf_H = config.algorithm.ncbf.H
@@ -126,11 +127,14 @@ class PPO:
 
         state = jnp.array([env.single_observation_space.sample()])
         dummy_latent = jnp.zeros((1, self.encoder.hidden_size))
+        dummy_decoder_output = None
+        if self.use_decoder_output_for_policy:
+            dummy_decoder_output = jnp.zeros((1, self.next_step_predictor_output_indices.shape[0]))
         dummy_history_stack = jnp.zeros((1, self.env.nr_history_steps) + (self.os_shape[0],))
 
         self.policy_state = TrainState.create(
             apply_fn=self.policy.apply,
-            params=self.policy.init(policy_key, state, dummy_latent),
+            params=self.policy.init(policy_key, state, dummy_latent, dummy_decoder_output),
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
                 optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
@@ -194,6 +198,19 @@ class PPO:
             self.best_model_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 
     
+    def _get_policy_decoder_output(self, decoder_params, history_latent, state, action):
+        if not self.use_decoder_output_for_policy:
+            return None
+
+        decoder_output = self.decoder.apply(
+            decoder_params,
+            jax.lax.stop_gradient(history_latent),
+            state,
+            action,
+        )
+        return jax.lax.stop_gradient(decoder_output)
+
+
     def train(self):
         @jax.jit
         def _future_event_within_H(events: jnp.array, H: int):
@@ -252,8 +269,11 @@ class PPO:
             return y, mask
 
         @jax.jit
-        def get_action_and_value(policy_state: TrainState, critic_state: TrainState, state: np.ndarray, history_latent: np.ndarray, key: jax.random.PRNGKey):
-            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent)
+        def get_action_and_value(policy_state: TrainState, critic_state: TrainState, decoder_state: TrainState,
+                                 state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray,
+                                 history_latent: np.ndarray, key: jax.random.PRNGKey):
+            policy_decoder_output = self._get_policy_decoder_output(decoder_state.params, history_latent, last_state, last_action)
+            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent, policy_decoder_output)
             action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
             action_std = jnp.exp(action_logstd)
             key, subkey = jax.random.split(key)
@@ -286,14 +306,22 @@ class PPO:
         
 
         @jax.jit
-        def update(policy_state: TrainState, critic_state: TrainState, encoder_state: TrainState, ncbf_state: TrainState,
+        def update(policy_state: TrainState, critic_state: TrainState, encoder_state: TrainState,
+                   decoder_state: TrainState, ncbf_state: TrainState,
                    states: np.ndarray, actions: np.ndarray, advantages: np.ndarray, returns: np.ndarray, values: np.ndarray, log_probs: np.ndarray,
-                   history_stacks: np.ndarray,
+                   history_stacks: np.ndarray, last_states: np.ndarray, last_actions: np.ndarray,
                    key: jax.random.PRNGKey):
-            def loss_fn(policy_params, critic_params, ncbf_params, state_b, action_b, log_prob_b, return_b, advantage_b, history_stack_b):
+            def loss_fn(policy_params, critic_params, ncbf_params, state_b, action_b, log_prob_b, return_b, advantage_b,
+                        history_stack_b, last_state_b, last_action_b):
                 history_latent_b = encoder_state.apply_fn(encoder_state.params, history_stack_b)
                 # Policy loss
-                action_mean, action_logstd = self.policy.apply(policy_params, state_b, history_latent_b)
+                policy_decoder_output_b = self._get_policy_decoder_output(
+                    decoder_state.params,
+                    history_latent_b,
+                    last_state_b,
+                    last_action_b,
+                )
+                action_mean, action_logstd = self.policy.apply(policy_params, state_b, history_latent_b, policy_decoder_output_b)
                 action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                 action_std = jnp.exp(action_logstd)
                 new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
@@ -341,8 +369,10 @@ class PPO:
             batch_returns = returns.reshape(-1)
             batch_log_probs = log_probs.reshape(-1)
             batch_history_stacks = history_stacks.reshape((-1, self.env.nr_history_steps) + self.os_shape)
+            batch_last_states = last_states.reshape((-1,) + self.os_shape)
+            batch_last_actions = last_actions.reshape((-1,) + self.as_shape)
 
-            vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, 0, 0, 0, 0, 0, 0), out_axes=0)
+            vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
             safe_mean = lambda x: jnp.mean(x) if x is not None else x
             mean_vmapped_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
             grad_loss_fn = jax.value_and_grad(mean_vmapped_loss_fn, argnums=(0, 1), has_aux=True)
@@ -369,6 +399,8 @@ class PPO:
                     batch_returns[minibatch_indices],
                     minibatch_advantages,
                     batch_history_stacks[minibatch_indices],
+                    batch_last_states[minibatch_indices],
+                    batch_last_actions[minibatch_indices],
                 )
 
                 policy_state = policy_state.apply_gradients(grads=policy_gradients)
@@ -548,8 +580,11 @@ class PPO:
             return ncbf_state, mean_metrics, key
 
         @jax.jit
-        def get_deterministic_action(policy_state: TrainState, state: np.ndarray, history_latent: np.ndarray):
-            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent)
+        def get_deterministic_action(policy_state: TrainState, decoder_state: TrainState,
+                                     state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray,
+                                     history_latent: np.ndarray):
+            policy_decoder_output = self._get_policy_decoder_output(decoder_state.params, history_latent, last_state, last_action)
+            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent, policy_decoder_output)
             return self.get_processed_action(action_mean)
 
         def get_safety_layer_curriculum_coeff(step):
@@ -575,7 +610,9 @@ class PPO:
             y_targets=np.zeros((self.nr_steps, self.nr_envs)),
             constraint_violated=np.zeros((self.nr_steps, self.nr_envs), dtype=bool),
             delta_u=np.zeros((self.nr_steps, self.nr_envs)),
-            history_stacks=np.zeros((self.nr_steps, self.nr_envs, self.env.nr_history_steps) + self.os_shape)
+            history_stacks=np.zeros((self.nr_steps, self.nr_envs, self.env.nr_history_steps) + self.os_shape),
+            last_states=np.zeros((self.nr_steps, self.nr_envs) + self.os_shape),
+            last_actions=np.zeros((self.nr_steps, self.nr_envs) + self.as_shape),
         )
 
         saving_return_buffer = deque(maxlen=100 * self.nr_envs)
@@ -602,7 +639,16 @@ class PPO:
             safety_layer_curriculum_coeffs = np.zeros(self.nr_steps, dtype=np.float32)
             for step in range(self.nr_steps):
                 latent_z = self.encoder.apply(self.encoder_state.params, history_stacks)
-                _, action, value, log_prob, self.key = get_action_and_value(self.policy_state, self.critic_state, state, latent_z, self.key)
+                _, action, value, log_prob, self.key = get_action_and_value(
+                    self.policy_state,
+                    self.critic_state,
+                    self.decoder_state,
+                    state,
+                    last_states,
+                    last_actions,
+                    latent_z,
+                    self.key,
+                )
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
 
                 safety_layer_curriculum_coeff = get_safety_layer_curriculum_coeff(global_step)
@@ -634,6 +680,8 @@ class PPO:
                 batch.rewards[step] = reward
                 batch.values[step] = value
                 batch.history_stacks[step] = history_stacks
+                batch.last_states[step] = last_states
+                batch.last_actions[step] = last_actions
                 batch.terminations[step] = terminated
                 batch.log_probs[step] = log_prob
                 batch.constraint_violated[step] = constraint_active
@@ -701,9 +749,9 @@ class PPO:
 
             # Optimizing
             self.policy_state, self.critic_state, optimization_metrics, self.key = update(
-                self.policy_state, self.critic_state, self.encoder_state, self.ncbf_state[0],
+                self.policy_state, self.critic_state, self.encoder_state, self.decoder_state, self.ncbf_state[0],
                 batch.states, batch.actions, batch.advantages, batch.returns, batch.values, batch.log_probs,
-                batch.history_stacks,
+                batch.history_stacks, batch.last_states, batch.last_actions,
                 self.key
             )
             optimization_metrics = {key: value.item() for key, value in optimization_metrics.items()}
@@ -727,7 +775,14 @@ class PPO:
                 evaluation_metrics = {"eval/episode_return": [], "eval/episode_length": []}
                 while True:
                     latent_z = self.encoder.apply(self.encoder_state.params, eval_history_stacks)
-                    raw_processed_action = get_deterministic_action(self.policy_state, state, latent_z)
+                    raw_processed_action = get_deterministic_action(
+                        self.policy_state,
+                        self.decoder_state,
+                        state,
+                        eval_last_states,
+                        eval_last_actions,
+                        latent_z,
+                    )
                     params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                     safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
                         raw_processed_action,
@@ -966,13 +1021,88 @@ class PPO:
                 h_input[:-1]
             )
 
+
+    def _get_single_test_env(self):
+        if hasattr(self.env, "envs") and len(self.env.envs) > 0:
+            return self.env.envs[0]
+        return None
+
+
+    def _next_step_prediction_metadata(self, single_env):
+        indices = np.asarray(self.next_step_predictor_output_indices, dtype=int)
+        names = [f"observation_{int(index)}" for index in indices]
+
+        def assign_names(source_indices, source_names):
+            index_to_name = {int(index): name for index, name in zip(source_indices, source_names)}
+            for pos, obs_index in enumerate(indices):
+                obs_index = int(obs_index)
+                if obs_index in index_to_name:
+                    names[pos] = index_to_name[obs_index]
+
+        if single_env is not None:
+            actuator_names = list(getattr(single_env, "actuator_joint_names", []))
+            nr_actuator_joints = len(getattr(single_env, "joint_positions_obs_idx", []))
+            if len(actuator_names) != nr_actuator_joints:
+                actuator_names = [str(i) for i in range(nr_actuator_joints)]
+
+            assign_names(
+                getattr(single_env, "qvel_observation_idx", np.array([], dtype=int))[:3],
+                ["base_linear_velocity_x", "base_linear_velocity_y", "base_linear_velocity_z"],
+            )
+            assign_names(
+                getattr(single_env, "joint_positions_obs_idx", np.array([], dtype=int)),
+                [f"joint_position/{name}" for name in actuator_names],
+            )
+            assign_names(
+                getattr(single_env, "joint_velocities_obs_idx", np.array([], dtype=int)),
+                [f"joint_velocity/{name}" for name in actuator_names],
+            )
+            assign_names(
+                getattr(single_env, "ball_plate_obs_idx", np.array([], dtype=int)),
+                [f"ball_plate/{name}" for name in getattr(single_env, "get_ball_plate_observation_names", lambda: [])()],
+            )
+
+        ball_plate_positions = []
+        ball_plate_names = []
+        if single_env is not None and getattr(single_env, "use_ball_plate", False):
+            ball_plate_indices = set(map(int, getattr(single_env, "ball_plate_obs_idx", [])))
+            ball_plate_positions = [
+                pos for pos, obs_index in enumerate(indices)
+                if int(obs_index) in ball_plate_indices
+            ]
+            ball_plate_names = [names[pos] for pos in ball_plate_positions]
+
+        return {
+            "next_step_prediction_indices": indices.tolist(),
+            "next_step_prediction_names": names,
+            "ball_plate_prediction_positions": ball_plate_positions,
+            "ball_plate_prediction_names": ball_plate_names,
+        }
+
+
+    def _denormalize_ball_plate_prediction(self, single_env, values):
+        values = np.asarray(values, dtype=float)
+        if single_env is not None and hasattr(single_env, "denormalize_ball_plate_observation"):
+            return single_env.denormalize_ball_plate_observation(values)
+        return values
+
+
+    def _set_ball_plate_prediction_visualization(self, single_env, ball_plate_prediction):
+        if single_env is None or not getattr(single_env, "use_ball_plate", False):
+            return
+        single_env.internal_state["next_step_prediction_visualization"] = {
+            "ball_plate_prediction": np.asarray(ball_plate_prediction, dtype=float),
+        }
+
+
     def test(self, episodes):
         # self.validate_dynamics_model_on_the_real_robot()
         # return
 
         # @jax.jit
         def get_action(policy_state: TrainState, state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray, history_latent: np.ndarray):
-            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent)
+            policy_decoder_output = self._get_policy_decoder_output(self.decoder_state.params, history_latent, last_state, last_action)
+            action_mean, action_logstd = self.policy.apply(policy_state.params, state, history_latent, policy_decoder_output)
             raw_processed_action = self.get_processed_action(action_mean)
 
             sampling_ratio = self.action_noise_sampling_ratio
@@ -1002,6 +1132,10 @@ class PPO:
         os.makedirs(rollout_path, exist_ok=True)
 
         rollouts = []
+        single_env = self._get_single_test_env()
+        prediction_metadata = self._next_step_prediction_metadata(single_env)
+        next_step_prediction_indices = np.asarray(prediction_metadata["next_step_prediction_indices"], dtype=int)
+        ball_plate_positions = prediction_metadata["ball_plate_prediction_positions"]
         self.set_eval_mode()
         for i in range(episodes):
             done = False
@@ -1009,6 +1143,8 @@ class PPO:
             state, info = self.env.reset()
             history_stack = info["history_stack"][0]
             self.env.envs[0].internal_state["safe_prediction"] = 1
+            if single_env is not None and getattr(single_env, "use_ball_plate", False):
+                single_env.internal_state["next_step_prediction_visualization"] = None
             previous_state = np.stack(info["last_state"])
             last_action = np.stack(info["last_action"])
 
@@ -1016,7 +1152,11 @@ class PPO:
             # self.env.envs[0].command_function._load_random_trajectory(i)
             rollout_dict = dict(states=[], actions=[], rewards=[], dones=[], safe_prediction=[], predictions=[],
                                 delta_u=[], constraint_active=[], raw_action=[], safe_action=[], joint_position_obs=[],
-                                h_u0=[], x_next_true=[], next_step_pred=[], ret=[])
+                                h_u0=[], x_next_true=[], next_step_pred=[], next_step_true=[],
+                                next_step_prediction_error=[], ball_plate_next_step_pred=[],
+                                ball_plate_next_step_true=[], ball_plate_next_step_pred_physical=[],
+                                ball_plate_next_step_true_physical=[], ret=[],
+                                prediction_metadata=prediction_metadata)
 
             while not done:
                 latent_z = self.encoder.apply(self.encoder_state.params, history_stack[None, ...])
@@ -1049,7 +1189,10 @@ class PPO:
                 predictions = 0
 
                 next_step_prediction = self.decoder.apply(self.decoder_state.params, latent_z, state, processed_action)
-                prediction_denormed = next_step_prediction / (1 + next_step_prediction)
+                next_step_prediction_np = np.asarray(jax.device_get(next_step_prediction))[0]
+                if ball_plate_positions:
+                    ball_plate_prediction = next_step_prediction_np[ball_plate_positions]
+                    self._set_ball_plate_prediction_visualization(single_env, ball_plate_prediction)
 
                 self.env.envs[0].internal_state["safe_prediction"] = component_softmin(prediction_mean) # prediction_mean
                 previous_state = state
@@ -1057,9 +1200,17 @@ class PPO:
                 history_stack = info["history_stack"][0]
 
                 done = terminated | truncated
+                actual_next_state = np.asarray(state).copy()
+                if bool(np.asarray(done).reshape(-1)[0]):
+                    try:
+                        actual_next_state[0] = np.asarray(self.env.get_final_observation_at_index(info, 0))
+                    except Exception:
+                        pass
+                next_step_target_np = actual_next_state[:, next_step_prediction_indices][0]
+                next_step_error_np = next_step_prediction_np - next_step_target_np
                 episode_return += reward
 
-                if terminated:
+                if bool(np.asarray(terminated).reshape(-1)[0]):
                     print("ncbf prediction: ", prediction_mean)
 
                 last_action = processed_action
@@ -1071,7 +1222,21 @@ class PPO:
                 rollout_dict["constraint_active"].append(constraint_active)
                 rollout_dict["raw_action"].append(raw_action)
                 rollout_dict["safe_action"].append(processed_action)
-                rollout_dict["next_step_pred"].append(next_step_prediction)
+                rollout_dict["next_step_pred"].append(next_step_prediction_np)
+                rollout_dict["next_step_true"].append(next_step_target_np)
+                rollout_dict["x_next_true"].append(next_step_target_np)
+                rollout_dict["next_step_prediction_error"].append(next_step_error_np)
+                if ball_plate_positions:
+                    ball_plate_prediction = next_step_prediction_np[ball_plate_positions]
+                    ball_plate_target = next_step_target_np[ball_plate_positions]
+                    rollout_dict["ball_plate_next_step_pred"].append(ball_plate_prediction)
+                    rollout_dict["ball_plate_next_step_true"].append(ball_plate_target)
+                    rollout_dict["ball_plate_next_step_pred_physical"].append(
+                        self._denormalize_ball_plate_prediction(single_env, ball_plate_prediction)
+                    )
+                    rollout_dict["ball_plate_next_step_true_physical"].append(
+                        self._denormalize_ball_plate_prediction(single_env, ball_plate_target)
+                    )
 
                 joint_pos = (state[0, self.env.envs[0].joint_positions_obs_idx] * 3.14) + self.env.envs[0].internal_state["actuator_joint_nominal_positions"]
                 rollout_dict["joint_position_obs"].append(joint_pos)
