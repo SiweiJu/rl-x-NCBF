@@ -146,6 +146,10 @@ def get_config(environment_name):
                 "imu_angular_velocity": 0.2,
                 "gravity_vector": 0.05,
                 "exteroception": 0.03,
+                "add_ball_plate_obs_noise": True,
+                "ball_plate_position_noise": 0.015,
+                "ball_plate_velocity_noise": 0.1,
+                "normalize_ball_plate_observations": True,
             },
             "perturbation": {
                 "sampling_type": "step_probability",
@@ -498,4 +502,5 @@ def apply_boosterball_defaults(config):
         "ball_plate_alive_coeff": 0.2,
         "ball_plate_drop_penalty_coeff": 10.0,
     })
+    config.domain_randomization.observation_noise.type = "ball"
     config.termination.type = "boosterball"

@@ -1296,7 +1296,10 @@ class LocomotionEnv(gym.Env):
         if not self.use_ball_plate or observation.size == 0:
             return observation
 
-        if getattr(self.observation_noise_function, "handles_normalization", False):
+        if (
+            getattr(self.observation_noise_function, "handles_normalization", False)
+            and not getattr(self.observation_noise_function, "handles_ball_plate_normalization", False)
+        ):
             return observation
 
         plate_size = self.internal_state.get("ball_plate_plate_size", self.ball_plate_plate_size)
