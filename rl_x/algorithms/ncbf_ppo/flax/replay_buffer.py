@@ -2,26 +2,35 @@ import numpy as np
 
 
 class ReplayBuffer():
-    def __init__(self, capacity, nr_envs, os_shape, as_shape, rng):
+    def __init__(self, capacity, nr_envs, os_shape, as_shape, rng, n_targets=1, history_shape=None):
         self.os_shape = os_shape
         self.as_shape = as_shape
+        self.n_targets = n_targets
+        self.history_shape = history_shape
         self.capacity = capacity // nr_envs
         self.nr_envs = nr_envs
         self.rng = rng
         self.states = np.zeros((self.capacity, nr_envs) + os_shape, dtype=np.float32)
         self.next_states = np.zeros((self.capacity, nr_envs) + os_shape, dtype=np.float32)
         self.actions = np.zeros((self.capacity, nr_envs) + as_shape, dtype=np.float32)
+        self.history_stacks = (
+            np.zeros((self.capacity, nr_envs) + history_shape, dtype=np.float32)
+            if history_shape is not None
+            else None
+        )
         self.rewards = np.zeros((self.capacity, nr_envs), dtype=np.float32)
         self.terminations = np.zeros((self.capacity, nr_envs), dtype=np.float32)
-        self.y_targets = np.zeros((self.capacity, nr_envs), dtype=np.float32)
+        self.y_targets = np.zeros((self.capacity, nr_envs, n_targets), dtype=np.float32)
         self.masks = np.zeros((self.capacity, nr_envs), dtype=np.float32)
         self.pos = 0
         self.size = 0
 
-    def add(self, states, next_states, actions, rewards, terminations, masks, y_targets):
+    def add(self, states, next_states, actions, rewards, terminations, masks, y_targets, history_stacks=None):
         self.states[self.pos] = states
         self.next_states[self.pos] = next_states
         self.actions[self.pos] = actions
+        if self.history_stacks is not None and history_stacks is not None:
+            self.history_stacks[self.pos] = history_stacks
         self.rewards[self.pos] = rewards
         self.terminations[self.pos] = terminations
         self.y_targets[self.pos] = y_targets
@@ -29,7 +38,7 @@ class ReplayBuffer():
         self.pos = (self.pos + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
-    def add_batch(self, states, next_states, actions, rewards, terminations, masks, y_targets):
+    def add_batch(self, states, next_states, actions, rewards, terminations, masks, y_targets, history_stacks=None):
         assert states.ndim == 2 + len(self.os_shape), "States should have time/env batch dimensions when adding rollout transitions."
 
         batch_size = states.shape[0]
@@ -40,6 +49,8 @@ class ReplayBuffer():
             self.states[sl] = states
             self.next_states[sl] = next_states
             self.actions[sl] = actions
+            if self.history_stacks is not None and history_stacks is not None:
+                self.history_stacks[sl] = history_stacks
             self.rewards[sl] = rewards
             self.terminations[sl] = terminations
             self.masks[sl] = masks
@@ -54,6 +65,8 @@ class ReplayBuffer():
             self.states[sl1] = states[:end_space]
             self.next_states[sl1] = next_states[:end_space]
             self.actions[sl1] = actions[:end_space]
+            if self.history_stacks is not None and history_stacks is not None:
+                self.history_stacks[sl1] = history_stacks[:end_space]
             self.rewards[sl1] = rewards[:end_space]
             self.terminations[sl1] = terminations[:end_space]
             self.masks[sl1] = masks[:end_space]
@@ -64,6 +77,8 @@ class ReplayBuffer():
             self.states[sl2] = states[end_space:]
             self.next_states[sl2] = next_states[end_space:]
             self.actions[sl2] = actions[end_space:]
+            if self.history_stacks is not None and history_stacks is not None:
+                self.history_stacks[sl2] = history_stacks[end_space:]
             self.rewards[sl2] = rewards[end_space:]
             self.terminations[sl2] = terminations[end_space:]
             self.masks[sl2] = masks[end_space:]
@@ -81,6 +96,6 @@ class ReplayBuffer():
         actions = self.actions[idx1, idx2].reshape((nr_samples,) + self.as_shape)
         rewards = self.rewards[idx1, idx2].reshape((nr_samples,))
         terminations = self.terminations[idx1, idx2].reshape((nr_samples,))
-        y_targets = self.y_targets[idx1, idx2].reshape((nr_samples,))
+        y_targets = self.y_targets[idx1, idx2].reshape((nr_samples, self.n_targets))
         masks = self.masks[idx1, idx2].reshape((nr_samples,))
         return states, next_states, actions, rewards, terminations, y_targets, masks

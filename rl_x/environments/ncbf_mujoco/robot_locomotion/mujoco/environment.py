@@ -311,12 +311,13 @@ class LocomotionEnv(gym.Env):
 
         self.observation_noise_function.init_attributes()
 
-        eval_mode = False
+        eval_mode = True
+        self.max_curriculum_level = 0.2
         self.internal_state = {
             "mj_model": deepcopy(self.initial_mj_model),
             "data": mujoco.MjData(self.initial_mj_model),
             "in_eval_mode": eval_mode,
-            "env_curriculum_coeff": np.where(eval_mode, 1.0, 0.0),
+            "env_curriculum_coeff": np.where(eval_mode, self.max_curriculum_level, 0.0),
             "env_curriculum_levels_in_a_row": 0.0,
             "actuator_joint_nominal_positions": self.initial_qpos[self.actuator_joint_mask_qpos],
             "actuator_joint_max_velocities": self.actuator_joint_max_velocities,
@@ -345,7 +346,7 @@ class LocomotionEnv(gym.Env):
             "info": {
                 "rollout/episode_return": 0.0,
                 "rollout/episode_length": 0,
-                "env_curriculum/coefficient": np.where(eval_mode, 1.0, 0.0),
+                "env_curriculum/coefficient": np.where(eval_mode, self.max_curriculum_level, 0.0),
             },
             "info_episode_store": {
                 "episode_return": 0.0,
@@ -597,6 +598,36 @@ class LocomotionEnv(gym.Env):
 
         home_key.qpos = home_qpos
 
+
+    def _apply_ball_plate_initial_joint_positions_to_state(self, qpos, qvel=None):
+        initial_joint_positions = self.ball_plate_config.get("initial_joint_positions", {})
+        if not initial_joint_positions:
+            return
+
+        model = self.internal_state["mj_model"]
+        qposadr_to_nominal_index = {
+            int(qposadr): nominal_index
+            for nominal_index, qposadr in enumerate(self.actuator_joint_mask_qpos)
+        }
+
+        for joint_name, joint_position in initial_joint_positions.items():
+            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            if joint_id == -1:
+                raise ValueError(f"Unknown ball_plate initial joint: {joint_name}")
+
+            if model.jnt_limited[joint_id]:
+                joint_position = np.clip(joint_position, model.jnt_range[joint_id, 0], model.jnt_range[joint_id, 1])
+
+            qposadr = model.jnt_qposadr[joint_id]
+            qpos[qposadr] = joint_position
+            nominal_index = qposadr_to_nominal_index.get(int(qposadr))
+            if nominal_index is not None:
+                self.internal_state["actuator_joint_nominal_positions"][nominal_index] = joint_position
+            if qvel is not None:
+                dofadr = model.jnt_dofadr[joint_id]
+                qvel[dofadr] = 0.0
+
+
     @staticmethod
     def _xmat_with_z_axis(z_axis):
         x_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
@@ -727,6 +758,10 @@ class LocomotionEnv(gym.Env):
         self.terrain_function.sample()
 
         qpos, qvel = self.initial_state_function.setup()
+
+        if self.use_ball_plate:
+            self._apply_ball_plate_initial_joint_positions_to_state(qpos, qvel)
+
         self.internal_state["data"] = mujoco.MjData(self.internal_state["mj_model"])
         self.internal_state["data"].qpos = qpos
         self.internal_state["data"].qvel = qvel
@@ -745,7 +780,7 @@ class LocomotionEnv(gym.Env):
             )
         )
         self.internal_state["env_curriculum_coeff"] =  np.clip(self.internal_state["env_curriculum_coeff"] + self.internal_state["env_curriculum_levels_in_a_row"] / self.env_curriculum_nr_levels, 0.0, 1.0)
-        self.internal_state["env_curriculum_coeff"] = np.where(self.internal_state["in_eval_mode"], 1.0, self.internal_state["env_curriculum_coeff"])
+        self.internal_state["env_curriculum_coeff"] = np.where(self.internal_state["in_eval_mode"], self.max_curriculum_level, self.internal_state["env_curriculum_coeff"])
         
         self.internal_state["imu_orientation_rotation"] = Rotation.from_matrix(self.internal_state["data"].site_xmat[self.imu_site_id].reshape(3, 3))
         self.internal_state["imu_orientation_rotation_inverse"] = self.internal_state["imu_orientation_rotation"].inv()
@@ -758,15 +793,20 @@ class LocomotionEnv(gym.Env):
         self.reward_function.setup()
         self.domain_randomization_action_delay_function.setup()
         self.handle_domain_randomization(is_episode_start=True)
+
         if self.use_ball_plate:
             qpos = self.internal_state["data"].qpos.copy()
             qvel = self.internal_state["data"].qvel.copy()
+            self._apply_ball_plate_initial_joint_positions_to_state(qpos, qvel)
             self._reset_ball_plate_state(qpos, qvel)
             self.internal_state["data"] = mujoco.MjData(self.internal_state["mj_model"])
             self.internal_state["data"].qpos = qpos
             self.internal_state["data"].qvel = qvel
             self.internal_state["data"].ctrl = np.zeros(self.nr_actuator_joints)
             mujoco.mj_forward(self.internal_state["mj_model"], self.internal_state["data"])
+            self.internal_state["imu_orientation_rotation"] = Rotation.from_matrix(self.internal_state["data"].site_xmat[self.imu_site_id].reshape(3, 3))
+            self.internal_state["imu_orientation_rotation_inverse"] = self.internal_state["imu_orientation_rotation"].inv()
+            self.internal_state["imu_orientation_euler"] = self.internal_state["imu_orientation_rotation"].as_euler("xyz")
 
         should_sample_commands = self.command_sampling_function.setup()
         if should_sample_commands:

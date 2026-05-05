@@ -544,6 +544,38 @@ class LocomotionEnv:
 
         home_key.qpos = home_qpos
 
+
+    def _apply_ball_plate_initial_joint_positions_to_state(self, qpos, qvel=None, internal_state=None):
+        initial_joint_positions = self.ball_plate_config.get("initial_joint_positions", {})
+        if not initial_joint_positions:
+            return qpos, qvel
+
+        model = self.initial_mj_model
+        qposadr_to_nominal_index = {
+            int(qposadr): nominal_index
+            for nominal_index, qposadr in enumerate(self.actuator_joint_mask_qpos)
+        }
+
+        for joint_name, joint_position in initial_joint_positions.items():
+            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            if joint_id == -1:
+                raise ValueError(f"Unknown ball_plate initial joint: {joint_name}")
+
+            if model.jnt_limited[joint_id]:
+                joint_position = np.clip(joint_position, model.jnt_range[joint_id, 0], model.jnt_range[joint_id, 1])
+
+            qposadr = model.jnt_qposadr[joint_id]
+            qpos = qpos.at[qposadr].set(joint_position)
+            nominal_index = qposadr_to_nominal_index.get(int(qposadr))
+            if internal_state is not None and nominal_index is not None:
+                nominal_positions = internal_state["actuator_joint_nominal_positions"].at[nominal_index].set(joint_position)
+                internal_state["actuator_joint_nominal_positions"] = nominal_positions
+            if qvel is not None:
+                dofadr = model.jnt_dofadr[joint_id]
+                qvel = qvel.at[dofadr].set(0.0)
+
+        return qpos, qvel
+
     
     def render(self, state):
         mjx_model = state.mjx_model
@@ -734,7 +766,13 @@ class LocomotionEnv:
         self.reward_function.setup(new_internal_state)
         self.domain_randomization_action_delay_function.setup(new_internal_state)
         data, mjx_model = self.handle_domain_randomization(new_internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
+        if self.use_ball_plate:
+            qpos, qvel = self._apply_ball_plate_initial_joint_positions_to_state(data.qpos, data.qvel, new_internal_state)
+            data = data.replace(qpos=qpos, qvel=qvel)
         data, mjx_model = self._reset_ball_plate_state(data, mjx_model, new_internal_state, ball_plate_key)
+        new_internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
+        new_internal_state["imu_orientation_rotation_inverse"] = new_internal_state["imu_orientation_rotation"].inv()
+        new_internal_state["imu_orientation_euler"] = new_internal_state["imu_orientation_rotation"].as_euler("xyz")
         should_sample_commands = self.command_sampling_function.setup(command_key)
         self.command_function.get_next_command(new_internal_state, should_sample_commands, command_key)
 

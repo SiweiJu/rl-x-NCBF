@@ -161,7 +161,7 @@ class PPO:
 
         self.critic_state = TrainState.create(
             apply_fn=self.critic.apply,
-            params=self.critic.init(critic_key, env_state.next_observation, dummy_latent),
+            params=self.critic.init(critic_key, env_state.next_observation, dummy_latent, dummy_decoder_output),
             tx=optax.chain(
                 optax.clip_by_global_norm(self.max_grad_norm),
                 optax.inject_hyperparams(optax.adam)(learning_rate=learning_rate),
@@ -260,7 +260,7 @@ class PPO:
                                                                                       params_stack)
                 # contraint_active = 0
                 # delta_u = 0
-                value = self.critic.apply(critic_state.params, observation, latent_z).squeeze(-1)
+                value = self.critic.apply(critic_state.params, observation, latent_z, policy_decoder_output).squeeze(-1)
 
                 env_action = processed_action
                 env_state = self.env.step(env_state, env_action)
@@ -791,7 +791,9 @@ class PPO:
                     # sample and update
 
                     # Calculating advantages and returns
-                    def calculate_gae_advantages(critic_state, encoder_state, next_states, history_stacks, rewards, values, terminations, dones):
+                    def calculate_gae_advantages(critic_state, encoder_state, decoder_state,
+                                                 states, next_states, env_actions,
+                                                 history_stacks, rewards, values, terminations, dones):
                         terminations = terminations.astype(jnp.float32)
                         dones = dones.astype(jnp.float32)
 
@@ -802,8 +804,9 @@ class PPO:
 
                         next_history_stacks = jnp.roll(history_stacks, -1, axis=2)
                         next_history_stacks = next_history_stacks.at[:, :, -1, :].set(next_states)
-                        next_latents = encoder_state.apply_fn(encoder_state.params, next_history_stacks)
-                        next_values = self.critic.apply(critic_state.params, next_states, next_latents).squeeze(-1)
+                        next_latents = jax.lax.stop_gradient(encoder_state.apply_fn(encoder_state.params, next_history_stacks))
+                        next_decoder_output = self._get_policy_decoder_output(decoder_state.params, next_latents, states, env_actions)
+                        next_values = self.critic.apply(critic_state.params, next_states, next_latents, next_decoder_output).squeeze(-1)
                         delta = rewards + self.gamma * next_values * (1.0 - terminations) - values
                         init_advantages = delta[-1]
                         _, advantages = jax.lax.scan(compute_advantages, (init_advantages,), jnp.arange(self.nr_steps - 2, -1, -1))
@@ -811,32 +814,33 @@ class PPO:
                         returns = advantages + values
                         return advantages, returns
 
-                    advantages, returns = calculate_gae_advantages(critic_state, encoder_state, next_states, history_stacks, rewards, values, terminations, dones)
+                    advantages, returns = calculate_gae_advantages(
+                        critic_state,
+                        encoder_state,
+                        decoder_state,
+                        states,
+                        next_states,
+                        env_actions,
+                        history_stacks,
+                        rewards,
+                        values,
+                        terminations,
+                        dones,
+                    )
 
                     # Optimizing
-                    def loss_fn(policy_params, critic_params, encoder_params, decoder_params, ncbf_params,
-                                state_b, next_state_b, action_b, env_action_b, log_prob_b,
-                                return_b, advantage_b,
-                                last_state_b, last_action_b, history_stack_b, next_state_mask_b,
-                                y_target_b, indices_to_term_b, ncbf_masks_b,
-                                replay_state_b, replay_next_state_b, replay_action_b,
-                                replay_y_target_b, replay_indices_to_term_b, replay_ncbf_masks_b,
-                                replay_last_action_b, replay_history_stack_b
-                                ):
+                    def ppo_loss_fn(policy_params, critic_params, encoder_params, decoder_params,
+                                    state_b, action_b, log_prob_b, return_b, advantage_b,
+                                    last_state_b, last_action_b, history_stack_b):
                         # Policy loss
-                        latent_b = self.encoder.apply(encoder_params, history_stack_b)
-                        next_history_stack_b = jnp.roll(history_stack_b, -1, axis=1)
-                        next_history_stack_b = next_history_stack_b.at[:, -1, :].set(next_state_b)
-                        next_latent_b = self.encoder.apply(encoder_params, next_history_stack_b)
-
-                        policy_latent_b = jax.lax.stop_gradient(latent_b)
-                        policy_decoder_output_b = self._get_policy_decoder_output(
+                        latent_b = jax.lax.stop_gradient(self.encoder.apply(encoder_params, history_stack_b))
+                        decoder_output_b = self._get_policy_decoder_output(
                             decoder_params,
-                            policy_latent_b,
+                            latent_b,
                             last_state_b,
                             last_action_b,
                         )
-                        action_mean, action_logstd = self.policy.apply(policy_params, state_b, policy_latent_b, policy_decoder_output_b)
+                        action_mean, action_logstd = self.policy.apply(policy_params, state_b, latent_b, decoder_output_b)
                         action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                         action_std = jnp.exp(action_logstd)
                         new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
@@ -856,7 +860,7 @@ class PPO:
                         entropy_loss = jnp.mean(entropy)
 
                         # Critic loss
-                        new_value = self.critic.apply(critic_params, state_b, latent_b)
+                        new_value = self.critic.apply(critic_params, state_b, latent_b, decoder_output_b)
                         critic_loss = 0.5 * jnp.mean((new_value.squeeze(-1) - return_b) ** 2)
 
                         # anticipation loss
@@ -865,6 +869,35 @@ class PPO:
                         #
                         # anticipation_loss = 0.5 * jnp.mean(jnp.sum((action_mean - safe_action_b) ** 2, axis=-1))
                         anticipation_loss = 0
+
+                        loss = (
+                            pg_loss -
+                            self.entropy_coef * entropy_loss +
+                            self.critic_coef * critic_loss +
+                            self.anticipation_coef * anticipation_loss
+                        )
+
+                        metrics = {
+                            "loss/policy_gradient_loss": pg_loss,
+                            "loss/critic_loss": critic_loss,
+                            "loss/entropy_loss": entropy_loss,
+                            "loss/anticipation_loss": anticipation_loss,
+                            "policy_ratio/approx_kl": approx_kl_div,
+                            "policy_ratio/clip_fraction": clip_fraction,
+                        }
+                        return loss, metrics
+
+                    def auxiliary_loss_fn(encoder_params, decoder_params, ncbf_params,
+                                          state_b, next_state_b, env_action_b,
+                                          last_action_b, next_state_mask_b, history_stack_b,
+                                          y_target_b, indices_to_term_b, ncbf_masks_b,
+                                          replay_state_b, replay_next_state_b, replay_action_b,
+                                          replay_y_target_b, replay_indices_to_term_b, replay_ncbf_masks_b,
+                                          replay_last_action_b, replay_history_stack_b):
+                        latent_b = self.encoder.apply(encoder_params, history_stack_b)
+                        next_history_stack_b = jnp.roll(history_stack_b, -1, axis=1)
+                        next_history_stack_b = next_history_stack_b.at[:, -1, :].set(next_state_b)
+                        next_latent_b = self.encoder.apply(encoder_params, next_history_stack_b)
 
                         # auxiliary next step prediction loss
                         pred_next_obs = self.decoder.apply(decoder_params, latent_b, state_b, env_action_b)
@@ -877,39 +910,15 @@ class PPO:
                         replay_next_latent_b = self.encoder.apply(encoder_params, replay_next_history_stack_b)
 
                         # ncbf_loss
-                        current_ncbf_latent_b = jax.lax.cond(
-                            self.ncbf_stop_encoder_gradient,
-                            jax.lax.stop_gradient,
-                            lambda x: x,
-                            latent_b,
-                        )
-                        current_ncbf_next_latent_b = jax.lax.cond(
-                            self.ncbf_stop_encoder_gradient,
-                            jax.lax.stop_gradient,
-                            lambda x: x,
-                            next_latent_b,
-                        )
-                        replay_ncbf_latent_b = jax.lax.cond(
-                            self.ncbf_stop_encoder_gradient,
-                            jax.lax.stop_gradient,
-                            lambda x: x,
-                            replay_latent_b,
-                        )
-                        replay_ncbf_next_latent_b = jax.lax.cond(
-                            self.ncbf_stop_encoder_gradient,
-                            jax.lax.stop_gradient,
-                            lambda x: x,
-                            replay_next_latent_b,
-                        )
                         current_h_input = jnp.concatenate([state_b[..., self.ncbf_observation_indices], last_action_b], axis=-1)
                         current_h_input_next = jnp.concatenate([next_state_b[..., self.ncbf_observation_indices], env_action_b], axis=-1)
                         replay_h_input = jnp.concatenate([replay_state_b[..., self.ncbf_observation_indices], replay_last_action_b], axis=-1)
                         replay_h_input_next = jnp.concatenate([replay_next_state_b[..., self.ncbf_observation_indices], replay_action_b], axis=-1)
 
-                        current_h_input = jnp.concatenate((current_h_input, current_ncbf_latent_b), axis=-1)
-                        current_h_input_next = jnp.concatenate((current_h_input_next, current_ncbf_next_latent_b), axis=-1)
-                        replay_h_input = jnp.concatenate((replay_h_input, replay_ncbf_latent_b), axis=-1)
-                        replay_h_input_next = jnp.concatenate((replay_h_input_next, replay_ncbf_next_latent_b), axis=-1)
+                        current_h_input = jnp.concatenate((current_h_input, latent_b), axis=-1)
+                        current_h_input_next = jnp.concatenate((current_h_input_next, next_latent_b), axis=-1)
+                        replay_h_input = jnp.concatenate((replay_h_input, replay_latent_b), axis=-1)
+                        replay_h_input_next = jnp.concatenate((replay_h_input_next, replay_next_latent_b), axis=-1)
 
                         h_input = jnp.concatenate((current_h_input, replay_h_input), axis=0)
                         h_input_next = jnp.concatenate((current_h_input_next, replay_h_input_next), axis=0)
@@ -954,23 +963,16 @@ class PPO:
                         cls_loss = num / den
                         ncbf_loss = cls_loss
 
-                        # Combine losses
-                        loss = (pg_loss -
-                                self.entropy_coef * entropy_loss +
-                                self.critic_coef * critic_loss +
-                                self.anticipation_coef * anticipation_loss +
-                                self.aux_prediction_coef * prediction_loss +
-                                self.ncbf_loss_coef * ncbf_loss
-                                )
+                        loss = (
+                            self.aux_prediction_coef * prediction_loss +
+                            self.ncbf_loss_coef * ncbf_loss
+                        )
 
                         # Create metrics
                         metrics = {
-                            "loss/policy_gradient_loss": pg_loss,
-                            "loss/critic_loss": critic_loss,
-                            "loss/entropy_loss": entropy_loss,
-                            "loss/anticipation_loss": anticipation_loss,
                             "loss/aux_prediction_loss": prediction_loss,
                             "loss/ncbf_loss": ncbf_loss,
+                            "loss/weighted_aux_prediction_loss": self.aux_prediction_coef * prediction_loss,
                             "loss/weighted_ncbf_loss": self.ncbf_loss_coef * ncbf_loss,
                             "ncbf/current_samples_per_minibatch": jnp.sum(ncbf_masks_b.astype(jnp.float32)),
                             "ncbf/replay_neg_samples_per_minibatch": jnp.sum(replay_ncbf_masks_b.astype(jnp.float32)),
@@ -981,8 +983,6 @@ class PPO:
                             "ncbf/pred_tilt_safe_prob": jnp.sum(ncbf_masks * h_prob[..., 1]) / den,
                             "ncbf/minibatch_target_height_safe_rate": jnp.sum(ncbf_masks * ncbf_y_target[..., 0]) / den,
                             "ncbf/minibatch_target_tilt_safe_rate": jnp.sum(ncbf_masks * ncbf_y_target[..., 1]) / den,
-                            "policy_ratio/approx_kl": approx_kl_div,
-                            "policy_ratio/clip_fraction": clip_fraction,
                         }
                         if len(self.env.ncbf_target_indices) > 3:
                             metrics["ncbf/ball_drop_bce"] = jnp.sum(ncbf_masks * bce[..., 2]) / den
@@ -1047,26 +1047,8 @@ class PPO:
                     initial_approx_kl = jnp.mean((initial_ratio - 1.0) - initial_logratio)
                     initial_abs_logratio = jnp.mean(jnp.abs(initial_logratio))
 
-                    # vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
-                    # safe_mean = lambda x: jnp.mean(x) if x is not None else x
-                    # mean_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
-                    # grad_loss_fn = jax.value_and_grad(mean_loss_fn, argnums=(0, 1, 2, 3), has_aux=True)
-                    grad_loss_fn = jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3, 4), has_aux=True)
-
-                    @jax.jit
-                    def predictor_loss_fn(encoder_params, decoder_params, minib_obs, minib_next_obs, minib_actions, minib_masks,
-                                minib_history_stack):
-                        latent = encoder_state.apply_fn(encoder_params, minib_history_stack)
-                        pred_next_obs = decoder_state.apply_fn(decoder_params, latent, minib_obs, minib_actions)
-
-                        # Reshape masks from (batch,) to (batch, 1) for proper broadcasting with obs differences
-                        minib_masks = minib_masks[..., None].astype(jnp.float32)
-                        mse_loss = jnp.sum(minib_masks * jnp.square(
-                            pred_next_obs - minib_next_obs[..., self.next_step_predictor_output_indices])) / (
-                                               jnp.sum(minib_masks) + 1e-8)
-                        return mse_loss
-
-                    # grad_predictor_loss_fn = jax.value_and_grad(predictor_loss_fn, argnums=(0, 1))
+                    ppo_grad_loss_fn = jax.value_and_grad(ppo_loss_fn, argnums=(0, 1), has_aux=True)
+                    auxiliary_grad_loss_fn = jax.value_and_grad(auxiliary_loss_fn, argnums=(0, 1, 2), has_aux=True)
 
                     key, subkey = jax.random.split(key)
                     batch_indices = jnp.tile(jnp.arange(self.batch_size), (self.nr_epochs, 1))
@@ -1082,24 +1064,30 @@ class PPO:
                         minibatch_advantages = batch_advantages[minibatch_indices]
                         minibatch_advantages = (minibatch_advantages - jnp.mean(minibatch_advantages)) / (jnp.std(minibatch_advantages) + 1e-8)
 
-                        # minib_latent = encoder_state.apply_fn(encoder_state.params, batch_history_stack[minibatch_indices])
-                        (loss, metrics), (policy_gradients, critic_gradients, encoder_gradients, decoder_gradients, ncbf_gradients) = grad_loss_fn(
+                        (ppo_loss, ppo_metrics), (policy_gradients, critic_gradients) = ppo_grad_loss_fn(
                             policy_state.params,
                             critic_state.params,
                             encoder_state.params,
                             decoder_state.params,
-                            ncbf_state.params,
                             batch_states[minibatch_indices],
-                            batch_next_states[minibatch_indices],
                             batch_actions[minibatch_indices],
-                            batch_env_actions[minibatch_indices],
                             batch_log_probs[minibatch_indices],
                             batch_returns[minibatch_indices],
                             minibatch_advantages,
                             batch_last_states[minibatch_indices],
                             batch_last_actions[minibatch_indices],
                             batch_history_stack[minibatch_indices],
+                        )
+                        (auxiliary_loss, auxiliary_metrics), (encoder_gradients, decoder_gradients, ncbf_gradients) = auxiliary_grad_loss_fn(
+                            encoder_state.params,
+                            decoder_state.params,
+                            ncbf_state.params,
+                            batch_states[minibatch_indices],
+                            batch_next_states[minibatch_indices],
+                            batch_env_actions[minibatch_indices],
+                            batch_last_actions[minibatch_indices],
                             batch_next_state_masks[minibatch_indices],
+                            batch_history_stack[minibatch_indices],
                             batch_y_targets[minibatch_indices],
                             batch_indices_to_term[minibatch_indices],
                             batch_ncbf_masks[minibatch_indices],
@@ -1112,6 +1100,9 @@ class PPO:
                             replay_last_actions,
                             replay_history_stacks,
                         )
+                        metrics = {**ppo_metrics, **auxiliary_metrics}
+                        metrics["loss/ppo_loss"] = ppo_loss
+                        metrics["loss/auxiliary_loss"] = auxiliary_loss
 
                         ppo_update_enabled = jnp.logical_or(
                             self.target_kl <= 0.0,
@@ -1119,7 +1110,7 @@ class PPO:
                         )
 
                         policy_raw_grad_norm = optax.global_norm(policy_gradients)
-                        encoder_raw_grad_norm = optax.global_norm(encoder_gradients)
+                        encoder_grad_norm = optax.global_norm(encoder_gradients)
 
                         policy_state = jax.lax.cond(
                             ppo_update_enabled,
@@ -1128,35 +1119,16 @@ class PPO:
                             policy_state,
                         )
                         critic_state = critic_state.apply_gradients(grads=critic_gradients)
-                        encoder_state = jax.lax.cond(
-                            ppo_update_enabled,
-                            lambda state: state.apply_gradients(grads=encoder_gradients),
-                            lambda state: state,
-                            encoder_state,
-                        )
+                        encoder_state = encoder_state.apply_gradients(grads=encoder_gradients)
                         decoder_state = decoder_state.apply_gradients(grads=decoder_gradients)
-                        # temporarily not updating ncbf
                         ncbf_state = ncbf_state.apply_gradients(grads=ncbf_gradients)
 
-                        # update next step predictor
-                        # predictor_loss, grads_predictor = grad_predictor_loss_fn(
-                        #     encoder_state.params,
-                        #     decoder_state.params,
-                        #     batch_states[minibatch_indices],
-                        #     batch_next_states[minibatch_indices],
-                        #     batch_actions[minibatch_indices],
-                        #     batch_next_state_masks[minibatch_indices],
-                        #     batch_history_stack[minibatch_indices],
-                        # )
-                        # encoder_state = encoder_state.apply_gradients(grads=grads_predictor[0])
-                        # decoder_state = decoder_state.apply_gradients(grads=grads_predictor[1])
-
-                        # metrics["next_step_predictor/loss"] = predictor_loss
                         metrics["gradients/policy_grad_norm"] = jnp.where(ppo_update_enabled, policy_raw_grad_norm, 0.0)
                         metrics["gradients/policy_raw_grad_norm"] = policy_raw_grad_norm
                         metrics["gradients/critic_grad_norm"] = optax.global_norm(critic_gradients)
-                        metrics["gradients/encoder_grad_norm"] = jnp.where(ppo_update_enabled, encoder_raw_grad_norm, 0.0)
-                        metrics["gradients/encoder_raw_grad_norm"] = encoder_raw_grad_norm
+                        metrics["gradients/encoder_grad_norm"] = encoder_grad_norm
+                        metrics["gradients/decoder_grad_norm"] = optax.global_norm(decoder_gradients)
+                        metrics["gradients/ncbf_grad_norm"] = optax.global_norm(ncbf_gradients)
                         metrics["policy_ratio/update_enabled"] = ppo_update_enabled.astype(jnp.float32)
 
                         carry = (policy_state, critic_state, encoder_state, decoder_state, ncbf_state, key)

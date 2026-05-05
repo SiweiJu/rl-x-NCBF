@@ -6,7 +6,7 @@ EXPERIMENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
-MODEL_PATH="/home/siwei/Downloads/latest(44).model"
+MODEL_PATH="/home/siwei/Downloads/latest(46).model"
 EXTRA_ARGS=("$@")
 if [[ "$#" -gt 0 && "$1" != --* ]]; then
     MODEL_PATH="$1"
@@ -19,7 +19,7 @@ if [[ -z "${MODEL_PATH}" ]]; then
 fi
 
 CONDA_ENV="${CONDA_ENV:-ncbf-mjx}"
-SEED="${SEED:-42}"
+SEED="${SEED:-41}"
 NR_TEST_EPISODES="${NR_TEST_EPISODES:-10}"
 EPISODE_SECONDS="${EPISODE_SECONDS:-20}"
 RENDER="${RENDER:-True}"
@@ -68,7 +68,7 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.train_robot="unitree_g1" \
     --environment.termination.height_percentage_threshold=0.6 \
     --environment.ball_plate.enabled=True \
-    --environment.ball_plate.include_observations=False \
+    --environment.ball_plate.include_observations=True \
     --runner.mode="test" \
     --runner.nr_test_episodes="${NR_TEST_EPISODES}" \
     --runner.load_model="${MODEL_PATH}" \
