@@ -114,6 +114,10 @@ class LocomotionEnv:
         self.actuator_joint_mask_joints = jnp.array([self.initial_mj_model.joint(joint_name).id for joint_name in self.actuator_joint_names])
         self.actuator_joint_mask_qpos = jnp.array([self.initial_mj_model.joint(joint_name).qposadr[0] for joint_name in self.actuator_joint_names])
         self.actuator_joint_mask_qvel = jnp.array([self.initial_mj_model.joint(joint_name).dofadr[0] for joint_name in self.actuator_joint_names])
+        self.actuator_joint_qposadr_to_nominal_index = {
+            int(qposadr): nominal_index
+            for nominal_index, qposadr in enumerate(np.asarray(self.actuator_joint_mask_qpos))
+        }
         self.nr_actuator_joints = len(self.actuator_joint_names)
         self.nr_joints = self.initial_mj_model.njnt
 
@@ -551,10 +555,6 @@ class LocomotionEnv:
             return qpos, qvel
 
         model = self.initial_mj_model
-        qposadr_to_nominal_index = {
-            int(qposadr): nominal_index
-            for nominal_index, qposadr in enumerate(self.actuator_joint_mask_qpos)
-        }
 
         for joint_name, joint_position in initial_joint_positions.items():
             joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
@@ -566,7 +566,7 @@ class LocomotionEnv:
 
             qposadr = model.jnt_qposadr[joint_id]
             qpos = qpos.at[qposadr].set(joint_position)
-            nominal_index = qposadr_to_nominal_index.get(int(qposadr))
+            nominal_index = self.actuator_joint_qposadr_to_nominal_index.get(int(qposadr))
             if internal_state is not None and nominal_index is not None:
                 nominal_positions = internal_state["actuator_joint_nominal_positions"].at[nominal_index].set(joint_position)
                 internal_state["actuator_joint_nominal_positions"] = nominal_positions
