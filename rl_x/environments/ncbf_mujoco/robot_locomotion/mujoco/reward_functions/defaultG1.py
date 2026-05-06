@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.default import DefaultReward
 
@@ -26,11 +27,72 @@ class DefaultG1Reward(DefaultReward):
         self.foot_lift_bonus_coeff = reward_config.get("foot_lift_bonus_coeff", 1.0) * env.dt
         self.foot_lift_bonus_per_robot_size_m = reward_config.get("foot_lift_bonus_per_robot_size_m", 0.10)
 
+        self.survival = reward_config.get("survival", 0.0) * env.dt
+        self.tracking_w_exp_linvel_x = reward_config.get("tracking_w_exp_linvel_x", 4.0)
+        self.tracking_w_sum_linvel_x = reward_config.get("tracking_w_sum_linvel_x", 0.0) * env.dt
+        self.tracking_w_exp_linvel_y = reward_config.get("tracking_w_exp_linvel_y", 4.0)
+        self.tracking_w_sum_linvel_y = reward_config.get("tracking_w_sum_linvel_y", 0.0) * env.dt
+        self.tracking_w_exp_angvel = reward_config.get("tracking_w_exp_angvel", 4.0)
+        self.tracking_w_sum_angvel = reward_config.get("tracking_w_sum_angvel", 0.0) * env.dt
+        self.nominal_joint_pos_exp = reward_config.get("tracking_nominal_joint_pos_exp", 4.0)
+        self.nominal_joint_pos_coeff = reward_config.get("tracking_nominal_joint_pos_coeff", 0.0) * env.dt
+        self.joint_deviation_l1_coeff = reward_config.get("joint_deviation_l1_coeff", 0.0) * env.dt
+        self.root_acc_coeff = reward_config.get("root_acc_coeff", 0.0) * env.dt
+        self.feet_swing_coeff = reward_config.get("feet_swing_coeff", 0.0) * env.dt
+        self.feet_swing_period = reward_config.get("feet_swing_period", 0.2)
+        self.feet_yaw_diff_coeff = reward_config.get("feet_yaw_diff_coeff", 0.0) * env.dt
+        self.feet_yaw_mean_coeff = reward_config.get("feet_yaw_mean_coeff", 0.0) * env.dt
+        self.feet_roll_coeff = reward_config.get("feet_roll_coeff", 0.0) * env.dt
+        self.feet_distance_target = reward_config.get("feet_distance_target", 0.2)
+        self.feet_distance_coeff = reward_config.get("feet_distance_coeff", 0.0) * env.dt
+        self.air_time_max = reward_config.get("air_time_max", 0.3)
+        self.air_time_coeff = reward_config.get("air_time_coeff", 0.0) * env.dt
+        self.no_fly_coeff = reward_config.get("no_fly_coeff", 0.0) * env.dt
+        self.impact_threshold = reward_config.get("impact_threshold", 150.0)
+        self.impact_coeff = reward_config.get("impact_coeff", 0.0) * env.dt
+
+        self.nominal_joint_qpos = env.initial_qpos
+        nominal_joint_names = reward_config.get("tracking_nominal_joint_pos_names", None)
+        if nominal_joint_names is None:
+            self.nominal_joint_qpos_id = np.array(env.actuator_joint_mask_qpos)
+        else:
+            self.nominal_joint_qpos_id = np.array([
+                env.initial_mj_model.joint(name).qposadr[0]
+                for name in nominal_joint_names
+            ])
+
+        foot_geom_indices = np.array(env.foot_geom_indices)
+        self.left_feet_in_feet = np.where(np.isin(foot_geom_indices, np.array(env.left_foot_geom_indices)))[0]
+        self.right_feet_in_feet = np.where(np.isin(foot_geom_indices, np.array(env.right_foot_geom_indices)))[0]
+        self.left_foot_body_ids = np.array([env.initial_mj_model.geom(int(geom_id)).bodyid[0] for geom_id in np.array(env.left_foot_geom_indices)])
+        self.right_foot_body_ids = np.array([env.initial_mj_model.geom(int(geom_id)).bodyid[0] for geom_id in np.array(env.right_foot_geom_indices)])
+
 
     def _scheduled_coeff(self, fixed_coeff, initial_coeff, final_coeff, curriculum_progress):
         if fixed_coeff >= 0.0:
             return fixed_coeff
         return initial_coeff + (final_coeff - initial_coeff) * curriculum_progress
+
+    @staticmethod
+    def _wrap_to_pi(angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+
+    @staticmethod
+    def _rotation_from_site_xmat(site_xmat):
+        xmat = site_xmat.reshape(3, 3)
+        if np.linalg.det(xmat) <= 0.0:
+            return Rotation.identity()
+        return Rotation.from_matrix(xmat)
+
+    def setup(self):
+        super().setup()
+        self.env.internal_state["humanoid_gait_process"] = 0.0
+        self.env.internal_state["humanoid_last_qvel"] = np.zeros(self.env.initial_mj_model.nv)
+        self.env.internal_state["humanoid_time_since_last_touchdown"] = np.zeros(2, dtype=np.float32)
+
+    def step(self):
+        super().step()
+        self.env.internal_state["humanoid_last_qvel"] = self.env.internal_state["data"].qvel.copy()
 
 
     def extra_reward_terms(self, action):
@@ -168,9 +230,77 @@ class DefaultG1Reward(DefaultReward):
         foot_lift_fraction = np.clip(feet_height_over_ground / target_foot_lift_bonus, 0.0, 1.0)
         foot_lift_bonus_reward = gait_coeff * self.foot_lift_bonus_coeff * float(is_moving_command) * np.mean(swing_feet * foot_lift_fraction)
 
+        data = self.env.internal_state["data"]
+        state = self.env.internal_state
+        survival_reward = self.survival
+        tracking_reward_linvel_x = np.exp(-np.square(current_imu_linear_velocity[0] - desired_imu_linear_velocity_xy[0]) * self.tracking_w_exp_linvel_x) * self.tracking_w_sum_linvel_x
+        tracking_reward_linvel_y = np.exp(-np.square(current_imu_linear_velocity[1] - desired_imu_linear_velocity_xy[1]) * self.tracking_w_exp_linvel_y) * self.tracking_w_sum_linvel_y
+        tracking_reward_angvel = np.exp(-np.square(current_imu_angular_velocity[2] - desired_imu_yaw_velocity) * self.tracking_w_exp_angvel) * self.tracking_w_sum_angvel
+        joint_qpos_reward = np.exp(
+            -self.nominal_joint_pos_exp *
+            np.sum(np.square(data.qpos[self.nominal_joint_qpos_id] - self.nominal_joint_qpos[self.nominal_joint_qpos_id]))
+        ) * self.nominal_joint_pos_coeff
+        joint_deviation_l1_penalty = (
+            np.sum(np.abs(data.qpos[self.nominal_joint_qpos_id] - self.nominal_joint_qpos[self.nominal_joint_qpos_id])) *
+            self.joint_deviation_l1_coeff
+        )
+        root_acceleration_reward = np.sum(np.square((data.qvel[:6] - state["humanoid_last_qvel"][:6]) / self.env.dt)) * self.root_acc_coeff
+
+        left_foot_on_ground = np.any(feet_floor_contacts[self.left_feet_in_feet])
+        right_foot_on_ground = np.any(feet_floor_contacts[self.right_feet_in_feet])
+        feet_on_ground = np.array([left_foot_on_ground, right_foot_on_ground])
+        gait_frequency = state.get("goal_gait_frequency", 0.0)
+        gait_process = np.fmod(state["humanoid_gait_process"] + self.env.dt * gait_frequency, 1.0)
+        left_swing = (np.abs(gait_process - 0.25) < 0.5 * self.feet_swing_period) and (gait_frequency > 1.0e-8)
+        right_swing = (np.abs(gait_process - 0.75) < 0.5 * self.feet_swing_period) and (gait_frequency > 1.0e-8)
+        feet_swing_reward = (
+            np.float32(left_swing and not feet_on_ground[0]) +
+            np.float32(right_swing and not feet_on_ground[1])
+        ) * self.feet_swing_coeff
+
+        left_foot_euler = self._rotation_from_site_xmat(data.site_xmat[self.env.left_foot_site_id]).as_euler("xyz")
+        right_foot_euler = self._rotation_from_site_xmat(data.site_xmat[self.env.right_foot_site_id]).as_euler("xyz")
+        left_foot_yaw = self._wrap_to_pi(left_foot_euler[2])
+        right_foot_yaw = self._wrap_to_pi(right_foot_euler[2])
+        feet_yaw_diff_reward = np.square(self._wrap_to_pi(left_foot_yaw - right_foot_yaw)) * self.feet_yaw_diff_coeff
+        feet_yaw_mean = (left_foot_yaw * 0.5 + right_foot_yaw * 0.5) + np.pi * (np.abs(left_foot_yaw - right_foot_yaw) > np.pi)
+        base_yaw = self._wrap_to_pi(state["imu_orientation_euler"][2])
+        feet_yaw_mean_reward = np.square(self._wrap_to_pi(base_yaw - feet_yaw_mean)) * self.feet_yaw_mean_coeff
+        feet_roll_reward = (np.square(self._wrap_to_pi(left_foot_euler[0])) + np.square(self._wrap_to_pi(right_foot_euler[0]))) * self.feet_roll_coeff
+
+        left_foot_pos = data.site_xpos[self.env.left_foot_site_id]
+        right_foot_pos = data.site_xpos[self.env.right_foot_site_id]
+        feet_distance = (
+            np.cos(base_yaw) * (left_foot_pos[1] - right_foot_pos[1]) -
+            np.sin(base_yaw) * (left_foot_pos[0] - right_foot_pos[0])
+        )
+        feet_distance_reward = np.clip(self.feet_distance_target - feet_distance, 0.0, 0.1) * self.feet_distance_coeff
+
+        tslt = state["humanoid_time_since_last_touchdown"].copy()
+        touchdown_reward = np.where(feet_on_ground & (tslt > 1e-6), tslt - self.air_time_max, 0.0)
+        air_time_reward = np.sum(touchdown_reward) * self.air_time_coeff
+        tslt = np.where(feet_on_ground, 0.0, tslt + self.env.dt)
+        no_fly_reward = (np.logical_and(tslt[0] > 0.0, tslt[1] > 0.0) * 1.0) * self.no_fly_coeff
+
+        left_foot_force_norm = np.linalg.norm(data.cfrc_ext[self.left_foot_body_ids, :3], axis=1)
+        right_foot_force_norm = np.linalg.norm(data.cfrc_ext[self.right_foot_body_ids, :3], axis=1)
+        impact_reward = (
+            np.mean((left_foot_force_norm > self.impact_threshold) * 1.0 + (right_foot_force_norm > self.impact_threshold) * 1.0) *
+            self.impact_coeff
+        )
+
+        state["humanoid_gait_process"] = gait_process
+        state["humanoid_time_since_last_touchdown"] = tslt
+
         extra_alive_reward, extra_positive_reward, extra_penalty = self.extra_reward_terms(action)
 
-        tracking_reward = tracking_xy_velocity_command_reward + tracking_yaw_velocity_command_reward
+        booster_tracking_reward = tracking_reward_linvel_x + tracking_reward_linvel_y + tracking_reward_angvel + joint_qpos_reward + feet_swing_reward
+        booster_penalty = (
+            root_acceleration_reward + feet_yaw_diff_reward + feet_yaw_mean_reward +
+            feet_roll_reward + feet_distance_reward + air_time_reward + no_fly_reward +
+            impact_reward + joint_deviation_l1_penalty
+        )
+        tracking_reward = tracking_xy_velocity_command_reward + tracking_yaw_velocity_command_reward + booster_tracking_reward
         critical_penalty = z_velocity_reward + imu_acceleration_reward + angular_velocity_reward + angular_position_reward + \
                            joint_position_limit_reward + joint_velocity_limit_reward + collision_reward + base_height_reward + \
                            all_feet_off_ground_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward
@@ -178,15 +308,32 @@ class DefaultG1Reward(DefaultReward):
                         power_draw_penalty_reward + action_rate_reward + action_smoothness_reward
         gait_reward = foot_lift_bonus_reward
         gait_penalty = foot_air_time_reward + symmetry_air_reward + contact_count_reward + foot_stance_time_reward + foot_clearance_reward
-        alive_total = alive_clipped_reward + alive_unclipped_reward + extra_alive_reward
-        penalty_total = critical_penalty + style_penalty + gait_penalty + extra_penalty
+        alive_total = alive_clipped_reward + alive_unclipped_reward + survival_reward + extra_alive_reward
+        penalty_total = critical_penalty + style_penalty + gait_penalty + booster_penalty + extra_penalty
         pre_clip_total = (
             tracking_reward + penalty_total + gait_reward +
-            extra_positive_reward + alive_clipped_reward + extra_alive_reward
+            extra_positive_reward + alive_clipped_reward + survival_reward + extra_alive_reward
         )
         reward = np.maximum(pre_clip_total, 0.0) + alive_unclipped_reward
         reward = np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
+        self.env.internal_state["info"][f"reward/survival"] = survival_reward
+        self.env.internal_state["info"][f"reward/track_linvel_x"] = tracking_reward_linvel_x
+        self.env.internal_state["info"][f"reward/track_linvel_y"] = tracking_reward_linvel_y
+        self.env.internal_state["info"][f"reward/track_angvel"] = tracking_reward_angvel
+        self.env.internal_state["info"][f"reward/joint_qpos"] = joint_qpos_reward
+        self.env.internal_state["info"][f"reward/feet_swing"] = feet_swing_reward
+        self.env.internal_state["info"][f"reward/root_acceleration"] = root_acceleration_reward
+        self.env.internal_state["info"][f"reward/feet_yaw_diff"] = feet_yaw_diff_reward
+        self.env.internal_state["info"][f"reward/feet_yaw_mean"] = feet_yaw_mean_reward
+        self.env.internal_state["info"][f"reward/feet_roll"] = feet_roll_reward
+        self.env.internal_state["info"][f"reward/feet_distance"] = feet_distance_reward
+        self.env.internal_state["info"][f"reward/air_time"] = air_time_reward
+        self.env.internal_state["info"][f"reward/no_fly"] = no_fly_reward
+        self.env.internal_state["info"][f"reward/impact"] = impact_reward
+        self.env.internal_state["info"][f"reward/joint_deviation_l1"] = joint_deviation_l1_penalty
+        self.env.internal_state["info"][f"reward/booster_tracking_total"] = booster_tracking_reward
+        self.env.internal_state["info"][f"reward/booster_penalty_total"] = booster_penalty
         self.env.internal_state["info"][f"reward/track_xy_vel_cmd"] = tracking_xy_velocity_command_reward
         self.env.internal_state["info"][f"reward/track_yaw_vel_cmd"] = tracking_yaw_velocity_command_reward
         self.env.internal_state["info"][f"reward/alive_clipped"] = alive_clipped_reward

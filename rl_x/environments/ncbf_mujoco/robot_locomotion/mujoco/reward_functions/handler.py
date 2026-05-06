@@ -1,26 +1,35 @@
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.default import DefaultReward
-from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.defaultG1 import DefaultG1Reward
-from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.G1ball import G1BallReward
-from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.booster import BoosterReward
-from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.boosterball import BoosterBallReward
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.humanoid import HumanoidReward
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.humanoidball import HumanoidBallReward
+
+
+def _humanoid_profile_from_name(name, env):
+    if name in ("booster", "boosterball"):
+        return "booster"
+    if name in ("defaultG1", "G1ball"):
+        return "g1"
+    return env.env_config["reward"].get("profile", None)
 
 
 def get_reward_function(name, env, **kwargs):
     if getattr(env, "use_ball_plate", False):
-        if env.robot_config.get("short_name") == "booster_t1":
-            name = "boosterball"
-        else:
-            name = "G1ball"
+        name = "humanoidball"
+    elif name == "default" and env.robot_config.get("short_name") == "g1":
+        name = "humanoid"
 
     if name == "default":
         return DefaultReward(env, **kwargs)
     elif name == "defaultG1":
-        return DefaultG1Reward(env, **kwargs)
+        return HumanoidReward(env, profile="g1", **kwargs)
     elif name == "G1ball":
-        return G1BallReward(env, **kwargs)
+        return HumanoidBallReward(env, profile="g1", **kwargs)
     elif name == "booster":
-        return BoosterReward(env, **kwargs)
+        return HumanoidReward(env, profile="booster", **kwargs)
     elif name == "boosterball":
-        return BoosterBallReward(env, **kwargs)
+        return HumanoidBallReward(env, profile="booster", **kwargs)
+    elif name == "humanoid":
+        return HumanoidReward(env, profile=_humanoid_profile_from_name(name, env), **kwargs)
+    elif name == "humanoidball":
+        return HumanoidBallReward(env, profile=_humanoid_profile_from_name(name, env), **kwargs)
     else:
         raise NotImplementedError
