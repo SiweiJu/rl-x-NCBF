@@ -49,11 +49,14 @@ def get_config(algorithm_name):
     config.ncbf.output_distribution = "deterministic"  # deterministic or logistic_normal
     config.ncbf.min_log_std = -5.0
     config.ncbf.max_log_std = 2.0
+    config.ncbf.residual_mc_samples = 16
 
     # safety layer configs
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
     config.ncbf.gamma_c = 1.0     # safety threshold (>=1 is safe, <=0 is unsafe)
     config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
+    config.ncbf.safety_layer_std_coeff_start = -2.0
+    config.ncbf.safety_layer_std_coeff_final = 1.0
 
     config.ncbf.action_clipping = True
     config.ncbf.use_robust_safety_layer = False  # use robust safety layer that considers action noise

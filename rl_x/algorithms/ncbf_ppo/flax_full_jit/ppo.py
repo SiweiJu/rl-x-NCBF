@@ -89,8 +89,10 @@ class PPO:
         self.ncbf_stop_encoder_gradient = config.algorithm.ncbf.stop_encoder_gradient
         self.ncbf_use_safety_layer = bool(config.algorithm.ncbf.use_safety_layer)
         self.ncbf_output_distribution = getattr(config.algorithm.ncbf, "output_distribution", "deterministic")
-        self.ncbf_min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
-        self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
+        self.ncbf_min_log_std = getattr(config.algorithm.ncbf, "min_log_std")
+        self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std")
+        self.ncbf_safety_layer_std_coeff_start = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_start")
+        self.ncbf_safety_layer_std_coeff_final = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_final")
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
 
@@ -614,11 +616,16 @@ class PPO:
                     policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
                     ncbf_neg_buffer = ncbf_replay_buffer
                     current_learning_update = (multi_learning_iteration_step * self.nr_updates_per_multi_learning_iteration) + learning_iteration_step
-                    curriculum_denominator = jnp.maximum(0.2 * jnp.asarray(self.nr_updates - 1, dtype=jnp.float32), 1.0)
-                    safety_layer_curriculum_coeff = jnp.clip(
+                    curriculum_denominator = jnp.maximum(jnp.asarray(self.nr_updates - 1, dtype=jnp.float32), 1.0)
+                    safety_layer_curriculum_fraction = jnp.clip(
                         jnp.asarray(current_learning_update, dtype=jnp.float32) / curriculum_denominator,
                         0.0,
                         1.0,
+                    )
+                    safety_layer_curriculum_coeff = (
+                        jnp.asarray(self.ncbf_safety_layer_std_coeff_start, dtype=jnp.float32) +
+                        safety_layer_curriculum_fraction *
+                        jnp.asarray(self.ncbf_safety_layer_std_coeff_final - self.ncbf_safety_layer_std_coeff_start, dtype=jnp.float32)
                     )
                     safety_layer_curriculum_coeff = jnp.where(
                         self.ncbf_use_safety_layer,
@@ -637,6 +644,7 @@ class PPO:
                     ncbf_metrics = {}
                     ncbf_metrics["ncbf/safety_layer_enabled"] = jnp.asarray(self.ncbf_use_safety_layer, dtype=jnp.float32)
                     ncbf_metrics["ncbf/safety_layer_curriculum_coeff"] = safety_layer_curriculum_coeff
+                    ncbf_metrics["ncbf/safety_layer_std_coeff"] = safety_layer_curriculum_coeff
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_target)
@@ -1112,10 +1120,18 @@ class PPO:
                         policy_raw_grad_norm = optax.global_norm(policy_gradients)
                         encoder_grad_norm = optax.global_norm(encoder_gradients)
 
+                        def apply_policy_update(state):
+                            return state.apply_gradients(grads=policy_gradients)
+
+                        def advance_policy_optimizer_clock(state):
+                            zero_policy_gradients = jax.tree_util.tree_map(jnp.zeros_like, policy_gradients)
+                            advanced_state = state.apply_gradients(grads=zero_policy_gradients)
+                            return advanced_state.replace(params=state.params)
+
                         policy_state = jax.lax.cond(
                             ppo_update_enabled,
-                            lambda state: state.apply_gradients(grads=policy_gradients),
-                            lambda state: state,
+                            apply_policy_update,
+                            advance_policy_optimizer_clock,
                             policy_state,
                         )
                         critic_state = critic_state.apply_gradients(grads=critic_gradients)
@@ -1310,6 +1326,8 @@ class PPO:
             "lambda_slack",
             "action_clipping",
             "max_delta_u",
+            "safety_layer_std_coeff_start",
+            "safety_layer_std_coeff_final",
         }
         for key, value in loaded_algorithm_config.items():
             if isinstance(value, dict):

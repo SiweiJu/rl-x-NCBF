@@ -52,11 +52,14 @@ def get_config(algorithm_name):
     config.ncbf.output_distribution = "deterministic"  # deterministic or logistic_normal
     config.ncbf.min_log_std = -5.0
     config.ncbf.max_log_std = 2.0
+    config.ncbf.residual_mc_samples = 16
     config.ncbf.policy_loss_coef = 0.01  # weight for policy loss when training ncbf
     config.ncbf.coef_decay_lambda = 0.95  # decay lambda for ncbf loss coefficients < 1
     config.ncbf.action_clipping = False
     config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
     config.ncbf.max_delta_u = 0.5  # max L2 action correction from the safety layer; <=0 disables
+    config.ncbf.safety_layer_std_coeff_start = -2.0
+    config.ncbf.safety_layer_std_coeff_final = 1.0
 
     config.ncbf_buffer = config_dict.ConfigDict()
     # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions

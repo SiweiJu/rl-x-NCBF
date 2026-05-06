@@ -14,6 +14,7 @@ Array = jnp.ndarray
 
 _LOGISTIC_NORMAL_GH_NODES, _LOGISTIC_NORMAL_GH_WEIGHTS = np.polynomial.hermite.hermgauss(9)
 _LOGISTIC_NORMAL_GH_PROB_WEIGHTS = _LOGISTIC_NORMAL_GH_WEIGHTS / np.sqrt(np.pi)
+_RESIDUAL_MC_RNG = np.random.default_rng(0)
 
 
 def split_ncbf_output(
@@ -73,6 +74,7 @@ def get_ncbf(config, env):
     output_distribution = getattr(config.algorithm.ncbf, "output_distribution", "deterministic")
     min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
     max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
+    residual_mc_samples = getattr(config.algorithm.ncbf, "residual_mc_samples", 16)
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
@@ -91,6 +93,7 @@ def get_ncbf(config, env):
         output_distribution=output_distribution,
         min_log_std=min_log_std,
         max_log_std=max_log_std,
+        residual_mc_samples=residual_mc_samples,
     )
 
 
@@ -137,11 +140,19 @@ def get_ensemble_forward_pass(
     output_distribution: str,
     min_log_std: float,
     max_log_std: float,
+    residual_mc_samples: int,
 ):
     alpha = 0.4
     E = n_ensemble
     k = max(1, int(np.ceil((1.0 - alpha) * E)))
     softmin_beta = 10
+    residual_mc_samples = max(2, int(residual_mc_samples))
+    residual_eps_current = _RESIDUAL_MC_RNG.standard_normal(residual_mc_samples).astype(np.float32)
+    residual_eps_next = _RESIDUAL_MC_RNG.standard_normal(residual_mc_samples).astype(np.float32)
+
+    def component_softmin(preds):
+        weights = jax.nn.softmax(-softmin_beta * preds, axis=-1)
+        return jnp.sum(weights * preds, axis=-1)
 
     @jax.jit
     def ensemble_forward_pass(params_stack, input):
@@ -171,27 +182,34 @@ def get_ensemble_forward_pass(
                 return jnp.mean(tail, axis=0)
             #
 
-            def component_softmin(preds):
-                """
-                preds: (E, ..., K)
-                softmin over the last dimension K for each ensemble member
-                returns: (E, ...)
-                """
-                beta = softmin_beta
-                weights = jax.nn.softmax(-beta * preds, axis=-1)
-                preds_softmin = jnp.sum(weights * preds, axis=-1)
-                return preds_softmin
-
             preds_softmin = component_softmin(preds)
             aggregated = cvar_bottomk(preds_softmin)
             return aggregated
 
-        if output_distribution == "logistic_normal":
-            prediction_std = jnp.sqrt(jnp.var(mean_predictions) + jnp.mean(jnp.exp(2.0 * log_std_predictions)))
-        else:
-            prediction_std = jnp.std(mean_predictions)
+        std_predictions = jnp.where(
+            output_distribution == "logistic_normal",
+            jnp.exp(log_std_predictions),
+            jnp.zeros_like(mean_predictions),
+        )
 
-        return aggregate_predictions(mean_predictions), prediction_std, mean_predictions
+        eps_shape = (residual_mc_samples,) + (1,) * mean_predictions.ndim
+        eps_current = jnp.asarray(residual_eps_current, dtype=mean_predictions.dtype).reshape(eps_shape)
+        prediction_samples = component_softmin(jax.nn.sigmoid(mean_predictions[None, ...] + std_predictions[None, ...] * eps_current))
+        n_samples = jnp.asarray(prediction_samples.size, dtype=mean_predictions.dtype)
+        prediction_sample_mean = jnp.mean(prediction_samples)
+        prediction_std = jnp.sqrt(
+            jnp.sum(jnp.square(prediction_samples - prediction_sample_mean)) /
+            jnp.maximum(n_samples - 1.0, 1.0)
+        )
+
+        prediction_details = {
+            "mean_logits": mean_predictions,
+            "std_logits": std_predictions,
+            "residual_eps_current": jnp.asarray(residual_eps_current, dtype=mean_predictions.dtype),
+            "residual_eps_next": jnp.asarray(residual_eps_next, dtype=mean_predictions.dtype),
+        }
+
+        return aggregate_predictions(jax.nn.sigmoid(mean_predictions)), prediction_std, prediction_details
     return ensemble_forward_pass
 
 
@@ -256,11 +274,34 @@ def make_get_safe_action(
       - No explicit g(x) needed.
     """
 
-    def alpha(s: Array) -> Array:
-        return eta_cbf * s
+    def component_softmin(preds: Array) -> Array:
+        beta = 10.0
+        weights = jax.nn.softmax(-beta * preds, axis=-1)
+        return jnp.sum(weights * preds, axis=-1)
+
+    def prediction_details_to_samples(details: Dict[str, Array], eps_name: str) -> Array:
+        mean_logits = details["mean_logits"]
+        std_logits = details["std_logits"]
+        eps = details[eps_name]
+        eps_shape = (eps.shape[0],) + (1,) * mean_logits.ndim
+        eps = eps.reshape(eps_shape)
+        logits = mean_logits[None, ...] + std_logits[None, ...] * eps
+        return component_softmin(jax.nn.sigmoid(logits))
+
+    def residual_mean_and_std(current_details: Dict[str, Array], next_details: Dict[str, Array]) -> Tuple[Array, Array]:
+        h_current_samples = prediction_details_to_samples(current_details, "residual_eps_current")
+        h_next_samples = prediction_details_to_samples(next_details, "residual_eps_next")
+        residual_samples = h_next_samples - (1.0 - eta_cbf) * h_current_samples - gamma_c
+        residual_mean = jnp.mean(residual_samples)
+        n_samples = jnp.asarray(residual_samples.size, dtype=residual_samples.dtype)
+        residual_std = jnp.sqrt(
+            jnp.sum(jnp.square(residual_samples - residual_mean)) /
+            jnp.maximum(n_samples - 1.0, 1.0)
+        )
+        return residual_mean, residual_std
 
     @jax.jit
-    def a_and_c_from_linearization(obs_t: Array, u0: Array, obs_last, u_last, latent_z, phi: dict):
+    def a_and_c_from_linearization(obs_t: Array, u0: Array, obs_last, u_last, latent_z, safety_layer_curriculum_coeff, phi: dict):
         """
         Compute:
           a = d/du h_phi(x_{t+1}(u)) | u0
@@ -272,18 +313,19 @@ def make_get_safe_action(
         x_t = obs_t[ncbf_obs_from_obs_idx]
         x_last = obs_last[ncbf_obs_from_obs_idx]
 
-        def q_of_u(u):
-            q_input = jnp.concatenate([x_t, u, latent_z], axis=-1)
-            q, _, _ = ncbf_apply(phi, q_input)
-            return q  # scalar-ish # note here phis is parameter stack for the ensemble
+        std_coeff = jnp.asarray(safety_layer_curriculum_coeff, dtype=u0.dtype)
 
-        a = jax.grad(q_of_u)(u0)
+        def robust_residual_of_u(u):
+            _, _, current_details = ncbf_apply(phi, jnp.concatenate([x_last, u_last, latent_z], axis=-1))
+            _, _, next_details = ncbf_apply(phi, jnp.concatenate([x_t, u, latent_z], axis=-1))
+            residual_mean, residual_std = residual_mean_and_std(current_details, next_details)
+            robust_residual = residual_mean - std_coeff * residual_std
+            return robust_residual, (residual_mean, residual_std)
 
-        h_x, h_x_std, _ = ncbf_apply(phi, jnp.concatenate([x_last, u_last, latent_z], axis=-1))
-        h_u0, h_u0_std, _ = ncbf_apply(phi, jnp.concatenate([x_t, u0, latent_z], axis=-1))
+        (robust_residual, (residual_mean, residual_std)), a = jax.value_and_grad(robust_residual_of_u, has_aux=True)(u0)
 
-        c_lin = h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0) - h_u0
-        return a, c_lin, h_x, h_u0, h_u0_std
+        c_lin = jnp.dot(a, u0) - robust_residual
+        return a, c_lin, residual_mean, robust_residual, residual_std
 
     @jax.jit
     def get_safe_action(
@@ -298,7 +340,15 @@ def make_get_safe_action(
 
         action_raw = jax.lax.cond(action_clipping, lambda x: jnp.clip(x, act_low, act_high), lambda x: x, action_raw)
 
-        a, c, h_x, h_u0, h_u0_std = a_and_c_from_linearization(obs_t, action_raw, last_obs, last_action, latent_z, phis)
+        a, c, residual_mean, robust_residual, residual_std = a_and_c_from_linearization(
+            obs_t,
+            action_raw,
+            last_obs,
+            last_action,
+            latent_z,
+            safety_layer_curriculum_coeff,
+            phis,
+        )
 
         aTa = jnp.dot(a, a) + 1e-12
         aTu = jnp.dot(a, action_raw)
@@ -306,10 +356,8 @@ def make_get_safe_action(
         # constraint violation amount
         delta = jnp.maximum(0.0, c - aTu)
 
-        # closed-form QP solution (soft slack)
-        sigma = jnp.maximum(h_u0_std, 1)
-        sigma = jnp.minimum(sigma, 10.0)
-        gain = delta / (aTa + (1.0 * sigma ** 2 / lambda_s))
+        # closed-form QP solution with soft slack
+        gain = delta / (aTa + (1.0 / lambda_s))
         correction = gain * a
         correction_norm = jnp.linalg.norm(correction) + 1e-8
         max_delta = jnp.asarray(max_delta_u, dtype=action_raw.dtype)
@@ -318,12 +366,7 @@ def make_get_safe_action(
             jnp.minimum(1.0, max_delta / correction_norm),
             1.0,
         )
-        curriculum_coeff = jnp.clip(
-            jnp.asarray(safety_layer_curriculum_coeff, dtype=action_raw.dtype),
-            0.0,
-            1.0,
-        )
-        u_safe = action_raw + curriculum_coeff * correction_scale * correction
+        u_safe = action_raw + correction_scale * correction
 
         # eps_star = delta / (1.0 + lambda_s * aTa)
 

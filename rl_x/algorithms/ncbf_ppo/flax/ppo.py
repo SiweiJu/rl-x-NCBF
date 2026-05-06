@@ -90,6 +90,8 @@ class PPO:
         self.ncbf_output_distribution = getattr(config.algorithm.ncbf, "output_distribution", "deterministic")
         self.ncbf_min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
         self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
+        self.ncbf_safety_layer_std_coeff_start = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_start", -2.0)
+        self.ncbf_safety_layer_std_coeff_final = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_final", 1.0)
 
         self.ncbf_neg_buffer_size = config.algorithm.ncbf_buffer.neg_buffer_size * self.nr_steps * self.nr_envs
 
@@ -690,8 +692,12 @@ class PPO:
         def get_safety_layer_curriculum_coeff(step):
             if not self.ncbf_use_safety_layer:
                 return np.float32(0.0)
-            denominator = max(0.2 * (float(self.total_timesteps) - float(self.nr_envs)), 1.0)
-            return np.float32(np.clip(float(step) / denominator, 0.0, 1.0))
+            denominator = max(float(self.total_timesteps) - float(self.nr_envs), 1.0)
+            fraction = np.clip(float(step) / denominator, 0.0, 1.0)
+            return np.float32(
+                self.ncbf_safety_layer_std_coeff_start +
+                fraction * (self.ncbf_safety_layer_std_coeff_final - self.ncbf_safety_layer_std_coeff_start)
+            )
 
         self.set_train_mode()
 
@@ -884,6 +890,7 @@ class PPO:
             ncbf_metrics['ncbf/mean_constraint_violated'] = batch_mean_constraint_violated.item()
             ncbf_metrics['ncbf/mean_delta_u'] = batch_mean_delta_u.item()
             ncbf_metrics['ncbf/safety_layer_curriculum_coeff'] = float(np.mean(safety_layer_curriculum_coeffs))
+            ncbf_metrics['ncbf/safety_layer_std_coeff'] = float(np.mean(safety_layer_curriculum_coeffs))
 
             if self.next_step_predictor_nr_minibatches > 0:
                 self.encoder_state, self.decoder_state, next_step_predictor_metrics, self.key = train_next_step_predictor(
