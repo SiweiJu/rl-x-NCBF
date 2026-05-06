@@ -33,6 +33,33 @@ from rl_x.algorithms.ncbf_ppo.flax_full_jit.decoder import get_decoder
 rlx_logger = logging.getLogger("rl_x")
 
 
+def _replace_optimizer_learning_rate(train_state: TrainState, learning_rate):
+    inject_state = train_state.opt_state[1]
+    hyperparams = {**inject_state.hyperparams, "learning_rate": learning_rate}
+    new_inject_state = inject_state._replace(hyperparams=hyperparams)
+    new_opt_state = tuple(
+        train_state.opt_state[i] if i != 1 else new_inject_state
+        for i in range(len(train_state.opt_state))
+    )
+    return train_state.replace(opt_state=new_opt_state)
+
+
+def _adapt_learning_rate_from_kl(current_lr, approx_kl, target_kl, kl_margin, kl_lr_scale, lr_min, lr_max):
+    next_lr = jax.lax.cond(
+        approx_kl > target_kl * kl_margin,
+        lambda lr: lr / kl_lr_scale,
+        lambda lr: lr,
+        current_lr,
+    )
+    next_lr = jax.lax.cond(
+        approx_kl < target_kl / kl_margin,
+        lambda lr: lr * kl_lr_scale,
+        lambda lr: lr,
+        next_lr,
+    )
+    return jnp.clip(next_lr, lr_min, lr_max)
+
+
 class PPO:
     def __init__(self, config, env, run_path, writer):
         self.config = config
@@ -51,6 +78,16 @@ class PPO:
         self.render = config.environment.render
         self.learning_rate = config.algorithm.learning_rate
         self.anneal_learning_rate = config.algorithm.anneal_learning_rate
+        self.adaptive_lr = bool(config.algorithm.get("adaptive_lr", False))
+        self.adaptive_lr_target_kl = float(config.algorithm.get("adaptive_lr_target_kl", 0.0))
+        if self.adaptive_lr_target_kl <= 0.0:
+            self.adaptive_lr_target_kl = float(config.algorithm.target_kl)
+        self.adaptive_lr_kl_margin = float(config.algorithm.get("kl_margin", 2.0))
+        self.adaptive_lr_scale = float(config.algorithm.get("kl_lr_scale", 1.5))
+        self.adaptive_lr_min = float(config.algorithm.get("lr_min", 1e-6))
+        self.adaptive_lr_max = float(config.algorithm.get("lr_max", 0.0))
+        if self.adaptive_lr_max <= 0.0:
+            self.adaptive_lr_max = self.learning_rate
         self.nr_steps = config.algorithm.nr_steps
         self.nr_epochs = config.algorithm.nr_epochs
         self.minibatch_size = config.algorithm.minibatch_size
@@ -143,7 +180,7 @@ class PPO:
             fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates
             return self.learning_rate * fraction
 
-        learning_rate = linear_schedule if self.anneal_learning_rate else self.learning_rate
+        learning_rate = self.learning_rate if self.adaptive_lr else (linear_schedule if self.anneal_learning_rate else self.learning_rate)
 
         env_state = self.env.reset(reset_key, False)
 
@@ -1112,29 +1149,37 @@ class PPO:
                         metrics["loss/ppo_loss"] = ppo_loss
                         metrics["loss/auxiliary_loss"] = auxiliary_loss
 
-                        ppo_update_enabled = jnp.logical_or(
-                            self.target_kl <= 0.0,
-                            metrics["policy_ratio/approx_kl"] <= self.target_kl,
-                        )
+                        if self.adaptive_lr:
+                            ppo_update_enabled = jnp.asarray(True)
+                        else:
+                            ppo_update_enabled = jnp.logical_or(
+                                self.target_kl <= 0.0,
+                                metrics["policy_ratio/approx_kl"] <= self.target_kl,
+                            )
 
                         policy_raw_grad_norm = optax.global_norm(policy_gradients)
                         encoder_grad_norm = optax.global_norm(encoder_gradients)
 
-                        def apply_policy_update(state):
-                            return state.apply_gradients(grads=policy_gradients)
-
-                        def advance_policy_optimizer_clock(state):
-                            zero_policy_gradients = jax.tree_util.tree_map(jnp.zeros_like, policy_gradients)
-                            advanced_state = state.apply_gradients(grads=zero_policy_gradients)
-                            return advanced_state.replace(params=state.params)
-
                         policy_state = jax.lax.cond(
                             ppo_update_enabled,
-                            apply_policy_update,
-                            advance_policy_optimizer_clock,
+                            lambda state: state.apply_gradients(grads=policy_gradients),
+                            lambda state: state,
                             policy_state,
                         )
                         critic_state = critic_state.apply_gradients(grads=critic_gradients)
+                        if self.adaptive_lr and self.adaptive_lr_target_kl > 0.0:
+                            next_lr = _adapt_learning_rate_from_kl(
+                                policy_state.opt_state[1].hyperparams["learning_rate"],
+                                metrics["policy_ratio/approx_kl"],
+                                self.adaptive_lr_target_kl,
+                                self.adaptive_lr_kl_margin,
+                                self.adaptive_lr_scale,
+                                self.adaptive_lr_min,
+                                self.adaptive_lr_max,
+                            )
+                            policy_state = _replace_optimizer_learning_rate(policy_state, next_lr)
+                            critic_state = _replace_optimizer_learning_rate(critic_state, next_lr)
+                            metrics["lr/adaptive_learning_rate"] = next_lr
                         encoder_state = encoder_state.apply_gradients(grads=encoder_gradients)
                         decoder_state = decoder_state.apply_gradients(grads=decoder_gradients)
                         ncbf_state = ncbf_state.apply_gradients(grads=ncbf_gradients)

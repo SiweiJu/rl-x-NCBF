@@ -18,6 +18,12 @@ def get_config(algorithm_name):
     config.gae_lambda = 0.9
     config.clip_range = 0.1
     config.target_kl = 0.03  # <= 0 disables PPO update gating
+    config.adaptive_lr = False
+    config.adaptive_lr_target_kl = 0.0  # <= 0 follows target_kl
+    config.kl_margin = 2.0
+    config.kl_lr_scale = 1.5
+    config.lr_min = 1e-6
+    config.lr_max = 0.0  # <= 0 uses the initial learning_rate as the max
     config.entropy_coef = 0.0
     config.critic_coef = 1.0
     config.max_grad_norm = 5.0
