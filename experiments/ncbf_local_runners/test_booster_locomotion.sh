@@ -6,7 +6,7 @@ EXPERIMENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
-MODEL_PATH="/home/siwei/Downloads/latest(43).model"
+MODEL_PATH="/home/siwei/Downloads/latest(54).model"
 EXTRA_ARGS=("$@")
 if [[ "$#" -gt 0 && "$1" != --* ]]; then
     MODEL_PATH="$1"

@@ -1152,7 +1152,10 @@ class LocomotionEnv:
             internal_state["ball_plate_dropped"] = ball_plate_metrics["dropped"]
             ball_not_falling = (~ball_plate_metrics["ball_dropped"]).astype(jnp.float32)
             plate_not_falling = (~ball_plate_metrics["plate_dropped"]).astype(jnp.float32)
-            ball_plate_safety_observation = jnp.array([ball_not_falling, plate_not_falling])
+            ball_plate_has_dropped = (
+                internal_state["ball_plate_drop_latched"] | ball_plate_metrics["dropped"]
+            ).astype(jnp.float32)
+            ball_plate_safety_observation = jnp.array([ball_not_falling, plate_not_falling, ball_plate_has_dropped])
         else:
             ball_plate_safety_observation = jnp.array([], dtype=jnp.float32)
 
@@ -1686,11 +1689,19 @@ class LocomotionEnv:
 
             self.plate_not_falling_obs_idx = jnp.array([current_observation_idx], dtype=int)
             current_observation_idx += 1
+
+            self.ball_plate_dropped_obs_idx = jnp.array([current_observation_idx], dtype=int)
+            current_observation_idx += 1
         else:
             self.ball_not_falling_obs_idx = jnp.array([], dtype=int)
             self.plate_not_falling_obs_idx = jnp.array([], dtype=int)
+            self.ball_plate_dropped_obs_idx = jnp.array([], dtype=int)
 
         ball_plate_policy_obs_idx = self.ball_plate_obs_idx if self.include_ball_plate_observations else jnp.array([], dtype=int)
+        ball_plate_policy_state_obs_idx = jnp.concatenate([
+            ball_plate_policy_obs_idx,
+            self.ball_plate_dropped_obs_idx,
+        ], dtype=int) if self.use_ball_plate else jnp.array([], dtype=int)
 
         self.policy_observation_indices = jnp.concatenate([
             self.joint_positions_obs_idx,
@@ -1699,7 +1710,7 @@ class LocomotionEnv:
             self.imu_angular_vel_obs_idx,
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
-            ball_plate_policy_obs_idx,
+            ball_plate_policy_state_obs_idx,
             self.policy_exteroception_obs_idx,
         ], dtype=int)
 
@@ -1715,7 +1726,7 @@ class LocomotionEnv:
             self.imu_angular_vel_obs_idx,
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
-            ball_plate_policy_obs_idx,
+            ball_plate_policy_state_obs_idx,
             self.critic_exteroception_obs_idx,
         ], dtype=int)
 

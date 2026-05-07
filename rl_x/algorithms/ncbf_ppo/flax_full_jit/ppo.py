@@ -110,20 +110,16 @@ class PPO:
         self.next_step_predictor_lr = config.algorithm.next_step_predictor.lr
         self.next_step_predictor_output_indices = env.next_state_indices
         single_env = getattr(env, "envs", [env])[0]
-        self.stand_after_ball_plate_drop = bool(getattr(single_env, "stand_after_ball_plate_drop", False))
         self.ball_plate_obs_indices = jnp.asarray(
             np.asarray(getattr(single_env, "ball_plate_obs_idx", np.array([], dtype=int)), dtype=int),
             dtype=int,
         )
-        ball_not_falling_idx = np.asarray(getattr(single_env, "ball_not_falling_obs_idx", np.array([], dtype=int)), dtype=int)
-        plate_not_falling_idx = np.asarray(getattr(single_env, "plate_not_falling_obs_idx", np.array([], dtype=int)), dtype=int)
-        self.has_ball_plate_drop_signal = (
-            self.stand_after_ball_plate_drop and
-            ball_not_falling_idx.size > 0 and
-            plate_not_falling_idx.size > 0
+        ball_plate_dropped_idx = np.asarray(
+            getattr(single_env, "ball_plate_dropped_obs_idx", np.array([], dtype=int)),
+            dtype=int,
         )
-        self.ball_not_falling_obs_index = int(ball_not_falling_idx[0]) if ball_not_falling_idx.size > 0 else 0
-        self.plate_not_falling_obs_index = int(plate_not_falling_idx[0]) if plate_not_falling_idx.size > 0 else 0
+        self.ball_plate_dropped_obs_indices = jnp.asarray(ball_plate_dropped_idx, dtype=int)
+        self.ball_plate_dropped_obs_index = int(ball_plate_dropped_idx[0]) if ball_plate_dropped_idx.size > 0 else 0
         decoder_ball_plate_indices = np.nonzero(np.isin(
             np.asarray(self.next_step_predictor_output_indices, dtype=int),
             np.asarray(self.ball_plate_obs_indices, dtype=int),
@@ -275,15 +271,13 @@ class PPO:
 
 
     def _ball_plate_post_drop_mask(self, observation):
-        if not self.has_ball_plate_drop_signal:
+        if self.ball_plate_dropped_obs_indices.size == 0:
             return jnp.zeros(observation.shape[:-1], dtype=bool)
-        ball_safe = observation[..., self.ball_not_falling_obs_index] > 0.5
-        plate_safe = observation[..., self.plate_not_falling_obs_index] > 0.5
-        return ~(ball_safe & plate_safe)
+        return observation[..., self.ball_plate_dropped_obs_index] > 0.5
 
 
     def _mask_policy_ball_plate_inputs(self, observation):
-        if not (self.has_ball_plate_drop_signal and self.ball_plate_obs_indices.size > 0):
+        if self.ball_plate_dropped_obs_indices.size == 0 or self.ball_plate_obs_indices.size == 0:
             return observation
         post_drop = self._ball_plate_post_drop_mask(observation)
         ball_plate_observation = observation[..., self.ball_plate_obs_indices]
@@ -305,7 +299,11 @@ class PPO:
             state,
             action,
         )
-        if self.has_ball_plate_drop_signal and self.has_decoder_ball_plate_output and mask_observation is not None:
+        if (
+            self.ball_plate_dropped_obs_indices.size > 0 and
+            self.has_decoder_ball_plate_output and
+            mask_observation is not None
+        ):
             post_drop = self._ball_plate_post_drop_mask(mask_observation)
             ball_plate_output = decoder_output[..., self.decoder_output_ball_plate_indices]
             ball_plate_output = jnp.where(
@@ -318,7 +316,7 @@ class PPO:
 
 
     def _bypass_post_drop_safety_layer(self, action_raw, safe_action, constraint_active, delta_u, diagnostics, observation):
-        if not self.has_ball_plate_drop_signal:
+        if self.ball_plate_dropped_obs_indices.size == 0:
             return safe_action, constraint_active, delta_u, diagnostics
 
         post_drop = self._ball_plate_post_drop_mask(observation)
@@ -341,11 +339,14 @@ class PPO:
 
     def train(self):
         def jitable_train_function(key, parallel_seed_id):
-            def repeat_ncbf_params(ncbf_state):
+            def repeat_ncbf_params_from_params(ncbf_params):
                 return jax.tree_util.tree_map(
                     lambda x: jnp.repeat(x[None, ...], self.ncbf_n_ensemble, axis=0),
-                    ncbf_state.params,
+                    ncbf_params,
                 )
+
+            def repeat_ncbf_params(ncbf_state):
+                return repeat_ncbf_params_from_params(ncbf_state.params)
 
             # Single step rollout, shared by policy and NCBF training.
             def single_rollout(single_rollout_carry, _):
@@ -989,6 +990,7 @@ class PPO:
 
                     # Optimizing
                     def ppo_loss_fn(policy_params, critic_params, encoder_params, decoder_params,
+                                    ncbf_params,
                                     state_b, action_b, log_prob_b, return_b, advantage_b,
                                     last_state_b, last_action_b, history_stack_b):
                         # Policy loss
@@ -1025,11 +1027,26 @@ class PPO:
                         critic_loss = 0.5 * jnp.mean((new_value.squeeze(-1) - return_b) ** 2)
 
                         # anticipation loss
-                        # ncbf_params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in ncbf_state])
-                        # safe_action_b, _, _ = self.ncbf_safety_layer(action_mean, state_b, last_action_b, last_state_b, latent_b, ncbf_params_stack)
-                        #
-                        # anticipation_loss = 0.5 * jnp.mean(jnp.sum((action_mean - safe_action_b) ** 2, axis=-1))
-                        anticipation_loss = 0
+                        action_mean_processed = self.get_processed_action(action_mean)
+                        safe_action_b, constraint_active_b, delta_u_b, safety_diagnostics_b = self.batched_ncbf_safety_layer(
+                            action_mean_processed,
+                            state_b,
+                            last_action_b,
+                            last_state_b,
+                            latent_b,
+                            safety_layer_curriculum_coeff,
+                            repeat_ncbf_params_from_params(ncbf_params),
+                        )
+                        safe_action_b, _, _, _ = self._bypass_post_drop_safety_layer(
+                            action_mean_processed,
+                            safe_action_b,
+                            constraint_active_b,
+                            delta_u_b,
+                            safety_diagnostics_b,
+                            state_b,
+                        )
+                        safe_action_b = jax.lax.stop_gradient(safe_action_b)
+                        anticipation_loss = 0.5 * jnp.mean(jnp.sum(jnp.square(action_mean_processed - safe_action_b), axis=-1))
 
                         loss = (
                             pg_loss -
@@ -1232,6 +1249,7 @@ class PPO:
                             critic_state.params,
                             encoder_state.params,
                             decoder_state.params,
+                            ncbf_state.params,
                             batch_states[minibatch_indices],
                             batch_actions[minibatch_indices],
                             batch_log_probs[minibatch_indices],

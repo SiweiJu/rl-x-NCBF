@@ -32,7 +32,7 @@ class RandomCommands:
         goal_velocities = np.where(self.env.np_rng.binomial(n=1, p=self.all_zero_chance), np.zeros(3), goal_velocities)
         goal_velocities = np.where(self.env.np_rng.uniform(size=(3,)) < self.single_zero_chance, 0.0, goal_velocities)
 
-        goal_velocities = [0, 0, 0]
+        # goal_velocities = [0, 0, 0]
 
         self.env.internal_state["goal_velocities"] = goal_velocities
 

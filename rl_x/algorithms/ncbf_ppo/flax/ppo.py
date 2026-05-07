@@ -116,7 +116,13 @@ class PPO:
         )
         ball_not_falling_idx = np.asarray(getattr(single_env, "ball_not_falling_obs_idx", np.array([], dtype=int)), dtype=int)
         plate_not_falling_idx = np.asarray(getattr(single_env, "plate_not_falling_obs_idx", np.array([], dtype=int)), dtype=int)
-        self.has_ball_plate_drop_signal = (
+        ball_plate_dropped_idx = np.asarray(
+            getattr(single_env, "ball_plate_dropped_obs_idx", np.array([], dtype=int)),
+            dtype=int,
+        )
+        self.ball_plate_dropped_obs_indices = jnp.asarray(ball_plate_dropped_idx, dtype=int)
+        self.ball_plate_dropped_obs_index = int(ball_plate_dropped_idx[0]) if ball_plate_dropped_idx.size > 0 else 0
+        self.has_ball_plate_drop_signal = ball_plate_dropped_idx.size > 0 or (
             self.stand_after_ball_plate_drop and
             ball_not_falling_idx.size > 0 and
             plate_not_falling_idx.size > 0
@@ -271,6 +277,8 @@ class PPO:
     def _ball_plate_post_drop_mask(self, observation):
         if not self.has_ball_plate_drop_signal:
             return jnp.zeros(observation.shape[:-1], dtype=bool)
+        if self.ball_plate_dropped_obs_indices.size > 0:
+            return observation[..., self.ball_plate_dropped_obs_index] > 0.5
         ball_safe = observation[..., self.ball_not_falling_obs_index] > 0.5
         plate_safe = observation[..., self.plate_not_falling_obs_index] > 0.5
         return ~(ball_safe & plate_safe)
@@ -454,11 +462,13 @@ class PPO:
         @jax.jit
         def update(policy_state: TrainState, critic_state: TrainState, encoder_state: TrainState,
                    decoder_state: TrainState,
+                   ncbf_params_stack,
                    states: np.ndarray, actions: np.ndarray, advantages: np.ndarray, returns: np.ndarray, values: np.ndarray, log_probs: np.ndarray,
                    history_stacks: np.ndarray, last_states: np.ndarray, last_actions: np.ndarray,
+                   safety_layer_curriculum_coeffs: np.ndarray,
                    key: jax.random.PRNGKey):
             def loss_fn(policy_params, critic_params, state_b, action_b, log_prob_b, return_b, advantage_b,
-                        history_stack_b, last_state_b, last_action_b):
+                        history_stack_b, last_state_b, last_action_b, safety_layer_curriculum_coeff_b):
                 history_latent_b = jax.lax.stop_gradient(encoder_state.apply_fn(encoder_state.params, history_stack_b))
                 # Policy loss
                 decoder_output_b = self._get_policy_decoder_output(
@@ -492,7 +502,17 @@ class PPO:
                 critic_loss = 0.5 * (new_value - return_b) ** 2
 
                 # anticipation loss
-                anticipation_loss = 0.0
+                safe_action_b, _, _, _ = self.ncbf_safety_layer(
+                    action_mean,
+                    state_b,
+                    last_action_b,
+                    last_state_b,
+                    history_latent_b,
+                    safety_layer_curriculum_coeff_b,
+                    ncbf_params_stack,
+                )
+                safe_action_b = jax.lax.stop_gradient(safe_action_b)
+                anticipation_loss = 0.5 * jnp.sum(jnp.square(action_mean - safe_action_b), axis=-1)
 
                 # Combine losses
                 loss = pg_loss - self.entropy_coef * entropy_loss + self.critic_coef * critic_loss + self.anticipation_coef * anticipation_loss
@@ -519,8 +539,12 @@ class PPO:
             batch_history_stacks = history_stacks.reshape((-1, self.env.nr_history_steps) + self.os_shape)
             batch_last_states = last_states.reshape((-1,) + self.os_shape)
             batch_last_actions = last_actions.reshape((-1,) + self.as_shape)
+            batch_safety_layer_curriculum_coeffs = jnp.broadcast_to(
+                safety_layer_curriculum_coeffs[:, None],
+                (self.nr_steps, self.nr_envs),
+            ).reshape(-1)
 
-            vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
+            vmap_loss_fn = jax.vmap(loss_fn, in_axes=(None, None, 0, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
             safe_mean = lambda x: jnp.mean(x) if x is not None else x
             mean_vmapped_loss_fn = lambda *a, **k: tree.map_structure(safe_mean, vmap_loss_fn(*a, **k))
             grad_loss_fn = jax.value_and_grad(mean_vmapped_loss_fn, argnums=(0, 1), has_aux=True)
@@ -548,6 +572,7 @@ class PPO:
                     batch_history_stacks[minibatch_indices],
                     batch_last_states[minibatch_indices],
                     batch_last_actions[minibatch_indices],
+                    batch_safety_layer_curriculum_coeffs[minibatch_indices],
                 )
 
                 policy_state = policy_state.apply_gradients(grads=policy_gradients)
@@ -994,8 +1019,10 @@ class PPO:
             # Optimizing
             self.policy_state, self.critic_state, optimization_metrics, self.key = update(
                 self.policy_state, self.critic_state, self.encoder_state, self.decoder_state,
+                self._ncbf_params_stack(),
                 batch.states, batch.actions, batch.advantages, batch.returns, batch.values, batch.log_probs,
                 batch.history_stacks, batch.last_states, batch.last_actions,
+                safety_layer_curriculum_coeffs,
                 self.key
             )
             optimization_metrics = {key: value.item() for key, value in optimization_metrics.items()}

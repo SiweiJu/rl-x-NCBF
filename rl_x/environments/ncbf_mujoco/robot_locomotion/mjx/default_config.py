@@ -9,6 +9,7 @@ def get_config(environment_name):
         "render": False,
         "device": "gpu",
         "train_robot": "unitree_go2",
+        "use_booster_defaults": True,
         "ball_plate": {
             "enabled": False,
             "include_observations": True,

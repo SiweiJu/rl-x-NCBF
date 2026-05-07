@@ -1098,7 +1098,8 @@ class LocomotionEnv(gym.Env):
             ball_plate_metrics = self.get_ball_plate_metrics()
             ball_not_falling = float(not bool(ball_plate_metrics["ball_dropped"]))
             plate_not_falling = float(not bool(ball_plate_metrics["plate_dropped"]))
-            ball_plate_safety_observation = np.array([ball_not_falling, plate_not_falling], dtype=np.float32)
+            ball_plate_has_dropped = float(bool(self.internal_state["ball_plate_drop_latched"] or ball_plate_metrics["dropped"]))
+            ball_plate_safety_observation = np.array([ball_not_falling, plate_not_falling, ball_plate_has_dropped], dtype=np.float32)
         else:
             ball_plate_safety_observation = np.array([], dtype=np.float32)
 
@@ -1708,11 +1709,19 @@ class LocomotionEnv(gym.Env):
 
             self.plate_not_falling_obs_idx = np.array([current_observation_idx], dtype=int)
             current_observation_idx += 1
+
+            self.ball_plate_dropped_obs_idx = np.array([current_observation_idx], dtype=int)
+            current_observation_idx += 1
         else:
             self.ball_not_falling_obs_idx = np.array([], dtype=int)
             self.plate_not_falling_obs_idx = np.array([], dtype=int)
+            self.ball_plate_dropped_obs_idx = np.array([], dtype=int)
 
         ball_plate_policy_obs_idx = self.ball_plate_obs_idx if self.include_ball_plate_observations else np.array([], dtype=int)
+        ball_plate_policy_state_obs_idx = np.concatenate([
+            ball_plate_policy_obs_idx,
+            self.ball_plate_dropped_obs_idx,
+        ], dtype=int) if self.use_ball_plate else np.array([], dtype=int)
 
         self.policy_observation_indices = np.concatenate([
             self.joint_positions_obs_idx,
@@ -1721,7 +1730,7 @@ class LocomotionEnv(gym.Env):
             self.imu_angular_vel_obs_idx,
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
-            ball_plate_policy_obs_idx,
+            ball_plate_policy_state_obs_idx,
             self.policy_exteroception_obs_idx,
         ], dtype=int)
 
@@ -1736,7 +1745,7 @@ class LocomotionEnv(gym.Env):
             self.imu_angular_vel_obs_idx,
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
-            ball_plate_policy_obs_idx,
+            ball_plate_policy_state_obs_idx,
             self.critic_exteroception_obs_idx,
         ], dtype=int)
 
