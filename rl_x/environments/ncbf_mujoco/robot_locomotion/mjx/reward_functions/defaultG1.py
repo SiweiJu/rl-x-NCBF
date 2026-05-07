@@ -217,19 +217,21 @@ class DefaultG1Reward(DefaultReward):
         command_norm = jnp.linalg.norm(internal_state["goal_velocities"])
         is_moving_command = command_norm > self.moving_command_threshold
         is_standing_command = command_norm <= self.standing_command_threshold
+        moving_command_scale = is_moving_command.astype(jnp.float32)
+        standing_command_scale = is_standing_command.astype(jnp.float32)
         standing_leg_joint_velocity_norm = jnp.mean(jnp.square(data.qvel[self.standing_leg_joint_qvel_id]))
         standing_leg_joint_velocity_reward = (
             self.standing_leg_joint_velocity_coeff
             * -standing_leg_joint_velocity_norm
-            * is_standing_command.astype(jnp.float32)
+            * standing_command_scale
             * jnp.asarray(self.has_standing_leg_joint_velocity_reward, dtype=jnp.float32)
         )
 
         feet_first_contact = feet_floor_contacts & (~internal_state["previous_feet_floor_contacts"])
         target_foot_air_time = self.foot_air_time_per_robot_size_m * internal_state["robot_dimensions_mean"]
-        target_foot_air_time = is_moving_command * target_foot_air_time
+        target_foot_air_time = moving_command_scale * target_foot_air_time
         air_time_reward = jnp.mean(feet_first_contact * jnp.minimum(internal_state["feet_time_in_air"] - target_foot_air_time, 0.0))
-        foot_air_time_reward = gait_coeff * self.foot_air_time_coeff * air_time_reward
+        foot_air_time_reward = gait_coeff * self.foot_air_time_coeff * moving_command_scale * air_time_reward
 
         symmetry_air_violations = jnp.mean(jnp.where((~feet_floor_contacts[self.feet_symmetry_pairs[:, 0]]) & (~feet_floor_contacts[self.feet_symmetry_pairs[:, 1]]), 1, 0))
         symmetry_air_reward = gait_coeff * self.symmetry_air_coeff * -symmetry_air_violations
@@ -243,7 +245,7 @@ class DefaultG1Reward(DefaultReward):
 
         target_stance_time = self.foot_stance_time_per_robot_size_m * internal_state["robot_dimensions_mean"]
         long_stance_time = jnp.maximum(internal_state["feet_time_on_ground"] - target_stance_time, 0.0)
-        foot_stance_time_reward = gait_coeff * self.foot_stance_time_coeff * -is_moving_command.astype(jnp.float32) * jnp.mean(long_stance_time)
+        foot_stance_time_reward = gait_coeff * self.foot_stance_time_coeff * -moving_command_scale * jnp.mean(long_stance_time)
 
         feet_height_over_ground = data.geom_xpos[self.env.foot_geom_indices, 2] - self.env.terrain_function.ground_height_at(
             internal_state,
@@ -253,11 +255,11 @@ class DefaultG1Reward(DefaultReward):
         target_foot_clearance = self.foot_clearance_per_robot_size_m * internal_state["robot_dimensions_mean"]
         foot_clearance_error = jnp.maximum(target_foot_clearance - feet_height_over_ground, 0.0)
         swing_feet = (~feet_floor_contacts).astype(jnp.float32)
-        foot_clearance_reward = gait_coeff * self.foot_clearance_coeff * -is_moving_command.astype(jnp.float32) * jnp.mean(swing_feet * foot_clearance_error)
+        foot_clearance_reward = gait_coeff * self.foot_clearance_coeff * -moving_command_scale * jnp.mean(swing_feet * foot_clearance_error)
 
         target_foot_lift_bonus = self.foot_lift_bonus_per_robot_size_m * internal_state["robot_dimensions_mean"]
         foot_lift_fraction = jnp.clip(feet_height_over_ground / target_foot_lift_bonus, 0.0, 1.0)
-        foot_lift_bonus_reward = gait_coeff * self.foot_lift_bonus_coeff * is_moving_command.astype(jnp.float32) * jnp.mean(swing_feet * foot_lift_fraction)
+        foot_lift_bonus_reward = gait_coeff * self.foot_lift_bonus_coeff * moving_command_scale * jnp.mean(swing_feet * foot_lift_fraction)
 
         survival_reward = self.survival
         tracking_reward_linvel_x = jnp.exp(-jnp.square(current_imu_linear_velocity[0] - desired_imu_linear_velocity_xy[0]) * self.tracking_w_exp_linvel_x) * self.tracking_w_sum_linvel_x
@@ -278,8 +280,8 @@ class DefaultG1Reward(DefaultReward):
         feet_on_ground = jnp.array([left_foot_on_ground, right_foot_on_ground])
         gait_frequency = internal_state.get("goal_gait_frequency", jnp.asarray(0.0))
         gait_process = jnp.fmod(internal_state["humanoid_gait_process"] + self.env.dt * gait_frequency, 1.0)
-        left_swing = (jnp.abs(gait_process - 0.25) < 0.5 * self.feet_swing_period) & (gait_frequency > 1.0e-8)
-        right_swing = (jnp.abs(gait_process - 0.75) < 0.5 * self.feet_swing_period) & (gait_frequency > 1.0e-8)
+        left_swing = (jnp.abs(gait_process - 0.25) < 0.5 * self.feet_swing_period) & (gait_frequency > 1.0e-8) & is_moving_command
+        right_swing = (jnp.abs(gait_process - 0.75) < 0.5 * self.feet_swing_period) & (gait_frequency > 1.0e-8) & is_moving_command
         feet_swing_reward = (
             (left_swing & ~feet_on_ground[0]).astype(jnp.float32) +
             (right_swing & ~feet_on_ground[1]).astype(jnp.float32)
@@ -305,7 +307,7 @@ class DefaultG1Reward(DefaultReward):
 
         tslt = internal_state["humanoid_time_since_last_touchdown"]
         touchdown_reward = jnp.where(feet_on_ground & (tslt > 1e-6), tslt - self.air_time_max, 0.0)
-        air_time_reward = jnp.sum(touchdown_reward) * self.air_time_coeff
+        air_time_reward = jnp.sum(touchdown_reward) * self.air_time_coeff * moving_command_scale
         tslt = jnp.where(feet_on_ground, 0.0, tslt + self.env.dt)
         no_fly_reward = (jnp.logical_and(tslt[0] > 0.0, tslt[1] > 0.0) * 1.0) * self.no_fly_coeff
 
@@ -404,6 +406,8 @@ class DefaultG1Reward(DefaultReward):
         info[f"reward/gait_reward_total"] = gait_reward
         info[f"reward/total"] = reward
         info[f"env_info/standing_leg_joint_velocity_norm"] = standing_leg_joint_velocity_norm
+        info[f"env_info/is_moving_command"] = moving_command_scale
+        info[f"env_info/is_standing_command"] = standing_command_scale
         info[f"env_info/xy_vel_diff_abs"] = jnp.nan_to_num(jnp.mean(jnp.minimum(jnp.abs(xy_difference), 2 * internal_state["max_command_velocity"])), nan=2 * internal_state["max_command_velocity"], posinf=2 * internal_state["max_command_velocity"], neginf=2 * internal_state["max_command_velocity"])
 
         return reward

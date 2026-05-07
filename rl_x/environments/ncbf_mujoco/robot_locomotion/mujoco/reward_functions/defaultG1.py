@@ -224,19 +224,21 @@ class DefaultG1Reward(DefaultReward):
         command_norm = np.linalg.norm(self.env.internal_state["goal_velocities"])
         is_moving_command = command_norm > self.moving_command_threshold
         is_standing_command = command_norm <= self.standing_command_threshold
+        moving_command_scale = float(is_moving_command)
+        standing_command_scale = float(is_standing_command)
         standing_leg_joint_velocity_norm = np.mean(np.square(self.env.internal_state["data"].qvel[self.standing_leg_joint_qvel_id]))
         standing_leg_joint_velocity_reward = (
             self.standing_leg_joint_velocity_coeff
             * -standing_leg_joint_velocity_norm
-            * float(is_standing_command)
+            * standing_command_scale
             * float(self.has_standing_leg_joint_velocity_reward)
         )
 
         feet_first_contact = feet_floor_contacts & (~self.env.internal_state["previous_feet_floor_contacts"])
         target_foot_air_time = self.foot_air_time_per_robot_size_m * self.env.internal_state["robot_dimensions_mean"]
-        target_foot_air_time = is_moving_command * target_foot_air_time
+        target_foot_air_time = moving_command_scale * target_foot_air_time
         air_time_reward = np.mean(feet_first_contact * np.minimum(self.env.internal_state["feet_time_in_air"] - target_foot_air_time, 0.0))
-        foot_air_time_reward = gait_coeff * self.foot_air_time_coeff * air_time_reward
+        foot_air_time_reward = gait_coeff * self.foot_air_time_coeff * moving_command_scale * air_time_reward
 
         symmetry_air_violations = np.mean(np.where((~feet_floor_contacts[self.feet_symmetry_pairs[:, 0]]) & (~feet_floor_contacts[self.feet_symmetry_pairs[:, 1]]), 1, 0))
         symmetry_air_reward = gait_coeff * self.symmetry_air_coeff * -symmetry_air_violations
@@ -250,18 +252,18 @@ class DefaultG1Reward(DefaultReward):
 
         target_stance_time = self.foot_stance_time_per_robot_size_m * self.env.internal_state["robot_dimensions_mean"]
         long_stance_time = np.maximum(self.env.internal_state["feet_time_on_ground"] - target_stance_time, 0.0)
-        foot_stance_time_reward = gait_coeff * self.foot_stance_time_coeff * -float(is_moving_command) * np.mean(long_stance_time)
+        foot_stance_time_reward = gait_coeff * self.foot_stance_time_coeff * -moving_command_scale * np.mean(long_stance_time)
 
         feet_xpos = self.env.internal_state["data"].geom_xpos[self.env.foot_geom_indices]
         feet_height_over_ground = feet_xpos[:, 2] - self.env.terrain_function.ground_height_at(feet_xpos[:, 0], feet_xpos[:, 1])
         target_foot_clearance = self.foot_clearance_per_robot_size_m * self.env.internal_state["robot_dimensions_mean"]
         foot_clearance_error = np.maximum(target_foot_clearance - feet_height_over_ground, 0.0)
         swing_feet = (~feet_floor_contacts).astype(np.float32)
-        foot_clearance_reward = gait_coeff * self.foot_clearance_coeff * -float(is_moving_command) * np.mean(swing_feet * foot_clearance_error)
+        foot_clearance_reward = gait_coeff * self.foot_clearance_coeff * -moving_command_scale * np.mean(swing_feet * foot_clearance_error)
 
         target_foot_lift_bonus = self.foot_lift_bonus_per_robot_size_m * self.env.internal_state["robot_dimensions_mean"]
         foot_lift_fraction = np.clip(feet_height_over_ground / target_foot_lift_bonus, 0.0, 1.0)
-        foot_lift_bonus_reward = gait_coeff * self.foot_lift_bonus_coeff * float(is_moving_command) * np.mean(swing_feet * foot_lift_fraction)
+        foot_lift_bonus_reward = gait_coeff * self.foot_lift_bonus_coeff * moving_command_scale * np.mean(swing_feet * foot_lift_fraction)
 
         data = self.env.internal_state["data"]
         state = self.env.internal_state
@@ -284,8 +286,8 @@ class DefaultG1Reward(DefaultReward):
         feet_on_ground = np.array([left_foot_on_ground, right_foot_on_ground])
         gait_frequency = state.get("goal_gait_frequency", 0.0)
         gait_process = np.fmod(state["humanoid_gait_process"] + self.env.dt * gait_frequency, 1.0)
-        left_swing = (np.abs(gait_process - 0.25) < 0.5 * self.feet_swing_period) and (gait_frequency > 1.0e-8)
-        right_swing = (np.abs(gait_process - 0.75) < 0.5 * self.feet_swing_period) and (gait_frequency > 1.0e-8)
+        left_swing = (np.abs(gait_process - 0.25) < 0.5 * self.feet_swing_period) and (gait_frequency > 1.0e-8) and is_moving_command
+        right_swing = (np.abs(gait_process - 0.75) < 0.5 * self.feet_swing_period) and (gait_frequency > 1.0e-8) and is_moving_command
         feet_swing_reward = (
             np.float32(left_swing and not feet_on_ground[0]) +
             np.float32(right_swing and not feet_on_ground[1])
@@ -311,7 +313,7 @@ class DefaultG1Reward(DefaultReward):
 
         tslt = state["humanoid_time_since_last_touchdown"].copy()
         touchdown_reward = np.where(feet_on_ground & (tslt > 1e-6), tslt - self.air_time_max, 0.0)
-        air_time_reward = np.sum(touchdown_reward) * self.air_time_coeff
+        air_time_reward = np.sum(touchdown_reward) * self.air_time_coeff * moving_command_scale
         tslt = np.where(feet_on_ground, 0.0, tslt + self.env.dt)
         no_fly_reward = (np.logical_and(tslt[0] > 0.0, tslt[1] > 0.0) * 1.0) * self.no_fly_coeff
 
@@ -410,6 +412,8 @@ class DefaultG1Reward(DefaultReward):
         self.env.internal_state["info"][f"reward/gait_reward_total"] = gait_reward
         self.env.internal_state["info"][f"reward/total"] = reward
         self.env.internal_state["info"][f"env_info/standing_leg_joint_velocity_norm"] = standing_leg_joint_velocity_norm
+        self.env.internal_state["info"][f"env_info/is_moving_command"] = moving_command_scale
+        self.env.internal_state["info"][f"env_info/is_standing_command"] = standing_command_scale
         self.env.internal_state["info"][f"env_info/xy_vel_diff_abs"] = np.nan_to_num(np.mean(np.minimum(np.abs(xy_difference), 2 * self.env.internal_state["max_command_velocity"])), nan=2 * self.env.internal_state["max_command_velocity"], posinf=2 * self.env.internal_state["max_command_velocity"], neginf=2 * self.env.internal_state["max_command_velocity"])
 
         return reward
