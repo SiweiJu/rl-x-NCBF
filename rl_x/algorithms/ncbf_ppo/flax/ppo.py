@@ -129,6 +129,7 @@ class PPO:
         self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
         self.ncbf_safety_layer_std_coeff_start = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_start", -2.0)
         self.ncbf_safety_layer_std_coeff_final = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_final", 1.0)
+        self.ncbf_max_delta_u = getattr(config.algorithm.ncbf, "max_delta_u", 0.0)
 
         self.ncbf_neg_buffer_size = config.algorithm.ncbf_buffer.neg_buffer_size * self.nr_steps * self.nr_envs
 
@@ -794,6 +795,7 @@ class PPO:
             dones_this_rollout = 0
             step_info_collection = {}
             safety_layer_curriculum_coeffs = np.zeros(self.nr_steps, dtype=np.float32)
+            safety_layer_diagnostics = {}
             for step in range(self.nr_steps):
                 latent_z = self.encoder.apply(self.encoder_state.params, history_stacks)
                 _, action, value, log_prob, self.key = get_action_and_value(
@@ -809,7 +811,7 @@ class PPO:
                 params_stack = self._ncbf_params_stack()
 
                 safety_layer_curriculum_coeff = get_safety_layer_curriculum_coeff(global_step)
-                safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
+                safe_action, constraint_active, delta_u, safety_diagnostics = self.batched_ncbf_safety_layer(
                     action,
                     state,
                     last_actions,
@@ -818,6 +820,8 @@ class PPO:
                     safety_layer_curriculum_coeff,
                     params_stack,
                 )
+                for diag_key, diag_value in safety_diagnostics.items():
+                    safety_layer_diagnostics.setdefault(diag_key, []).append(np.asarray(jax.device_get(diag_value)))
                 processed_action = safe_action
                 processed_action = jax.device_get(processed_action)
                 next_state, reward, terminated, truncated, info = self.env.step(processed_action)
@@ -936,9 +940,43 @@ class PPO:
                 ncbf_metrics[key] = value.item()
 
             mean_y = jnp.mean(batch.y_targets)
+            constraint_active_values = np.asarray(batch.constraint_violated, dtype=np.float32)
+            delta_u_values = np.asarray(batch.delta_u, dtype=np.float32)
+            active_count = np.sum(constraint_active_values)
+            nonzero_correction_values = (delta_u_values > 1e-6).astype(np.float32)
+            raw_processed_actions = np.asarray(jax.device_get(self.get_processed_action(jnp.asarray(batch.actions))))
+            env_actions = np.asarray(batch.env_actions)
+            raw_processed_norm = np.linalg.norm(raw_processed_actions, axis=-1)
+            shield_correction_norm = np.linalg.norm(env_actions - raw_processed_actions, axis=-1)
+            action_low = np.asarray(self.env.single_action_space.low)
+            action_high = np.asarray(self.env.single_action_space.high)
             ncbf_metrics['ncbf/mean_y'] = mean_y.item()
             ncbf_metrics['ncbf/mean_constraint_violated'] = batch_mean_constraint_violated.item()
             ncbf_metrics['ncbf/mean_delta_u'] = batch_mean_delta_u.item()
+            ncbf_metrics['ncbf/safety_layer_enabled'] = float(self.ncbf_use_safety_layer)
+            ncbf_metrics['ncbf/safety_layer_active_rate'] = float(np.mean(constraint_active_values))
+            ncbf_metrics['ncbf/safety_layer_delta_u_mean'] = float(np.mean(delta_u_values))
+            ncbf_metrics['ncbf/safety_layer_delta_u_max'] = float(np.max(delta_u_values))
+            ncbf_metrics['ncbf/safety_layer_delta_u_active_mean'] = float(np.sum(delta_u_values * constraint_active_values) / (active_count + 1e-8))
+            ncbf_metrics['ncbf/safety_layer_nonzero_correction_rate'] = float(np.mean(nonzero_correction_values))
+            ncbf_metrics['ncbf/safety_layer_active_but_zero_rate'] = float(np.mean(constraint_active_values * (1.0 - nonzero_correction_values)))
+            ncbf_metrics['ncbf/safety_layer_raw_processed_action_norm'] = float(np.mean(raw_processed_norm))
+            ncbf_metrics['ncbf/safety_layer_executed_action_norm'] = float(np.mean(np.linalg.norm(env_actions, axis=-1)))
+            ncbf_metrics['ncbf/safety_layer_action_correction_norm'] = float(np.mean(shield_correction_norm))
+            ncbf_metrics['ncbf/safety_layer_action_correction_norm_max'] = float(np.max(shield_correction_norm))
+            ncbf_metrics['ncbf/safety_layer_correction_to_action_ratio'] = float(np.mean(shield_correction_norm / (raw_processed_norm + 1e-8)))
+            ncbf_metrics['ncbf/safety_layer_executed_action_out_of_bounds_fraction'] = float(np.mean(((env_actions < action_low) | (env_actions > action_high)).astype(np.float32)))
+            ncbf_metrics['ncbf/safety_layer_action_bound_saturation_rate'] = float(np.mean(((env_actions <= action_low + 1e-5) | (env_actions >= action_high - 1e-5)).astype(np.float32)))
+            ncbf_metrics['ncbf/safety_layer_max_delta_u_config'] = float(self.ncbf_max_delta_u)
+            for diag_key, diag_values in safety_layer_diagnostics.items():
+                diag_array = np.asarray(diag_values)
+                ncbf_metrics[f'ncbf/safety_layer_{diag_key}'] = float(np.mean(diag_array))
+                if diag_key == "constraint_delta":
+                    ncbf_metrics['ncbf/safety_layer_constraint_delta_max'] = float(np.max(diag_array))
+                elif diag_key == "robust_residual":
+                    ncbf_metrics['ncbf/safety_layer_robust_residual_min'] = float(np.min(diag_array))
+                elif diag_key == "correction_clipped":
+                    ncbf_metrics['ncbf/safety_layer_correction_clipped_rate'] = float(np.mean(diag_array))
             ncbf_metrics['ncbf/safety_layer_curriculum_coeff'] = float(np.mean(safety_layer_curriculum_coeffs))
             ncbf_metrics['ncbf/safety_layer_std_coeff'] = float(np.mean(safety_layer_curriculum_coeffs))
 
@@ -986,7 +1024,7 @@ class PPO:
                         latent_z,
                     )
                     params_stack = self._ncbf_params_stack()
-                    safe_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
+                    safe_action, constraint_active, delta_u, _ = self.batched_ncbf_safety_layer(
                         raw_processed_action,
                         state,
                         eval_last_actions,

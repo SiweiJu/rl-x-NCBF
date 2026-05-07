@@ -79,6 +79,23 @@ def get_ncbf(config, env):
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
 
+    def dummy_safety_diagnostics(action):
+        zero = jnp.asarray(0.0, dtype=action.dtype)
+        one = jnp.asarray(1.0, dtype=action.dtype)
+        return {
+            "residual_mean": zero,
+            "residual_std": zero,
+            "robust_residual": zero,
+            "constraint_delta": zero,
+            "constraint_grad_norm": zero,
+            "qp_gain": zero,
+            "correction_norm": zero,
+            "correction_scale": one,
+            "correction_clipped": zero,
+            "raw_action_norm": jnp.linalg.norm(action),
+            "processed_action_norm": jnp.linalg.norm(action),
+        }
+
     NCBF = [
         NCBF_FFNN(
             config.algorithm.ncbf.nr_hidden_units,
@@ -111,9 +128,19 @@ def get_ncbf(config, env):
 
     # dummy
     if ncbf_clipping:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi: (
+            jnp.clip(action_raw, act_low, act_high),
+            jnp.array(False),
+            jnp.array(0.0),
+            dummy_safety_diagnostics(jnp.clip(action_raw, act_low, act_high)),
+        )
     else:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi: (
+            action_raw,
+            jnp.array(False),
+            jnp.array(0.0),
+            dummy_safety_diagnostics(action_raw),
+        )
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -125,7 +152,7 @@ def get_ncbf(config, env):
         jax.vmap(
             safety_layer_function_for_batch,
             in_axes=(0, 0, 0, 0, 0, None, None),  # action_raw[env], obs_t[env], same coeff/phi for items in the batch
-            out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
+            out_axes=(0, 0, 0, 0)  # batched u_safe, constraint_active, delta_u, diagnostics
         )
     )
     return NCBF, NCBF_apply, batched_get_safe_action, safety_layer_function_for_batch
@@ -379,6 +406,20 @@ def make_get_safe_action(
         )
         delta_u = jnp.linalg.norm(u_processed - action_raw)
 
-        return u_processed, constraint_active, delta_u
+        diagnostics = {
+            "residual_mean": residual_mean,
+            "residual_std": residual_std,
+            "robust_residual": robust_residual,
+            "constraint_delta": delta,
+            "constraint_grad_norm": jnp.sqrt(aTa),
+            "qp_gain": gain,
+            "correction_norm": jnp.linalg.norm(u_safe - action_raw),
+            "correction_scale": jnp.asarray(1.0, dtype=action_raw.dtype),
+            "correction_clipped": jnp.asarray(0.0, dtype=action_raw.dtype),
+            "raw_action_norm": jnp.linalg.norm(action_raw),
+            "processed_action_norm": jnp.linalg.norm(u_processed),
+        }
+
+        return u_processed, constraint_active, delta_u, diagnostics
 
     return get_safe_action

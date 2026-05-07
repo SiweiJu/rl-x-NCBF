@@ -130,6 +130,7 @@ class PPO:
         self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std")
         self.ncbf_safety_layer_std_coeff_start = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_start")
         self.ncbf_safety_layer_std_coeff_final = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_final")
+        self.ncbf_max_delta_u = getattr(config.algorithm.ncbf, "max_delta_u", 0.0)
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
 
@@ -294,7 +295,7 @@ class PPO:
 
                 params_stack = repeat_ncbf_params(ncbf_state)
 
-                processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, observation, last_action, last_state, latent_z,
+                processed_action, constraint_active, delta_u, safety_diagnostics = self.batched_ncbf_safety_layer(raw_processed_action, observation, last_action, last_state, latent_z,
                                                                                       safety_layer_curriculum_coeff,
                                                                                       params_stack)
                 # contraint_active = 0
@@ -305,7 +306,7 @@ class PPO:
                 env_state = self.env.step(env_state, env_action)
                 done = env_state.terminated | env_state.truncated
                 transition = (observation, env_state.actual_next_observation, action, env_action, env_state.reward, value,
-                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, last_state, last_action, history_stack)
+                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, last_state, last_action, history_stack, safety_diagnostics)
 
                 if self.render:
                     def render(env_state):
@@ -672,7 +673,7 @@ class PPO:
                     rollout_carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff)
                     single_rollout_carry, batch = jax.lax.scan(single_rollout, rollout_carry, None, self.nr_steps)
                     policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, _ = single_rollout_carry
-                    states, next_states, actions, env_actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks = batch
+                    states, next_states, actions, env_actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks, safety_diagnostics = batch
 
                     # process the batch data to get mask and y_target
                     y_target, safe_y, masks, indices_to_term = get_receding_min_target(next_states, dones, terminations)
@@ -684,6 +685,15 @@ class PPO:
                     ncbf_metrics["ncbf/safety_layer_std_coeff"] = safety_layer_curriculum_coeff
                     ncbf_metrics["ncbf/constraints_active_rate"] = jnp.mean(constraints_active)
                     ncbf_metrics["ncbf/mean_delta_u"] = jnp.mean(jnp.abs(delta_u))
+                    active_mask = constraints_active.astype(jnp.float32)
+                    nonzero_correction = (delta_u > 1e-6).astype(jnp.float32)
+                    n_active = jnp.sum(active_mask)
+                    ncbf_metrics["ncbf/safety_layer_active_rate"] = jnp.mean(active_mask)
+                    ncbf_metrics["ncbf/safety_layer_delta_u_mean"] = jnp.mean(delta_u)
+                    ncbf_metrics["ncbf/safety_layer_delta_u_max"] = jnp.max(delta_u)
+                    ncbf_metrics["ncbf/safety_layer_delta_u_active_mean"] = jnp.sum(delta_u * active_mask) / (n_active + 1e-8)
+                    ncbf_metrics["ncbf/safety_layer_nonzero_correction_rate"] = jnp.mean(nonzero_correction)
+                    ncbf_metrics["ncbf/safety_layer_active_but_zero_rate"] = jnp.mean(active_mask * (1.0 - nonzero_correction))
                     ncbf_metrics["ncbf/mean_y"] = jnp.mean(y_target)
                     ncbf_metrics["ncbf/mask_rate"] = jnp.mean(masks.astype(jnp.float32))
                     ncbf_metrics["ncbf/safe_y_rate"] = jnp.mean(safe_y.astype(jnp.float32))
@@ -705,6 +715,27 @@ class PPO:
                         ((actions < action_low) | (actions > action_high)).astype(jnp.float32)
                     )
                     ncbf_metrics["policy/executed_action_abs_mean"] = jnp.mean(jnp.abs(env_actions))
+                    raw_processed_actions = self.get_processed_action(actions)
+                    raw_processed_norm = jnp.linalg.norm(raw_processed_actions, axis=-1)
+                    executed_norm = jnp.linalg.norm(env_actions, axis=-1)
+                    shield_correction_norm = jnp.linalg.norm(env_actions - raw_processed_actions, axis=-1)
+                    ncbf_metrics["ncbf/safety_layer_raw_processed_action_norm"] = jnp.mean(raw_processed_norm)
+                    ncbf_metrics["ncbf/safety_layer_executed_action_norm"] = jnp.mean(executed_norm)
+                    ncbf_metrics["ncbf/safety_layer_action_correction_norm"] = jnp.mean(shield_correction_norm)
+                    ncbf_metrics["ncbf/safety_layer_action_correction_norm_max"] = jnp.max(shield_correction_norm)
+                    ncbf_metrics["ncbf/safety_layer_correction_to_action_ratio"] = jnp.mean(shield_correction_norm / (raw_processed_norm + 1e-8))
+                    ncbf_metrics["ncbf/safety_layer_executed_action_out_of_bounds_fraction"] = jnp.mean(
+                        ((env_actions < action_low) | (env_actions > action_high)).astype(jnp.float32)
+                    )
+                    ncbf_metrics["ncbf/safety_layer_action_bound_saturation_rate"] = jnp.mean(
+                        ((env_actions <= action_low + 1e-5) | (env_actions >= action_high - 1e-5)).astype(jnp.float32)
+                    )
+                    ncbf_metrics["ncbf/safety_layer_max_delta_u_config"] = jnp.asarray(self.ncbf_max_delta_u, dtype=jnp.float32)
+                    for diag_key, diag_value in safety_diagnostics.items():
+                        ncbf_metrics[f"ncbf_safety_layer/{diag_key}"] = jnp.mean(diag_value)
+                    ncbf_metrics["ncbf/safety_layer_constraint_delta_max"] = jnp.max(safety_diagnostics["constraint_delta"])
+                    ncbf_metrics["ncbf/safety_layer_robust_residual_min"] = jnp.min(safety_diagnostics["robust_residual"])
+                    ncbf_metrics["ncbf/safety_layer_correction_clipped_rate"] = jnp.mean(safety_diagnostics["correction_clipped"])
 
                     @jax.jit
                     def append_to_buffer(buffer,
@@ -1255,7 +1286,7 @@ class PPO:
                         action = action_mean
                         raw_processed_action = self.get_processed_action(action)
                         params_stack = repeat_ncbf_params(ncbf_state)
-                        processed_action, _, _ = self.batched_ncbf_safety_layer(
+                        processed_action, _, _, _ = self.batched_ncbf_safety_layer(
                             raw_processed_action,
                             eval_env_state.next_observation,
                             eval_env_state.last_action,
@@ -1441,7 +1472,7 @@ class PPO:
             action = action_mean # + action_std * jax.random.normal(subkey, shape=action_mean.shape)
             raw_processed_action = self.get_processed_action(action)
             params_stack = get_ncbf_params_stack()
-            processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(
+            processed_action, constraint_active, delta_u, _ = self.batched_ncbf_safety_layer(
                 raw_processed_action,
                 env_state.next_observation,
                 env_state.last_action,
