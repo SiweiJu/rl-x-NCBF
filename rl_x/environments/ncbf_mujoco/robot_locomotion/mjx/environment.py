@@ -766,9 +766,6 @@ class LocomotionEnv:
         self.reward_function.setup(new_internal_state)
         self.domain_randomization_action_delay_function.setup(new_internal_state)
         data, mjx_model = self.handle_domain_randomization(new_internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
-        if self.use_ball_plate:
-            qpos, qvel = self._apply_ball_plate_initial_joint_positions_to_state(data.qpos, data.qvel, new_internal_state)
-            data = data.replace(qpos=qpos, qvel=qvel)
         data, mjx_model = self._reset_ball_plate_state(data, mjx_model, new_internal_state, ball_plate_key)
         new_internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
         new_internal_state["imu_orientation_rotation_inverse"] = new_internal_state["imu_orientation_rotation"].inv()

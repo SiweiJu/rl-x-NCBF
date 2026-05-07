@@ -312,7 +312,7 @@ class LocomotionEnv(gym.Env):
         self.observation_noise_function.init_attributes()
 
         eval_mode = True
-        self.max_curriculum_level = 0.2
+        self.max_curriculum_level = 0.0
         self.internal_state = {
             "mj_model": deepcopy(self.initial_mj_model),
             "data": mujoco.MjData(self.initial_mj_model),
@@ -759,9 +759,6 @@ class LocomotionEnv(gym.Env):
 
         qpos, qvel = self.initial_state_function.setup()
 
-        if self.use_ball_plate:
-            self._apply_ball_plate_initial_joint_positions_to_state(qpos, qvel)
-
         self.internal_state["data"] = mujoco.MjData(self.internal_state["mj_model"])
         self.internal_state["data"].qpos = qpos
         self.internal_state["data"].qvel = qvel
@@ -797,7 +794,6 @@ class LocomotionEnv(gym.Env):
         if self.use_ball_plate:
             qpos = self.internal_state["data"].qpos.copy()
             qvel = self.internal_state["data"].qvel.copy()
-            self._apply_ball_plate_initial_joint_positions_to_state(qpos, qvel)
             self._reset_ball_plate_state(qpos, qvel)
             self.internal_state["data"] = mujoco.MjData(self.internal_state["mj_model"])
             self.internal_state["data"].qpos = qpos
