@@ -20,6 +20,8 @@ class DefaultG1Reward(DefaultReward):
         self.gait_final_coeff = reward_config.get("gait_final_coeff", 1.0)
         self.gait_fixed_coeff = reward_config.get("gait_fixed_coeff", 1.0)
         self.moving_command_threshold = reward_config.get("moving_command_threshold", 0.05)
+        self.standing_command_threshold = reward_config.get("standing_command_threshold", self.moving_command_threshold)
+        self.standing_leg_joint_velocity_coeff = reward_config.get("standing_leg_joint_velocity_coeff", 0.0) * env.dt
         self.contact_count_coeff = reward_config.get("contact_count_coeff", 2.0) * env.dt
         self.foot_stance_time_coeff = reward_config.get("foot_stance_time_coeff", 1.0) * env.dt
         self.foot_stance_time_per_robot_size_m = reward_config.get("foot_stance_time_per_robot_size_m", 0.6)
@@ -61,6 +63,29 @@ class DefaultG1Reward(DefaultReward):
                 env.initial_mj_model.joint(name).qposadr[0]
                 for name in nominal_joint_names
             ])
+        standing_leg_joint_names = reward_config.get("standing_leg_joint_velocity_names", None)
+        if standing_leg_joint_names is None:
+            standing_leg_keywords = reward_config.get("standing_leg_joint_velocity_name_keywords", ["hip", "knee", "ankle"])
+            standing_leg_excluded_keywords = reward_config.get(
+                "standing_leg_joint_velocity_excluded_name_keywords",
+                ["shoulder", "elbow", "wrist", "waist", "head"],
+            )
+            standing_leg_joint_names = [
+                joint_name
+                for joint_name in env.actuator_joint_names
+                if (
+                    any(keyword in joint_name.lower() for keyword in standing_leg_keywords)
+                    and not any(keyword in joint_name.lower() for keyword in standing_leg_excluded_keywords)
+                )
+            ]
+        self.has_standing_leg_joint_velocity_reward = len(standing_leg_joint_names) > 0
+        standing_leg_qvel_ids = [
+            env.initial_mj_model.joint(joint_name).dofadr[0]
+            for joint_name in standing_leg_joint_names
+        ]
+        if len(standing_leg_qvel_ids) == 0:
+            standing_leg_qvel_ids = [int(env.actuator_joint_mask_qvel[0])]
+        self.standing_leg_joint_qvel_id = jnp.array(standing_leg_qvel_ids)
 
         foot_geom_indices = np.array(env.foot_geom_indices)
         self.left_feet_in_feet = jnp.array(np.where(np.isin(foot_geom_indices, np.array(env.left_foot_geom_indices)))[0])
@@ -191,6 +216,14 @@ class DefaultG1Reward(DefaultReward):
 
         command_norm = jnp.linalg.norm(internal_state["goal_velocities"])
         is_moving_command = command_norm > self.moving_command_threshold
+        is_standing_command = command_norm <= self.standing_command_threshold
+        standing_leg_joint_velocity_norm = jnp.mean(jnp.square(data.qvel[self.standing_leg_joint_qvel_id]))
+        standing_leg_joint_velocity_reward = (
+            self.standing_leg_joint_velocity_coeff
+            * -standing_leg_joint_velocity_norm
+            * is_standing_command.astype(jnp.float32)
+            * jnp.asarray(self.has_standing_leg_joint_velocity_reward, dtype=jnp.float32)
+        )
 
         feet_first_contact = feet_floor_contacts & (~internal_state["previous_feet_floor_contacts"])
         target_foot_air_time = self.foot_air_time_per_robot_size_m * internal_state["robot_dimensions_mean"]
@@ -303,7 +336,7 @@ class DefaultG1Reward(DefaultReward):
         gait_reward = foot_lift_bonus_reward
         gait_penalty = foot_air_time_reward + symmetry_air_reward + contact_count_reward + foot_stance_time_reward + foot_clearance_reward
         alive_total = alive_clipped_reward + alive_unclipped_reward + survival_reward + extra_alive_reward
-        penalty_total = critical_penalty + style_penalty + gait_penalty + booster_penalty + extra_penalty
+        penalty_total = critical_penalty + style_penalty + standing_leg_joint_velocity_reward + gait_penalty + booster_penalty + extra_penalty
         pre_clip_total = (
             tracking_reward + penalty_total + gait_reward +
             extra_positive_reward + alive_clipped_reward + survival_reward + extra_alive_reward
@@ -345,6 +378,7 @@ class DefaultG1Reward(DefaultReward):
         info[f"reward/power_draw_penalty"] = power_draw_penalty_reward
         info[f"reward/action_rate"] = action_rate_reward
         info[f"reward/action_smoothness"] = action_smoothness_reward
+        info[f"reward/standing_leg_joint_velocity"] = standing_leg_joint_velocity_reward
         info[f"reward/collision"] = collision_reward
         info[f"reward/base_height"] = base_height_reward
         info[f"reward/foot_air_time"] = foot_air_time_reward
@@ -369,6 +403,7 @@ class DefaultG1Reward(DefaultReward):
         info[f"reward/gait_penalty_total"] = gait_penalty
         info[f"reward/gait_reward_total"] = gait_reward
         info[f"reward/total"] = reward
+        info[f"env_info/standing_leg_joint_velocity_norm"] = standing_leg_joint_velocity_norm
         info[f"env_info/xy_vel_diff_abs"] = jnp.nan_to_num(jnp.mean(jnp.minimum(jnp.abs(xy_difference), 2 * internal_state["max_command_velocity"])), nan=2 * internal_state["max_command_velocity"], posinf=2 * internal_state["max_command_velocity"], neginf=2 * internal_state["max_command_velocity"])
 
         return reward

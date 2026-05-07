@@ -37,6 +37,7 @@ class LocomotionEnv(gym.Env):
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.ball_plate_config = env_config.get("ball_plate", {})
         self.use_ball_plate = bool(self.ball_plate_config.get("enabled", False))
+        self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand", True))
         self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations", True))
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
@@ -46,6 +47,8 @@ class LocomotionEnv(gym.Env):
 
         xml_path = (self.robot_config["directory_path"] / "data" / "plane.xml").as_posix()
         xml_handle = mjcf.from_path(xml_path)
+        if self.use_capsule_hand:
+            self._remove_capsule_hand_visual_geoms_from_xml(xml_handle)
 
         # Set the MuJoCo solver iterations, the XML uses very low values by default for MJX
         xml_handle.option.iterations = 100
@@ -245,6 +248,50 @@ class LocomotionEnv(gym.Env):
             self.ball_plate_right_fist_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, self.ball_plate_config["right_fist_body"])
             self.ball_plate_left_fist_pos = np.array(self.ball_plate_config["left_fist_pos"], dtype=float)
             self.ball_plate_right_fist_pos = np.array(self.ball_plate_config["right_fist_pos"], dtype=float)
+            self.ball_plate_capsule_hand_radius = float(self.ball_plate_config["fist_radius"])
+            self.ball_plate_capsule_hand_half_length = float(self.ball_plate_config["fist_half_length"])
+            self.ball_plate_capsule_hand_mass = float(self.ball_plate_config.get("capsule_hand_mass", 0.0))
+            capsule_hand_radius_range = self.ball_plate_config.get("capsule_hand_radius_range")
+            if capsule_hand_radius_range is None:
+                capsule_hand_radius_range = np.asarray(
+                    self.ball_plate_config.get("capsule_hand_radius_scale_range", [1.0, 1.0]),
+                    dtype=float,
+                ) * self.ball_plate_capsule_hand_radius
+            capsule_hand_half_length_range = self.ball_plate_config.get("capsule_hand_half_length_range")
+            if capsule_hand_half_length_range is None:
+                capsule_hand_half_length_range = np.asarray(
+                    self.ball_plate_config.get("capsule_hand_half_length_scale_range", [1.0, 1.0]),
+                    dtype=float,
+                ) * self.ball_plate_capsule_hand_half_length
+            self.ball_plate_capsule_hand_radius_range = np.array(
+                capsule_hand_radius_range,
+                dtype=float,
+            )
+            self.ball_plate_capsule_hand_half_length_range = np.array(
+                capsule_hand_half_length_range,
+                dtype=float,
+            )
+            self.ball_plate_capsule_hand_mass_range = np.array(
+                self.ball_plate_config.get("capsule_hand_mass_range", [self.ball_plate_capsule_hand_mass, self.ball_plate_capsule_hand_mass]),
+                dtype=float,
+            )
+            if self.use_capsule_hand:
+                self.ball_plate_capsule_hand_geom_ids = np.array([
+                    mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "left_plate_support_fist"),
+                    mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_GEOM, "right_plate_support_fist"),
+                ], dtype=int)
+                self.ball_plate_capsule_hand_body_ids = np.array([
+                    mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, "left_capsule_hand"),
+                    mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, "right_capsule_hand"),
+                ], dtype=int)
+                self.ball_plate_capsule_hand_nominal_body_inertia = np.array(
+                    self.initial_mj_model.body_inertia[self.ball_plate_capsule_hand_body_ids[0]],
+                    dtype=float,
+                )
+            else:
+                self.ball_plate_capsule_hand_geom_ids = np.array([], dtype=int)
+                self.ball_plate_capsule_hand_body_ids = np.array([], dtype=int)
+                self.ball_plate_capsule_hand_nominal_body_inertia = np.zeros(3)
             self.nr_ball_plate_observations = 12
         else:
             self.nr_ball_plate_observations = 0
@@ -312,7 +359,7 @@ class LocomotionEnv(gym.Env):
         self.observation_noise_function.init_attributes()
 
         eval_mode = True
-        self.max_curriculum_level = 0.0
+        self.max_curriculum_level = 0.5
         self.internal_state = {
             "mj_model": deepcopy(self.initial_mj_model),
             "data": mujoco.MjData(self.initial_mj_model),
@@ -339,6 +386,9 @@ class LocomotionEnv(gym.Env):
             "ball_plate_plate_support_friction_tangential": self.ball_plate_nominal_support_friction if self.use_ball_plate else 0.0,
             "ball_plate_plate_robot_friction_tangential": self.ball_plate_nominal_robot_friction if self.use_ball_plate else 0.0,
             "ball_plate_contact_timeconst": self.ball_plate_nominal_contact_timeconst if self.use_ball_plate else 0.0,
+            "ball_plate_capsule_hand_radius": self.ball_plate_capsule_hand_radius if self.use_ball_plate else 0.0,
+            "ball_plate_capsule_hand_half_length": self.ball_plate_capsule_hand_half_length if self.use_ball_plate else 0.0,
+            "ball_plate_capsule_hand_mass": self.ball_plate_capsule_hand_mass if self.use_ball_plate else 0.0,
             "ball_plate_ball_dropped": False,
             "ball_plate_plate_dropped": False,
             "ball_plate_dropped": False,
@@ -390,6 +440,46 @@ class LocomotionEnv(gym.Env):
                 self.joystick.init()
                 self.joystick_present = True
         del self.c_model, self.c_data
+
+
+    def _remove_capsule_hand_visual_geoms_from_xml(self, xml_handle):
+        if not self.ball_plate_config.get("capsule_hand_remove_visual_geoms", True):
+            return
+
+        def get_mesh_name(geom):
+            mesh = getattr(geom, "mesh", None)
+            if mesh is None:
+                return None
+            name = getattr(mesh, "name", None)
+            if name is not None:
+                return str(name)
+            return str(mesh)
+
+        removed_mesh_names = set(self.ball_plate_config.get("capsule_hand_removed_mesh_names", []))
+        if removed_mesh_names:
+            for geom in list(xml_handle.find_all("geom")):
+                mesh_name = get_mesh_name(geom)
+                if mesh_name in removed_mesh_names:
+                    geom.remove()
+
+        remove_reward_collision_geoms = self.ball_plate_config.get("capsule_hand_remove_reward_collision_geoms", True)
+        for body_name in self.ball_plate_config.get("capsule_hand_removed_body_names", []):
+            body = xml_handle.find("body", body_name)
+            if body is None:
+                continue
+            body_tree = [body, *list(body.find_all("body"))]
+            geoms = []
+            seen_geom_ids = set()
+            for body_part in body_tree:
+                for geom in list(body_part.find_all("geom")):
+                    geom_id = id(geom)
+                    if geom_id not in seen_geom_ids:
+                        geoms.append(geom)
+                        seen_geom_ids.add(geom_id)
+            for geom in geoms:
+                is_reward_collision_sphere = geom.dclass and geom.dclass.dclass == "reward_collision_sphere"
+                if remove_reward_collision_geoms or not is_reward_collision_sphere:
+                    geom.remove()
 
 
     def _add_ball_plate_to_xml(self, xml_handle):
@@ -447,15 +537,26 @@ class LocomotionEnv(gym.Env):
             dtype=float,
         )
         forearm_contact_radius = float(self.ball_plate_config["forearm_contact_radius"])
+        add_forearm_plate_guards = not (
+            self.use_capsule_hand and self.ball_plate_config.get("capsule_hand_disable_forearm_guards", True)
+        )
         add_support_fist_geoms = self.ball_plate_config.get("add_support_fist_geoms", True)
         if add_support_fist_geoms:
-            left_fist.add("geom", name="left_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{left_fist_pos[0] - fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]} {left_fist_pos[0] + fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
-            right_fist.add("geom", name="right_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{right_fist_pos[0] - fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]} {right_fist_pos[0] + fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
+            if self.use_capsule_hand:
+                capsule_hand_mass = float(self.ball_plate_config.get("capsule_hand_mass", 0.0))
+                left_capsule_hand = left_fist.add("body", name="left_capsule_hand", pos=" ".join(map(str, left_fist_pos)))
+                right_capsule_hand = right_fist.add("body", name="right_capsule_hand", pos=" ".join(map(str, right_fist_pos)))
+                left_capsule_hand.add("geom", name="left_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{-fist_half_length} 0.0 0.0 {fist_half_length} 0.0 0.0", rgba="0.68 0.68 0.68 1", mass=str(capsule_hand_mass), contype="0", conaffinity="0")
+                right_capsule_hand.add("geom", name="right_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{-fist_half_length} 0.0 0.0 {fist_half_length} 0.0 0.0", rgba="0.68 0.68 0.68 1", mass=str(capsule_hand_mass), contype="0", conaffinity="0")
+            else:
+                left_fist.add("geom", name="left_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{left_fist_pos[0] - fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]} {left_fist_pos[0] + fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
+                right_fist.add("geom", name="right_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{right_fist_pos[0] - fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]} {right_fist_pos[0] + fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
         torso_contact_body.add("geom", name="torso_plate_guard", type="sphere", pos=" ".join(map(str, torso_contact_pos)), size=str(torso_contact_size), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
         left_upper_arm_contact_body.add("geom", name="left_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, left_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
         right_upper_arm_contact_body.add("geom", name="right_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, right_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
-        left_forearm_contact_body.add("geom", name="left_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, left_forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
-        right_forearm_contact_body.add("geom", name="right_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, right_forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        if add_forearm_plate_guards:
+            left_forearm_contact_body.add("geom", name="left_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, left_forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+            right_forearm_contact_body.add("geom", name="right_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, right_forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
 
         plate = xml_handle.worldbody.add("body", name="ball_plate", pos=" ".join(map(str, plate_pos)), quat=" ".join(map(str, plate_quat)))
         plate.add("freejoint", name="ball_plate_freejoint")
@@ -504,13 +605,7 @@ class LocomotionEnv(gym.Env):
             xml_handle.contact.add("pair", geom1=support_geom_name, geom2="ball_plate_geom", condim=plate_support_pair_dim, friction=plate_support_pair_friction, **robot_contact_pair_kwargs)
         for torso_geom_name in ["torso_plate_guard", *self.ball_plate_config.get("torso_contact_geom_names", [])]:
             xml_handle.contact.add("pair", geom1=torso_geom_name, geom2="ball_plate_geom", condim=plate_torso_pair_dim, friction=plate_torso_pair_friction, **robot_contact_pair_kwargs)
-        for arm_geom_name in [
-            "left_upper_arm_plate_guard",
-            "right_upper_arm_plate_guard",
-            "left_forearm_plate_guard",
-            "right_forearm_plate_guard",
-            *self.ball_plate_config.get("arm_contact_geom_names", []),
-        ]:
+        for arm_geom_name in self._get_ball_plate_arm_contact_geom_names():
             xml_handle.contact.add("pair", geom1=arm_geom_name, geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction, **robot_contact_pair_kwargs)
         xml_handle.contact.add("pair", geom1="floor", geom2="ball_plate_geom")
         xml_handle.contact.add("pair", geom1="floor", geom2="plate_ball_geom")
@@ -533,12 +628,22 @@ class LocomotionEnv(gym.Env):
         return [
             "torso_plate_guard",
             *self.ball_plate_config.get("torso_contact_geom_names", []),
+            *self._get_ball_plate_arm_contact_geom_names(),
+        ]
+
+
+    def _get_ball_plate_arm_contact_geom_names(self):
+        arm_contact_geom_names = [
             "left_upper_arm_plate_guard",
             "right_upper_arm_plate_guard",
-            "left_forearm_plate_guard",
-            "right_forearm_plate_guard",
-            *self.ball_plate_config.get("arm_contact_geom_names", []),
         ]
+        if not (self.use_capsule_hand and self.ball_plate_config.get("capsule_hand_disable_forearm_guards", True)):
+            arm_contact_geom_names.extend([
+                "left_forearm_plate_guard",
+                "right_forearm_plate_guard",
+            ])
+        arm_contact_geom_names.extend(self.ball_plate_config.get("arm_contact_geom_names", []))
+        return arm_contact_geom_names
 
 
     def _get_ball_plate_pair_ids(self, other_geom_names):
@@ -1011,7 +1116,12 @@ class LocomotionEnv(gym.Env):
         data.qvel = qvel.copy()
         mujoco.mj_forward(self.internal_state["mj_model"], data)
 
-        plate_pos, plate_quat = self._get_ball_plate_supported_pose(data, plate_size)
+        plate_pos, plate_quat = self._get_ball_plate_supported_pose(
+            data,
+            plate_size,
+            ball_plate_params["capsule_hand_radius"],
+            ball_plate_params["capsule_hand_half_length"],
+        )
         qpos[self.ball_plate_qposadr:self.ball_plate_qposadr + 3] = plate_pos
         qpos[self.ball_plate_qposadr + 3:self.ball_plate_qposadr + 7] = plate_quat
         qvel[self.ball_plate_qveladr:self.ball_plate_qveladr + 6] = 0.0
@@ -1038,6 +1148,9 @@ class LocomotionEnv(gym.Env):
         self.internal_state["ball_plate_plate_support_friction_tangential"] = ball_plate_params["plate_support_friction_tangential"]
         self.internal_state["ball_plate_plate_robot_friction_tangential"] = ball_plate_params["plate_robot_friction_tangential"]
         self.internal_state["ball_plate_contact_timeconst"] = ball_plate_params["contact_timeconst"]
+        self.internal_state["ball_plate_capsule_hand_radius"] = ball_plate_params["capsule_hand_radius"]
+        self.internal_state["ball_plate_capsule_hand_half_length"] = ball_plate_params["capsule_hand_half_length"]
+        self.internal_state["ball_plate_capsule_hand_mass"] = ball_plate_params["capsule_hand_mass"]
         self.internal_state["ball_plate_ball_dropped"] = False
         self.internal_state["ball_plate_plate_dropped"] = False
         self.internal_state["ball_plate_dropped"] = False
@@ -1051,16 +1164,38 @@ class LocomotionEnv(gym.Env):
         return left_support, right_support
 
 
-    def _get_ball_plate_supported_pose(self, data, plate_size=None):
+    def _get_ball_plate_support_surface_height(self, data, capsule_radius=None, capsule_half_length=None):
+        left_support, right_support = self._get_ball_plate_support_points(data)
+        fist_radius = float(self.ball_plate_config["fist_radius"]) if capsule_radius is None else capsule_radius
+        if not self.ball_plate_config.get("add_support_fist_geoms", True):
+            return max(left_support[2], right_support[2]) + fist_radius
+
+        left_body_xmat = data.xmat[self.ball_plate_left_fist_body_id].reshape(3, 3)
+        right_body_xmat = data.xmat[self.ball_plate_right_fist_body_id].reshape(3, 3)
+        fist_half_length = float(self.ball_plate_config["fist_half_length"]) if capsule_half_length is None else capsule_half_length
+        left_capsule_axis = left_body_xmat[:, 0]
+        right_capsule_axis = right_body_xmat[:, 0]
+        left_endpoint_heights = np.array([
+            left_support[2] - left_capsule_axis[2] * fist_half_length,
+            left_support[2] + left_capsule_axis[2] * fist_half_length,
+        ])
+        right_endpoint_heights = np.array([
+            right_support[2] - right_capsule_axis[2] * fist_half_length,
+            right_support[2] + right_capsule_axis[2] * fist_half_length,
+        ])
+        capsule_axis_height = max(np.max(left_endpoint_heights), np.max(right_endpoint_heights))
+        return capsule_axis_height + fist_radius
+
+
+    def _get_ball_plate_supported_pose(self, data, plate_size=None, capsule_radius=None, capsule_half_length=None):
         if plate_size is None:
             plate_size = self.ball_plate_plate_size
         left_support, right_support = self._get_ball_plate_support_points(data)
         support_center = 0.5 * (left_support + right_support)
         plate_pos = support_center.copy()
-        support_height = max(left_support[2], right_support[2])
+        support_surface_height = self._get_ball_plate_support_surface_height(data, capsule_radius, capsule_half_length)
         plate_pos[2] = (
-            support_height
-            + float(self.ball_plate_config["fist_radius"])
+            support_surface_height
             + plate_size[2]
             + self.ball_plate_plate_support_clearance
         )
@@ -1150,6 +1285,24 @@ class LocomotionEnv(gym.Env):
             curriculum_coeff,
             self.ball_plate_config.get("randomize_plate_contact_stiffness", True),
         )
+        capsule_hand_radius = self._sample_curriculum_scalar(
+            self.ball_plate_capsule_hand_radius,
+            self.ball_plate_capsule_hand_radius_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_capsule_hand_size", True),
+        )
+        capsule_hand_half_length = self._sample_curriculum_scalar(
+            self.ball_plate_capsule_hand_half_length,
+            self.ball_plate_capsule_hand_half_length_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_capsule_hand_size", True),
+        )
+        capsule_hand_mass = self._sample_curriculum_scalar(
+            self.ball_plate_capsule_hand_mass,
+            self.ball_plate_capsule_hand_mass_range,
+            curriculum_coeff,
+            self.ball_plate_config.get("randomize_capsule_hand_mass", True),
+        )
 
         return {
             "ball_radius": ball_radius,
@@ -1163,6 +1316,9 @@ class LocomotionEnv(gym.Env):
             "plate_support_friction_tangential": plate_support_friction_tangential,
             "plate_robot_friction_tangential": plate_robot_friction_tangential,
             "contact_timeconst": contact_timeconst,
+            "capsule_hand_radius": capsule_hand_radius,
+            "capsule_hand_half_length": capsule_hand_half_length,
+            "capsule_hand_mass": capsule_hand_mass,
         }
 
 
@@ -1173,11 +1329,21 @@ class LocomotionEnv(gym.Env):
         model.pair_friction[pair_ids, 1] = value
 
 
+    def _get_capsule_hand_inertia(self, radius, half_length, mass):
+        nominal_size = self.ball_plate_capsule_hand_radius + self.ball_plate_capsule_hand_half_length
+        size_scale = (radius + half_length) / max(nominal_size, 1e-6)
+        mass_scale = mass / max(self.ball_plate_capsule_hand_mass, 1e-6)
+        return np.maximum(self.ball_plate_capsule_hand_nominal_body_inertia * mass_scale * size_scale ** 2, 1e-7)
+
+
     def _apply_ball_plate_domain_randomization(self, model, params):
         ball_radius = params["ball_radius"]
         ball_mass = params["ball_mass"]
         plate_size = params["plate_size"]
         plate_mass = params["plate_mass"]
+        capsule_hand_radius = params["capsule_hand_radius"]
+        capsule_hand_half_length = params["capsule_hand_half_length"]
+        capsule_hand_mass = params["capsule_hand_mass"]
 
         model.geom_size[self.ball_plate_ball_geom_id, 0] = ball_radius
         model.geom_size[self.ball_plate_geom_id] = plate_size
@@ -1193,6 +1359,18 @@ class LocomotionEnv(gym.Env):
             plate_size[0] ** 2 + plate_size[2] ** 2,
             plate_size[0] ** 2 + plate_size[1] ** 2,
         ])
+        if self.use_capsule_hand:
+            nr_capsule_hands = len(self.ball_plate_capsule_hand_geom_ids)
+            model.geom_size[self.ball_plate_capsule_hand_geom_ids] = np.tile(
+                np.array([capsule_hand_radius, capsule_hand_half_length, 0.0]),
+                (nr_capsule_hands, 1),
+            )
+            model.geom_rbound[self.ball_plate_capsule_hand_geom_ids] = capsule_hand_radius + capsule_hand_half_length
+            model.body_mass[self.ball_plate_capsule_hand_body_ids] = np.full(nr_capsule_hands, capsule_hand_mass)
+            model.body_inertia[self.ball_plate_capsule_hand_body_ids] = np.tile(
+                self._get_capsule_hand_inertia(capsule_hand_radius, capsule_hand_half_length, capsule_hand_mass),
+                (nr_capsule_hands, 1),
+            )
 
         self._set_pair_tangential_friction(model, self.ball_plate_ball_pair_ids, params["plate_ball_friction_tangential"])
         self._set_pair_tangential_friction(model, self.ball_plate_support_pair_ids, params["plate_support_friction_tangential"])
@@ -1412,6 +1590,9 @@ class LocomotionEnv(gym.Env):
                     "plate_support_friction_tangential": self.internal_state["ball_plate_plate_support_friction_tangential"],
                     "plate_robot_friction_tangential": self.internal_state["ball_plate_plate_robot_friction_tangential"],
                     "contact_timeconst": self.internal_state["ball_plate_contact_timeconst"],
+                    "capsule_hand_radius": self.internal_state["ball_plate_capsule_hand_radius"],
+                    "capsule_hand_half_length": self.internal_state["ball_plate_capsule_hand_half_length"],
+                    "capsule_hand_mass": self.internal_state["ball_plate_capsule_hand_mass"],
                 })
         
         if should_randomize_domain_perturbation:
