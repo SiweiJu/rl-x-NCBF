@@ -5,7 +5,9 @@ class G1BallTermination:
     def __init__(self, env):
         self.env = env
 
-        self.height_percentage_threshold = self.env.env_config["termination"]["height_percentage_threshold"]
+        termination_config = self.env.env_config["termination"]
+        self.height_percentage_threshold = termination_config["height_percentage_threshold"]
+        self.terminate_on_ball_plate_drop = termination_config.get("terminate_on_ball_plate_drop", True)
 
 
     def should_terminate(self, internal_state):
@@ -20,5 +22,9 @@ class G1BallTermination:
 
         ball_dropped = self.env.ball_plate_ball_has_dropped(internal_state)
         plate_dropped = self.env.ball_plate_plate_has_dropped(internal_state)
+        if self.terminate_on_ball_plate_drop:
+            ball_plate_drop_terminated = ball_dropped | plate_dropped
+        else:
+            ball_plate_drop_terminated = False
 
-        return below_height | body_tilt | ball_dropped | plate_dropped
+        return below_height | body_tilt | ball_plate_drop_terminated

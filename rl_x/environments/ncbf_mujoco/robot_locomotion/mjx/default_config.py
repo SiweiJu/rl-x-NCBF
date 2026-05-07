@@ -288,6 +288,7 @@ def get_config(environment_name):
             "type": "below_height",
             "height_percentage_threshold": 0.8,
             "body_tilt_threshold": 0.4,
+            "terminate_on_ball_plate_drop": True,
         },
         "safety": {
             "safe_time_limit_seconds": 0.0,
