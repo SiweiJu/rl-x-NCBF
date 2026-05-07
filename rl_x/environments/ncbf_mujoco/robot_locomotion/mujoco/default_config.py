@@ -12,6 +12,8 @@ def get_config(environment_name):
         "ball_plate": {
             "enabled": False,
             "include_observations": True,
+            "stand_after_drop": False,
+            "post_drop_truncation_seconds": 3.0,
             "randomize_ball_plate_domain": True,
             "initial_joint_positions": {
                 "left_shoulder_pitch_joint": 0.0,

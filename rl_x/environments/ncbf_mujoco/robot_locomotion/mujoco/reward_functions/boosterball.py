@@ -20,19 +20,30 @@ class BoosterBallReward(BoosterReward):
     def ball_plate_reward_and_info(self):
         if self.env.use_ball_plate:
             metrics = self.env.get_ball_plate_metrics()
+            if self.env.stand_after_ball_plate_drop:
+                was_dropped = bool(self.env.internal_state["ball_plate_drop_latched"])
+                dropped_now = bool(metrics["dropped"])
+                newly_dropped = dropped_now and not was_dropped
+                task_active = 0.0 if (was_dropped or dropped_now) else 1.0
+                drop_penalty_scale = float(newly_dropped)
+            else:
+                newly_dropped = bool(metrics["dropped"])
+                task_active = 1.0
+                drop_penalty_scale = float(metrics["dropped"])
+
             centering_norm = np.sum(np.square(metrics["relative_position"][:2]))
             velocity_norm = np.sum(np.square(metrics["relative_velocity"][:2]))
-            on_plate = float(metrics["on_plate"])
+            on_plate = float(metrics["on_plate"]) * task_active
             dropped = float(metrics["dropped"])
 
-            centering_reward = self.ball_plate_centering_coeff * -centering_norm
+            centering_reward = task_active * self.ball_plate_centering_coeff * -centering_norm
             center_bonus_reward = self.ball_plate_center_bonus_coeff * np.exp(
                 -centering_norm / max(self.ball_plate_center_bonus_temperature, 1e-6)
             ) * on_plate
-            velocity_reward = self.ball_plate_velocity_coeff * -velocity_norm
+            velocity_reward = task_active * self.ball_plate_velocity_coeff * -velocity_norm
             on_plate_reward = self.ball_plate_on_plate_coeff * on_plate
-            alive_reward = self.ball_plate_alive_coeff * (1.0 - dropped)
-            drop_penalty_reward = self.ball_plate_drop_penalty_coeff * -dropped
+            alive_reward = self.ball_plate_alive_coeff * task_active
+            drop_penalty_reward = self.ball_plate_drop_penalty_coeff * -drop_penalty_scale
         else:
             metrics = {"radial_distance": 0.0, "ball_dropped": False, "plate_dropped": False, "dropped": False}
             centering_reward = 0.0
@@ -43,10 +54,12 @@ class BoosterBallReward(BoosterReward):
             drop_penalty_reward = 0.0
             on_plate = 0.0
             dropped = 0.0
+            newly_dropped = False
 
         self.env.internal_state["ball_plate_ball_dropped"] = metrics["ball_dropped"]
         self.env.internal_state["ball_plate_plate_dropped"] = metrics["plate_dropped"]
         self.env.internal_state["ball_plate_dropped"] = metrics["dropped"]
+        self.env.internal_state["ball_plate_newly_dropped"] = newly_dropped
         ball_plate_reward = (
             alive_reward + on_plate_reward + center_bonus_reward +
             centering_reward + velocity_reward + drop_penalty_reward

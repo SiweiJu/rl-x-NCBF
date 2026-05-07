@@ -7,13 +7,17 @@ REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
-NR_ENVS="${NR_ENVS:-8192}"
+NR_ENVS="${NR_ENVS:-1024}"
 RUN_NAME="${RUN_NAME:-booster_locomotion}"
 
 cd "${EXPERIMENTS_DIR}"
 
 conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.name="ncbf_ppo.flax_full_jit_booster" \
+    --algorithm.minibatch_size=4096 \
+    --algorithm.learning_rate=4e-4 \
+    --algorithm.nr_steps=128 \
+    --algorithm.nr_epochs=4 \
     --algorithm.ncbf.use_safety_layer=False \
     --algorithm.ncbf.H=25 \
     --algorithm.ncbf.action_clipping=False \

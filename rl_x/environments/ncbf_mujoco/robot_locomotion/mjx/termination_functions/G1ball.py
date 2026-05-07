@@ -22,7 +22,7 @@ class G1BallTermination:
 
         ball_dropped = self.env.ball_plate_ball_has_dropped(internal_state)
         plate_dropped = self.env.ball_plate_plate_has_dropped(internal_state)
-        if self.terminate_on_ball_plate_drop:
+        if self.terminate_on_ball_plate_drop and not self.env.stand_after_ball_plate_drop:
             ball_plate_drop_terminated = ball_dropped | plate_dropped
         else:
             ball_plate_drop_terminated = False

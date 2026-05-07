@@ -31,6 +31,9 @@ NEXT_STEP_PREDICTOR_LR="${NEXT_STEP_PREDICTOR_LR:-1e-5}"
 NEXT_STEP_PREDICTOR_NR_MINIBATCHES="${NEXT_STEP_PREDICTOR_NR_MINIBATCHES:-50}"
 NEXT_STEP_PREDICTOR_AUX_LOSS_COEF="${NEXT_STEP_PREDICTOR_AUX_LOSS_COEF:-1}"
 EPISODE_SECONDS="${EPISODE_SECONDS:-20}"
+BALL_PLATE_STAND_AFTER_DROP="${BALL_PLATE_STAND_AFTER_DROP:-True}"
+BALL_PLATE_POST_DROP_TRUNCATION_SECONDS="${BALL_PLATE_POST_DROP_TRUNCATION_SECONDS:-3.0}"
+BALL_PLATE_TERMINATE_ON_DROP="${BALL_PLATE_TERMINATE_ON_DROP:-False}"
 TERRAIN_TYPE="${TERRAIN_TYPE:-plane}"
 PROJECT_NAME="${PROJECT_NAME:-202605_ncbf}"
 EXP_NAME="${EXP_NAME:-LN}"
@@ -52,7 +55,10 @@ fi
 if [[ "${BALL_PLATE_ENABLED}" == "True" ]]; then
     : "${BALL_PLATE_INCLUDE_OBSERVATIONS:?BALL_PLATE_INCLUDE_OBSERVATIONS must be set for ball experiments}"
     extra_args+=(
+        --environment.termination.terminate_on_ball_plate_drop="${BALL_PLATE_TERMINATE_ON_DROP}"
         --environment.ball_plate.enabled=True
+        --environment.ball_plate.stand_after_drop="${BALL_PLATE_STAND_AFTER_DROP}"
+        --environment.ball_plate.post_drop_truncation_seconds="${BALL_PLATE_POST_DROP_TRUNCATION_SECONDS}"
         --environment.ball_plate.include_observations="${BALL_PLATE_INCLUDE_OBSERVATIONS}"
     )
 fi

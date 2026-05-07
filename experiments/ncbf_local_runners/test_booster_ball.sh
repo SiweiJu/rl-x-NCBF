@@ -19,20 +19,23 @@ if [[ -z "${MODEL_PATH}" ]]; then
 fi
 
 CONDA_ENV="${CONDA_ENV:-ncbf-mjx}"
-SEED="${SEED:-42}"
+SEED="${SEED:-41}"
 NR_TEST_EPISODES="${NR_TEST_EPISODES:-10}"
 EPISODE_SECONDS="${EPISODE_SECONDS:-20}"
 RENDER="${RENDER:-True}"
-ACTION_NOISE_SAMPLING_RATIO="${ACTION_NOISE_SAMPLING_RATIO:-0.2}"
+ACTION_NOISE_SAMPLING_RATIO="${ACTION_NOISE_SAMPLING_RATIO:-0.0}"
 USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-False}"
-NCBF_GAMMA_C="${NCBF_GAMMA_C:-0}"
+TERMINATE_ON_BALL_PLATE_DROP="${TERMINATE_ON_BALL_PLATE_DROP:-False}"
+STAND_AFTER_DROP="${STAND_AFTER_DROP:-True}"
+POST_DROP_TRUNCATION_SECONDS="${POST_DROP_TRUNCATION_SECONDS:-3.0}"
+NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.1}"
 NCBF_OUTPUT_DISTRIBUTION="${NCBF_OUTPUT_DISTRIBUTION:-}"
 ROLLOUT_SAVE_NAME="${ROLLOUT_SAVE_NAME:-booster_ball_rollout}"
 PROJECT_NAME="${PROJECT_NAME:-debug}"
 EXP_NAME="${EXP_NAME:-booster_ball_test}"
 MODEL_TAG="$(basename "${MODEL_PATH}")"
 MODEL_TAG="${MODEL_TAG%.*}"
-RUN_NAME="${RUN_NAME:-booster_ball_${MODEL_TAG}}"
+RUN_NAME="${RUN_NAME:-debug_booster_ball_${MODEL_TAG}}"
 NCBF_OUTPUT_DISTRIBUTION_ARGS=()
 if [[ -n "${NCBF_OUTPUT_DISTRIBUTION}" ]]; then
     NCBF_OUTPUT_DISTRIBUTION_ARGS=(--algorithm.ncbf.output_distribution="${NCBF_OUTPUT_DISTRIBUTION}")
@@ -44,8 +47,7 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --algorithm.name="ncbf_ppo.flax_booster" \
     --algorithm.nr_steps=128 \
     --algorithm.minibatch_size=64 \
-    --algorithm.total_timesteps=700000000 \
-    --algorithm.hidden_layers="(256, 128)" \
+    --algorithm.total_timesteps=2000011264 \
     --algorithm.ncbf.use_safety_layer="${USE_SAFETY_LAYER}" \
     --algorithm.ncbf.gamma_c="${NCBF_GAMMA_C}" \
     --algorithm.ncbf.eta_cbf=0.5 \
@@ -67,8 +69,11 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.env_curriculum_level_success_episode_return=40 \
     --environment.ncbf_use_policy_observations=True \
     --environment.train_robot="booster_t1" \
+    --environment.termination.terminate_on_ball_plate_drop="${TERMINATE_ON_BALL_PLATE_DROP}" \
     --environment.ball_plate.enabled=True \
-    --environment.ball_plate.include_observations=True \
+    --environment.ball_plate.stand_after_drop="${STAND_AFTER_DROP}" \
+    --environment.ball_plate.post_drop_truncation_seconds="${POST_DROP_TRUNCATION_SECONDS}" \
+    --environment.ball_plate.include_observations=False \
     --runner.mode="test" \
     --runner.nr_test_episodes="${NR_TEST_EPISODES}" \
     --runner.load_model="${MODEL_PATH}" \

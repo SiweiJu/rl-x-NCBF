@@ -20,16 +20,27 @@ class G1BallReward(DefaultG1Reward):
     def extra_reward_terms(self, action):
         if self.env.use_ball_plate:
             metrics = self.env.get_ball_plate_metrics()
+            if self.env.stand_after_ball_plate_drop:
+                was_dropped = bool(self.env.internal_state["ball_plate_drop_latched"])
+                dropped_now = bool(metrics["dropped"])
+                newly_dropped = dropped_now and not was_dropped
+                task_active = 0.0 if (was_dropped or dropped_now) else 1.0
+                drop_penalty_scale = float(newly_dropped)
+            else:
+                newly_dropped = bool(metrics["dropped"])
+                task_active = 1.0
+                drop_penalty_scale = float(metrics["dropped"])
+
             centering_norm = np.sum(np.square(metrics["relative_position"][:2]))
             velocity_norm = np.sum(np.square(metrics["relative_velocity"][:2]))
-            centering_reward = self.ball_plate_centering_coeff * -centering_norm
-            velocity_reward = self.ball_plate_velocity_coeff * -velocity_norm
-            on_plate_reward = self.ball_plate_on_plate_coeff * float(metrics["on_plate"])
+            centering_reward = task_active * self.ball_plate_centering_coeff * -centering_norm
+            velocity_reward = task_active * self.ball_plate_velocity_coeff * -velocity_norm
+            on_plate_reward = task_active * self.ball_plate_on_plate_coeff * float(metrics["on_plate"])
             center_bonus_reward = self.ball_plate_center_bonus_coeff * np.exp(
                 -centering_norm / max(self.ball_plate_center_bonus_temperature, 1e-6)
-            ) * float(metrics["on_plate"])
-            alive_reward = self.ball_plate_alive_coeff * (1.0 - float(metrics["dropped"]))
-            drop_penalty_reward = self.ball_plate_drop_penalty_coeff * -float(metrics["dropped"])
+            ) * float(metrics["on_plate"]) * task_active
+            alive_reward = self.ball_plate_alive_coeff * task_active
+            drop_penalty_reward = self.ball_plate_drop_penalty_coeff * -drop_penalty_scale
         else:
             centering_reward = 0.0
             velocity_reward = 0.0
@@ -38,10 +49,12 @@ class G1BallReward(DefaultG1Reward):
             alive_reward = 0.0
             drop_penalty_reward = 0.0
             metrics = {"radial_distance": 0.0, "on_plate": False, "ball_dropped": False, "plate_dropped": False, "dropped": False}
+            newly_dropped = False
 
         self.env.internal_state["ball_plate_ball_dropped"] = metrics["ball_dropped"]
         self.env.internal_state["ball_plate_plate_dropped"] = metrics["plate_dropped"]
         self.env.internal_state["ball_plate_dropped"] = metrics["dropped"]
+        self.env.internal_state["ball_plate_newly_dropped"] = newly_dropped
         self.env.internal_state["info"][f"reward/ball_plate_centering"] = centering_reward
         self.env.internal_state["info"][f"reward/ball_plate_center_bonus"] = center_bonus_reward
         self.env.internal_state["info"][f"reward/ball_plate_velocity"] = velocity_reward

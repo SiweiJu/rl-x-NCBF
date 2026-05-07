@@ -42,6 +42,8 @@ class LocomotionEnv:
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.ball_plate_config = env_config.get("ball_plate", {})
         self.use_ball_plate = bool(self.ball_plate_config.get("enabled", False))
+        self.stand_after_ball_plate_drop = self.use_ball_plate and bool(self.ball_plate_config.get("stand_after_drop", False))
+        self.ball_plate_post_drop_truncation_seconds = float(self.ball_plate_config.get("post_drop_truncation_seconds", 3.0))
         self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand", True))
         self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations", True))
         self.nr_envs = nr_envs
@@ -315,7 +317,7 @@ class LocomotionEnv:
         else:
             self.nr_ball_plate_observations = 0
 
-        self.reward_collision_sphere_geom_ids = jnp.array([geom.id for geom in [self.initial_mj_model.geom(geom_id) for geom_id in range(self.initial_mj_model.ngeom)] if geom.group[0] == 5])
+        self.reward_collision_sphere_geom_ids = jnp.array([geom.id for geom in [self.initial_mj_model.geom(geom_id) for geom_id in range(self.initial_mj_model.ngeom)] if geom.group[0] == 5], dtype=jnp.int32)
 
         self.has_equality_constraints = len(self.initial_mj_model.eq_data) > 0
 
@@ -678,6 +680,55 @@ class LocomotionEnv:
 
         return qpos, qvel
 
+
+    def _apply_ball_plate_post_drop_command(self, internal_state):
+        if not self.stand_after_ball_plate_drop:
+            return
+
+        post_drop = internal_state["ball_plate_drop_latched"] | internal_state["ball_plate_dropped"]
+        internal_state["goal_velocities"] = jnp.where(
+            post_drop,
+            jnp.zeros_like(internal_state["goal_velocities"]),
+            internal_state["goal_velocities"],
+        )
+        internal_state["actuator_joint_keep_nominal"] = jnp.where(
+            post_drop,
+            jnp.ones_like(internal_state["actuator_joint_keep_nominal"], dtype=bool),
+            internal_state["actuator_joint_keep_nominal"],
+        )
+        if "goal_gait_frequency" in internal_state:
+            internal_state["goal_gait_frequency"] = jnp.where(
+                post_drop,
+                jnp.asarray(0.0, dtype=jnp.asarray(internal_state["goal_gait_frequency"]).dtype),
+                internal_state["goal_gait_frequency"],
+            )
+
+
+    def _update_ball_plate_post_drop_state(self, internal_state):
+        if not self.stand_after_ball_plate_drop:
+            internal_state["ball_plate_newly_dropped"] = False
+            internal_state["ball_plate_post_drop_truncated"] = False
+            return jnp.asarray(False)
+
+        dropped = internal_state["ball_plate_dropped"]
+        was_latched = internal_state["ball_plate_drop_latched"]
+        drop_latched = was_latched | dropped
+        newly_dropped = dropped & (~was_latched)
+        time_since_drop = jnp.where(
+            drop_latched,
+            internal_state["ball_plate_time_since_drop"] + self.dt,
+            0.0,
+        )
+        post_drop_truncated = drop_latched & (
+            time_since_drop >= self.ball_plate_post_drop_truncation_seconds
+        )
+
+        internal_state["ball_plate_drop_latched"] = drop_latched
+        internal_state["ball_plate_newly_dropped"] = newly_dropped
+        internal_state["ball_plate_time_since_drop"] = time_since_drop
+        internal_state["ball_plate_post_drop_truncated"] = post_drop_truncated
+        return post_drop_truncated
+
     
     def render(self, state):
         mjx_model = state.mjx_model
@@ -726,6 +777,25 @@ class LocomotionEnv:
                 state.internal_state["goal_velocities"] = jnp.tile(goal_velocities, (self.nr_envs, 1))
                 actuator_joint_keep_nominal = jnp.where(jnp.all(goal_velocities == 0.0), jnp.ones(self.nr_actuator_joints, dtype=bool), self.command_function.default_actuator_joint_keep_nominal)
                 state.internal_state["actuator_joint_keep_nominal"] = jnp.tile(actuator_joint_keep_nominal, (self.nr_envs, 1))
+
+        if self.stand_after_ball_plate_drop:
+            post_drop = state.internal_state["ball_plate_drop_latched"] | state.internal_state["ball_plate_dropped"]
+            state.internal_state["goal_velocities"] = jnp.where(
+                post_drop[:, None],
+                jnp.zeros_like(state.internal_state["goal_velocities"]),
+                state.internal_state["goal_velocities"],
+            )
+            state.internal_state["actuator_joint_keep_nominal"] = jnp.where(
+                post_drop[:, None],
+                jnp.ones_like(state.internal_state["actuator_joint_keep_nominal"], dtype=bool),
+                state.internal_state["actuator_joint_keep_nominal"],
+            )
+            if "goal_gait_frequency" in state.internal_state:
+                state.internal_state["goal_gait_frequency"] = jnp.where(
+                    post_drop,
+                    jnp.zeros_like(state.internal_state["goal_gait_frequency"]),
+                    state.internal_state["goal_gait_frequency"],
+                )
 
         if self.add_goal_arrow:
             goal_velocities = state.internal_state["goal_velocities"][env_id]
@@ -789,6 +859,10 @@ class LocomotionEnv:
             "ball_plate_ball_dropped": False,
             "ball_plate_plate_dropped": False,
             "ball_plate_dropped": False,
+            "ball_plate_drop_latched": False,
+            "ball_plate_newly_dropped": False,
+            "ball_plate_time_since_drop": 0.0,
+            "ball_plate_post_drop_truncated": False,
             "nr_collisions_in_nominal": 0,
             "history_stack": history_stack,
         }
@@ -877,6 +951,7 @@ class LocomotionEnv:
         new_internal_state["imu_orientation_euler"] = new_internal_state["imu_orientation_rotation"].as_euler("xyz")
         should_sample_commands = self.command_sampling_function.setup(command_key)
         self.command_function.get_next_command(new_internal_state, should_sample_commands, command_key)
+        self._apply_ball_plate_post_drop_command(new_internal_state)
 
         next_observation = self.get_observation(data, mjx_model, new_internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
         new_info = dict(new_state.info)
@@ -887,6 +962,9 @@ class LocomotionEnv:
             new_info[f"env_info/ball_plate_ball_dropped"] = ball_plate_metrics["ball_dropped"].astype(jnp.float32)
             new_info[f"env_info/ball_plate_plate_dropped"] = ball_plate_metrics["plate_dropped"].astype(jnp.float32)
             new_info[f"env_info/ball_plate_dropped"] = ball_plate_metrics["dropped"].astype(jnp.float32)
+            new_info[f"env_info/ball_plate_drop_latched"] = jnp.asarray(new_internal_state["ball_plate_drop_latched"], dtype=jnp.float32)
+            new_info[f"env_info/ball_plate_time_since_drop"] = new_internal_state["ball_plate_time_since_drop"]
+            new_info[f"env_info/ball_plate_post_drop_truncated"] = jnp.asarray(new_internal_state["ball_plate_post_drop_truncated"], dtype=jnp.float32)
         last_state = next_observation
         new_internal_state["last_state"] = last_state
         reward = 0.0
@@ -961,12 +1039,14 @@ class LocomotionEnv:
 
         should_sample_commands = self.command_sampling_function.step(command_sampling_key)
         self.command_function.get_next_command(state.internal_state, should_sample_commands, command_key)
+        self._apply_ball_plate_post_drop_command(state.internal_state)
 
         next_observation = self.get_observation(data, mjx_model, state.internal_state, observation_key, chosen_action)
+        post_drop_truncated = self._update_ball_plate_post_drop_state(state.internal_state)
         constraint_terminated = self.termination_function.should_terminate(state.internal_state)
         qvel_limit_terminated = jnp.any(jnp.abs(data.qvel[:3]) == 100.0)
         terminated = constraint_terminated | qvel_limit_terminated
-        truncated = state.info_episode_store["episode_step"] >= (self.horizon - 1)
+        truncated = (state.info_episode_store["episode_step"] >= (self.horizon - 1)) | post_drop_truncated
         done = terminated | truncated
 
         data = self.terrain_function.post_step(data, mjx_model, state.internal_state, terrain_key)
@@ -1008,6 +1088,10 @@ class LocomotionEnv:
         new_info["constraint/terminated"] = constraint_terminated
         new_info["constraint/safe_time"] = new_info_episode_store["episode_safe_time"]
         new_info["constraint/episode_cost"] = new_info_episode_store["episode_cost"]
+        if self.use_ball_plate:
+            new_info["env_info/ball_plate_drop_latched"] = jnp.asarray(state.internal_state["ball_plate_drop_latched"], dtype=jnp.float32)
+            new_info["env_info/ball_plate_time_since_drop"] = state.internal_state["ball_plate_time_since_drop"]
+            new_info["env_info/ball_plate_post_drop_truncated"] = jnp.asarray(state.internal_state["ball_plate_post_drop_truncated"], dtype=jnp.float32)
 
 
         state = state.replace(internal_state=new_internal_state, info=new_info, info_episode_store=new_info_episode_store)
@@ -1175,6 +1259,10 @@ class LocomotionEnv:
         internal_state["ball_plate_ball_dropped"] = False
         internal_state["ball_plate_plate_dropped"] = False
         internal_state["ball_plate_dropped"] = False
+        internal_state["ball_plate_drop_latched"] = False
+        internal_state["ball_plate_newly_dropped"] = False
+        internal_state["ball_plate_time_since_drop"] = 0.0
+        internal_state["ball_plate_post_drop_truncated"] = False
         return data, mjx_model
 
 

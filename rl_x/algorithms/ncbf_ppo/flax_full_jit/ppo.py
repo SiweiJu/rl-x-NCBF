@@ -109,6 +109,27 @@ class PPO:
 
         self.next_step_predictor_lr = config.algorithm.next_step_predictor.lr
         self.next_step_predictor_output_indices = env.next_state_indices
+        single_env = getattr(env, "envs", [env])[0]
+        self.stand_after_ball_plate_drop = bool(getattr(single_env, "stand_after_ball_plate_drop", False))
+        self.ball_plate_obs_indices = jnp.asarray(
+            np.asarray(getattr(single_env, "ball_plate_obs_idx", np.array([], dtype=int)), dtype=int),
+            dtype=int,
+        )
+        ball_not_falling_idx = np.asarray(getattr(single_env, "ball_not_falling_obs_idx", np.array([], dtype=int)), dtype=int)
+        plate_not_falling_idx = np.asarray(getattr(single_env, "plate_not_falling_obs_idx", np.array([], dtype=int)), dtype=int)
+        self.has_ball_plate_drop_signal = (
+            self.stand_after_ball_plate_drop and
+            ball_not_falling_idx.size > 0 and
+            plate_not_falling_idx.size > 0
+        )
+        self.ball_not_falling_obs_index = int(ball_not_falling_idx[0]) if ball_not_falling_idx.size > 0 else 0
+        self.plate_not_falling_obs_index = int(plate_not_falling_idx[0]) if plate_not_falling_idx.size > 0 else 0
+        decoder_ball_plate_indices = np.nonzero(np.isin(
+            np.asarray(self.next_step_predictor_output_indices, dtype=int),
+            np.asarray(self.ball_plate_obs_indices, dtype=int),
+        ))[0]
+        self.decoder_output_ball_plate_indices = jnp.asarray(decoder_ball_plate_indices, dtype=int)
+        self.has_decoder_ball_plate_output = decoder_ball_plate_indices.size > 0
         self.next_step_predictor_nr_minibatches = config.algorithm.next_step_predictor.nr_minibatches
         self.next_step_predictor_minibatch_size = config.algorithm.minibatch_size
         self.use_decoder_output_for_policy = bool(getattr(config.algorithm, "use_decoder_output_for_policy", False))
@@ -253,7 +274,28 @@ class PPO:
             self.latest_model_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 
 
-    def _get_policy_decoder_output(self, decoder_params, history_latent, state, action):
+    def _ball_plate_post_drop_mask(self, observation):
+        if not self.has_ball_plate_drop_signal:
+            return jnp.zeros(observation.shape[:-1], dtype=bool)
+        ball_safe = observation[..., self.ball_not_falling_obs_index] > 0.5
+        plate_safe = observation[..., self.plate_not_falling_obs_index] > 0.5
+        return ~(ball_safe & plate_safe)
+
+
+    def _mask_policy_ball_plate_inputs(self, observation):
+        if not (self.has_ball_plate_drop_signal and self.ball_plate_obs_indices.size > 0):
+            return observation
+        post_drop = self._ball_plate_post_drop_mask(observation)
+        ball_plate_observation = observation[..., self.ball_plate_obs_indices]
+        ball_plate_observation = jnp.where(
+            post_drop[..., None],
+            jnp.zeros_like(ball_plate_observation),
+            ball_plate_observation,
+        )
+        return observation.at[..., self.ball_plate_obs_indices].set(ball_plate_observation)
+
+
+    def _get_policy_decoder_output(self, decoder_params, history_latent, state, action, mask_observation=None):
         if not self.use_decoder_output_for_policy:
             return None
 
@@ -263,7 +305,38 @@ class PPO:
             state,
             action,
         )
+        if self.has_ball_plate_drop_signal and self.has_decoder_ball_plate_output and mask_observation is not None:
+            post_drop = self._ball_plate_post_drop_mask(mask_observation)
+            ball_plate_output = decoder_output[..., self.decoder_output_ball_plate_indices]
+            ball_plate_output = jnp.where(
+                post_drop[..., None],
+                jnp.zeros_like(ball_plate_output),
+                ball_plate_output,
+            )
+            decoder_output = decoder_output.at[..., self.decoder_output_ball_plate_indices].set(ball_plate_output)
         return jax.lax.stop_gradient(decoder_output)
+
+
+    def _bypass_post_drop_safety_layer(self, action_raw, safe_action, constraint_active, delta_u, diagnostics, observation):
+        if not self.has_ball_plate_drop_signal:
+            return safe_action, constraint_active, delta_u, diagnostics
+
+        post_drop = self._ball_plate_post_drop_mask(observation)
+        safe_action = jnp.where(post_drop[..., None], action_raw, safe_action)
+        constraint_active = jnp.where(post_drop, jnp.zeros_like(constraint_active, dtype=bool), constraint_active)
+        delta_u = jnp.where(post_drop, jnp.zeros_like(delta_u), delta_u)
+
+        raw_norm = jnp.linalg.norm(action_raw, axis=-1)
+        neutral_diagnostics = {}
+        for key, value in diagnostics.items():
+            if key in ("raw_action_norm", "processed_action_norm"):
+                neutral_value = raw_norm
+            elif key == "correction_scale":
+                neutral_value = jnp.ones_like(value)
+            else:
+                neutral_value = jnp.zeros_like(value)
+            neutral_diagnostics[key] = jnp.where(post_drop, neutral_value, value)
+        return safe_action, constraint_active, delta_u, neutral_diagnostics
 
 
     def train(self):
@@ -284,8 +357,9 @@ class PPO:
                 last_action = env_state.last_action
                 last_state = env_state.last_state
                 latent_z = encoder_state.apply_fn(encoder_state.params, history_stack)
-                policy_decoder_output = self._get_policy_decoder_output(decoder_state.params, latent_z, last_state, last_action)
-                action_mean, action_logstd = self.policy.apply(policy_state.params, observation, latent_z, policy_decoder_output)
+                observation_input = self._mask_policy_ball_plate_inputs(observation)
+                policy_decoder_output = self._get_policy_decoder_output(decoder_state.params, latent_z, last_state, last_action, observation)
+                action_mean, action_logstd = self.policy.apply(policy_state.params, observation_input, latent_z, policy_decoder_output)
                 action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                 action_std = jnp.exp(action_logstd)
                 action = action_mean + action_std * jax.random.normal(subkey, shape=action_mean.shape)
@@ -298,9 +372,17 @@ class PPO:
                 processed_action, constraint_active, delta_u, safety_diagnostics = self.batched_ncbf_safety_layer(raw_processed_action, observation, last_action, last_state, latent_z,
                                                                                       safety_layer_curriculum_coeff,
                                                                                       params_stack)
+                processed_action, constraint_active, delta_u, safety_diagnostics = self._bypass_post_drop_safety_layer(
+                    raw_processed_action,
+                    processed_action,
+                    constraint_active,
+                    delta_u,
+                    safety_diagnostics,
+                    observation,
+                )
                 # contraint_active = 0
                 # delta_u = 0
-                value = self.critic.apply(critic_state.params, observation, latent_z, policy_decoder_output).squeeze(-1)
+                value = self.critic.apply(critic_state.params, observation_input, latent_z, policy_decoder_output).squeeze(-1)
 
                 env_action = processed_action
                 env_state = self.env.step(env_state, env_action)
@@ -881,8 +963,9 @@ class PPO:
                         next_history_stacks = jnp.roll(history_stacks, -1, axis=2)
                         next_history_stacks = next_history_stacks.at[:, :, -1, :].set(next_states)
                         next_latents = jax.lax.stop_gradient(encoder_state.apply_fn(encoder_state.params, next_history_stacks))
-                        next_decoder_output = self._get_policy_decoder_output(decoder_state.params, next_latents, states, env_actions)
-                        next_values = self.critic.apply(critic_state.params, next_states, next_latents, next_decoder_output).squeeze(-1)
+                        next_state_inputs = self._mask_policy_ball_plate_inputs(next_states)
+                        next_decoder_output = self._get_policy_decoder_output(decoder_state.params, next_latents, states, env_actions, next_states)
+                        next_values = self.critic.apply(critic_state.params, next_state_inputs, next_latents, next_decoder_output).squeeze(-1)
                         delta = rewards + self.gamma * next_values * (1.0 - terminations) - values
                         init_advantages = delta[-1]
                         _, advantages = jax.lax.scan(compute_advantages, (init_advantages,), jnp.arange(self.nr_steps - 2, -1, -1))
@@ -915,8 +998,10 @@ class PPO:
                             latent_b,
                             last_state_b,
                             last_action_b,
+                            state_b,
                         )
-                        action_mean, action_logstd = self.policy.apply(policy_params, state_b, latent_b, decoder_output_b)
+                        state_input_b = self._mask_policy_ball_plate_inputs(state_b)
+                        action_mean, action_logstd = self.policy.apply(policy_params, state_input_b, latent_b, decoder_output_b)
                         action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
                         action_std = jnp.exp(action_logstd)
                         new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
@@ -936,7 +1021,7 @@ class PPO:
                         entropy_loss = jnp.mean(entropy)
 
                         # Critic loss
-                        new_value = self.critic.apply(critic_params, state_b, latent_b, decoder_output_b)
+                        new_value = self.critic.apply(critic_params, state_input_b, latent_b, decoder_output_b)
                         critic_loss = 0.5 * jnp.mean((new_value.squeeze(-1) - return_b) ** 2)
 
                         # anticipation loss
@@ -1107,10 +1192,12 @@ class PPO:
                         initial_policy_latent,
                         batch_last_states,
                         batch_last_actions,
+                        batch_states,
                     )
+                    initial_policy_state_input = self._mask_policy_ball_plate_inputs(batch_states)
                     initial_action_mean, initial_action_logstd = self.policy.apply(
                         policy_state.params,
-                        batch_states,
+                        initial_policy_state_input,
                         initial_policy_latent,
                         initial_policy_decoder_output,
                     )
@@ -1281,8 +1368,10 @@ class PPO:
                             latent_z,
                             eval_env_state.last_state,
                             eval_env_state.last_action,
+                            eval_env_state.next_observation,
                         )
-                        action_mean, _ = self.policy.apply(policy_state.params, eval_env_state.next_observation, latent_z, policy_decoder_output)
+                        eval_observation_input = self._mask_policy_ball_plate_inputs(eval_env_state.next_observation)
+                        action_mean, _ = self.policy.apply(policy_state.params, eval_observation_input, latent_z, policy_decoder_output)
                         action = action_mean
                         raw_processed_action = self.get_processed_action(action)
                         params_stack = repeat_ncbf_params(ncbf_state)
@@ -1294,6 +1383,14 @@ class PPO:
                             latent_z,
                             jnp.asarray(1.0, dtype=raw_processed_action.dtype),
                             params_stack,
+                        )
+                        processed_action, _, _, _ = self._bypass_post_drop_safety_layer(
+                            raw_processed_action,
+                            processed_action,
+                            jnp.zeros(raw_processed_action.shape[0], dtype=bool),
+                            jnp.zeros(raw_processed_action.shape[0], dtype=raw_processed_action.dtype),
+                            {},
+                            eval_env_state.next_observation,
                         )
                         eval_env_state = self.env.step(eval_env_state, processed_action)
 
@@ -1466,8 +1563,10 @@ class PPO:
                 latent_z,
                 env_state.last_state,
                 env_state.last_action,
+                env_state.next_observation,
             )
-            action_mean, action_logstd = self.policy.apply(self.policy_state.params, env_state.next_observation, latent_z, policy_decoder_output)
+            observation_input = self._mask_policy_ball_plate_inputs(env_state.next_observation)
+            action_mean, action_logstd = self.policy.apply(self.policy_state.params, observation_input, latent_z, policy_decoder_output)
             # action_std = jnp.exp(action_logstd)
             action = action_mean # + action_std * jax.random.normal(subkey, shape=action_mean.shape)
             raw_processed_action = self.get_processed_action(action)
@@ -1480,6 +1579,14 @@ class PPO:
                 latent_z,
                 jnp.asarray(1.0, dtype=raw_processed_action.dtype),
                 params_stack,
+            )
+            processed_action, constraint_active, delta_u, _ = self._bypass_post_drop_safety_layer(
+                raw_processed_action,
+                processed_action,
+                constraint_active,
+                delta_u,
+                {},
+                env_state.next_observation,
             )
             env_state = self.env.step(env_state, processed_action)
             return env_state, key

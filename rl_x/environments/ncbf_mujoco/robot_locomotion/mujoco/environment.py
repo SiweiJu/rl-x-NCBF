@@ -37,6 +37,8 @@ class LocomotionEnv(gym.Env):
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.ball_plate_config = env_config.get("ball_plate", {})
         self.use_ball_plate = bool(self.ball_plate_config.get("enabled", False))
+        self.stand_after_ball_plate_drop = self.use_ball_plate and bool(self.ball_plate_config.get("stand_after_drop", False))
+        self.ball_plate_post_drop_truncation_seconds = float(self.ball_plate_config.get("post_drop_truncation_seconds", 3.0))
         self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand", True))
         self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations", True))
         self.nr_envs = nr_envs
@@ -296,7 +298,7 @@ class LocomotionEnv(gym.Env):
         else:
             self.nr_ball_plate_observations = 0
 
-        self.reward_collision_sphere_geom_ids = np.array([geom.id for geom in [self.initial_mj_model.geom(geom_id) for geom_id in range(self.initial_mj_model.ngeom)] if geom.group[0] == 5])
+        self.reward_collision_sphere_geom_ids = np.array([geom.id for geom in [self.initial_mj_model.geom(geom_id) for geom_id in range(self.initial_mj_model.ngeom)] if geom.group[0] == 5], dtype=int)
         
         self.reward_collision_sphere_geoms_and_feet_geoms_ids = np.concatenate((self.reward_collision_sphere_geom_ids, self.foot_geom_indices))
         self.dim_geom_ids = self.reward_collision_sphere_geoms_and_feet_geoms_ids - 1
@@ -359,7 +361,7 @@ class LocomotionEnv(gym.Env):
         self.observation_noise_function.init_attributes()
 
         eval_mode = True
-        self.max_curriculum_level = 0.5
+        self.max_curriculum_level = 0.0
         self.internal_state = {
             "mj_model": deepcopy(self.initial_mj_model),
             "data": mujoco.MjData(self.initial_mj_model),
@@ -392,6 +394,10 @@ class LocomotionEnv(gym.Env):
             "ball_plate_ball_dropped": False,
             "ball_plate_plate_dropped": False,
             "ball_plate_dropped": False,
+            "ball_plate_drop_latched": False,
+            "ball_plate_newly_dropped": False,
+            "ball_plate_time_since_drop": 0.0,
+            "ball_plate_post_drop_truncated": False,
             "nr_collisions_in_nominal": 0,
             "info": {
                 "rollout/episode_return": 0.0,
@@ -733,6 +739,42 @@ class LocomotionEnv(gym.Env):
                 qvel[dofadr] = 0.0
 
 
+    def _apply_ball_plate_post_drop_command(self):
+        if not self.stand_after_ball_plate_drop:
+            return
+
+        post_drop = bool(self.internal_state["ball_plate_drop_latched"] or self.internal_state["ball_plate_dropped"])
+        if not post_drop:
+            return
+
+        self.internal_state["goal_velocities"] = np.zeros_like(self.internal_state["goal_velocities"])
+        self.internal_state["actuator_joint_keep_nominal"] = np.ones(self.nr_actuator_joints, dtype=bool)
+        if "goal_gait_frequency" in self.internal_state:
+            self.internal_state["goal_gait_frequency"] = 0.0
+
+
+    def _update_ball_plate_post_drop_state(self):
+        if not self.stand_after_ball_plate_drop:
+            self.internal_state["ball_plate_newly_dropped"] = False
+            self.internal_state["ball_plate_post_drop_truncated"] = False
+            return False
+
+        dropped = bool(self.internal_state["ball_plate_dropped"])
+        was_latched = bool(self.internal_state["ball_plate_drop_latched"])
+        drop_latched = was_latched or dropped
+        newly_dropped = dropped and not was_latched
+        time_since_drop = self.internal_state["ball_plate_time_since_drop"] + self.dt if drop_latched else 0.0
+        post_drop_truncated = drop_latched and (
+            time_since_drop >= self.ball_plate_post_drop_truncation_seconds
+        )
+
+        self.internal_state["ball_plate_drop_latched"] = drop_latched
+        self.internal_state["ball_plate_newly_dropped"] = newly_dropped
+        self.internal_state["ball_plate_time_since_drop"] = time_since_drop
+        self.internal_state["ball_plate_post_drop_truncated"] = post_drop_truncated
+        return post_drop_truncated
+
+
     @staticmethod
     def _xmat_with_z_axis(z_axis):
         x_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
@@ -840,6 +882,8 @@ class LocomotionEnv(gym.Env):
                 actuator_keep_nominal_commands = np.where(np.all(goal_velocities == 0.0), np.ones(self.nr_actuator_joints, dtype=bool), self.command_function.default_actuator_joint_keep_nominal)
                 self.internal_state["actuator_joint_keep_nominal"] = actuator_keep_nominal_commands
 
+        self._apply_ball_plate_post_drop_command()
+
         if self.add_goal_arrow:
             self._update_goal_arrow()
 
@@ -912,6 +956,7 @@ class LocomotionEnv(gym.Env):
         should_sample_commands = self.command_sampling_function.setup()
         if should_sample_commands:
             self.command_function.get_next_command()
+        self._apply_ball_plate_post_drop_command()
 
         next_observation = self.get_observation(np.zeros(self.nr_actuator_joints))
         if self.use_ball_plate:
@@ -921,6 +966,9 @@ class LocomotionEnv(gym.Env):
             self.internal_state["info"][f"env_info/ball_plate_ball_dropped"] = float(ball_plate_metrics["ball_dropped"])
             self.internal_state["info"][f"env_info/ball_plate_plate_dropped"] = float(ball_plate_metrics["plate_dropped"])
             self.internal_state["info"][f"env_info/ball_plate_dropped"] = float(ball_plate_metrics["dropped"])
+            self.internal_state["info"][f"env_info/ball_plate_drop_latched"] = float(self.internal_state["ball_plate_drop_latched"])
+            self.internal_state["info"][f"env_info/ball_plate_time_since_drop"] = self.internal_state["ball_plate_time_since_drop"]
+            self.internal_state["info"][f"env_info/ball_plate_post_drop_truncated"] = float(self.internal_state["ball_plate_post_drop_truncated"])
         self.internal_state["last_state"] = next_observation.copy()
         self.internal_state["info"]["last_state"] = self.internal_state["last_state"].copy()
 
@@ -982,10 +1030,12 @@ class LocomotionEnv(gym.Env):
         should_sample_commands = self.command_sampling_function.step()
         if should_sample_commands or self.command_function_type == "random_trajectory":
             self.command_function.get_next_command()
+        self._apply_ball_plate_post_drop_command()
 
         next_observation = self.get_observation(chosen_action)
+        post_drop_truncated = self._update_ball_plate_post_drop_state()
         terminated = self.termination_function.should_terminate() | np.any(np.abs(self.internal_state["data"].qvel[:3]) == 100.0)
-        truncated = self.internal_state["info_episode_store"]["episode_step"] >= (self.horizon - 1)
+        truncated = (self.internal_state["info_episode_store"]["episode_step"] >= (self.horizon - 1)) or post_drop_truncated
         done = terminated | truncated
 
         last_state = self.internal_state["last_state"].copy()
@@ -1007,6 +1057,10 @@ class LocomotionEnv(gym.Env):
         self.internal_state["info"]["rollout/episode_return"] = np.where(done, self.internal_state["info_episode_store"]["episode_return"], self.internal_state["info"]["rollout/episode_return"])
         self.internal_state["info"]["rollout/episode_length"] = np.where(done, self.internal_state["info_episode_store"]["episode_step"], self.internal_state["info"]["rollout/episode_length"])
         self.internal_state["info"]["env_curriculum/coefficient"] = self.internal_state["env_curriculum_coeff"]
+        if self.use_ball_plate:
+            self.internal_state["info"]["env_info/ball_plate_drop_latched"] = float(self.internal_state["ball_plate_drop_latched"])
+            self.internal_state["info"]["env_info/ball_plate_time_since_drop"] = self.internal_state["ball_plate_time_since_drop"]
+            self.internal_state["info"]["env_info/ball_plate_post_drop_truncated"] = float(self.internal_state["ball_plate_post_drop_truncated"])
         self.internal_state["info"]["last_state"] = last_state
         self.internal_state["info"]["last_action"] = last_action
         if self.should_render:
@@ -1154,6 +1208,10 @@ class LocomotionEnv(gym.Env):
         self.internal_state["ball_plate_ball_dropped"] = False
         self.internal_state["ball_plate_plate_dropped"] = False
         self.internal_state["ball_plate_dropped"] = False
+        self.internal_state["ball_plate_drop_latched"] = False
+        self.internal_state["ball_plate_newly_dropped"] = False
+        self.internal_state["ball_plate_time_since_drop"] = 0.0
+        self.internal_state["ball_plate_post_drop_truncated"] = False
 
 
     def _get_ball_plate_support_points(self, data):

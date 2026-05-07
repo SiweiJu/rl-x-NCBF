@@ -22,7 +22,11 @@ class G1BallTermination:
 
         ball_dropped = self.env.ball_plate_ball_has_dropped()
         plate_dropped = self.env.ball_plate_plate_has_dropped()
-        ball_plate_drop_terminated = self.terminate_on_ball_plate_drop and (ball_dropped or plate_dropped)
+        ball_plate_drop_terminated = (
+            self.terminate_on_ball_plate_drop and
+            not self.env.stand_after_ball_plate_drop and
+            (ball_dropped or plate_dropped)
+        )
 
         if below_height:
             print("Termination: Below Height")
@@ -30,10 +34,10 @@ class G1BallTermination:
         if body_tilt:
             print("Termination: Tilt")
 
-        if self.terminate_on_ball_plate_drop and ball_dropped:
+        if self.terminate_on_ball_plate_drop and not self.env.stand_after_ball_plate_drop and ball_dropped:
             print("Termination: Ball Dropped")
 
-        if self.terminate_on_ball_plate_drop and plate_dropped:
+        if self.terminate_on_ball_plate_drop and not self.env.stand_after_ball_plate_drop and plate_dropped:
             print("Termination: Plate Dropped")
 
         return below_height or body_tilt or ball_plate_drop_terminated

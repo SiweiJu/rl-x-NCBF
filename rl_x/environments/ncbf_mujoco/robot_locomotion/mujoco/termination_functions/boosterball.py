@@ -11,5 +11,9 @@ class BoosterBallTermination(BoosterTermination):
         booster_terminated = super().should_terminate()
         ball_dropped = self.env.ball_plate_ball_has_dropped()
         plate_dropped = self.env.ball_plate_plate_has_dropped()
-        ball_plate_drop_terminated = self.terminate_on_ball_plate_drop and (ball_dropped or plate_dropped)
+        ball_plate_drop_terminated = (
+            self.terminate_on_ball_plate_drop and
+            not self.env.stand_after_ball_plate_drop and
+            (ball_dropped or plate_dropped)
+        )
         return booster_terminated or ball_plate_drop_terminated

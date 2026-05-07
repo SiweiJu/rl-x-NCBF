@@ -8,7 +8,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-g1_locomotion}"
+RUN_NAME="${RUN_NAME:-g1_locomotion_adaptive_lr}"
 
 cd "${EXPERIMENTS_DIR}"
 
@@ -27,6 +27,7 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.next_step_predictor.nr_minibatches=50 \
     --algorithm.next_step_predictor.lr=1e-5 \
     --algorithm.next_step_predictor.aux_loss_coef=1 \
+    --algorithm.adaptive_lr=True \
     --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
     --environment.seed="${SEED}" \
     --environment.nr_envs="${NR_ENVS}" \
