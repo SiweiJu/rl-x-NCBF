@@ -1027,26 +1027,33 @@ class PPO:
                         critic_loss = 0.5 * jnp.mean((new_value.squeeze(-1) - return_b) ** 2)
 
                         # anticipation loss
-                        action_mean_processed = self.get_processed_action(action_mean)
-                        safe_action_b, constraint_active_b, delta_u_b, safety_diagnostics_b = self.batched_ncbf_safety_layer(
-                            action_mean_processed,
-                            state_b,
-                            last_action_b,
-                            last_state_b,
-                            latent_b,
-                            safety_layer_curriculum_coeff,
-                            repeat_ncbf_params_from_params(ncbf_params),
-                        )
-                        safe_action_b, _, _, _ = self._bypass_post_drop_safety_layer(
-                            action_mean_processed,
-                            safe_action_b,
-                            constraint_active_b,
-                            delta_u_b,
-                            safety_diagnostics_b,
-                            state_b,
-                        )
-                        safe_action_b = jax.lax.stop_gradient(safe_action_b)
-                        anticipation_loss = 0.5 * jnp.mean(jnp.sum(jnp.square(action_mean_processed - safe_action_b), axis=-1))
+                        if self.anticipation_coef > 0.0:
+                            action_mean_processed = self.get_processed_action(action_mean)
+                            safe_action_b, constraint_active_b, delta_u_b, safety_diagnostics_b = self.batched_ncbf_safety_layer(
+                                action_mean_processed,
+                                state_b,
+                                last_action_b,
+                                last_state_b,
+                                latent_b,
+                                safety_layer_curriculum_coeff,
+                                repeat_ncbf_params_from_params(ncbf_params),
+                            )
+                            safe_action_b, _, _, _ = self._bypass_post_drop_safety_layer(
+                                action_mean_processed,
+                                safe_action_b,
+                                constraint_active_b,
+                                delta_u_b,
+                                safety_diagnostics_b,
+                                state_b,
+                            )
+                            safe_action_is_finite = jnp.all(jnp.isfinite(safe_action_b), axis=-1)
+                            safe_action_b = jnp.where(safe_action_is_finite[:, None], safe_action_b, action_mean_processed)
+                            safe_action_b = jax.lax.stop_gradient(safe_action_b)
+                            anticipation_loss = 0.5 * jnp.mean(jnp.sum(jnp.square(action_mean_processed - safe_action_b), axis=-1))
+                            anticipation_nonfinite_rate = 1.0 - jnp.mean(safe_action_is_finite.astype(jnp.float32))
+                        else:
+                            anticipation_loss = jnp.asarray(0.0, dtype=pg_loss.dtype)
+                            anticipation_nonfinite_rate = jnp.asarray(0.0, dtype=pg_loss.dtype)
 
                         loss = (
                             pg_loss -
@@ -1060,6 +1067,7 @@ class PPO:
                             "loss/critic_loss": critic_loss,
                             "loss/entropy_loss": entropy_loss,
                             "loss/anticipation_loss": anticipation_loss,
+                            "loss/anticipation_nonfinite_rate": anticipation_nonfinite_rate,
                             "policy_ratio/approx_kl": approx_kl_div,
                             "policy_ratio/clip_fraction": clip_fraction,
                         }

@@ -502,17 +502,23 @@ class PPO:
                 critic_loss = 0.5 * (new_value - return_b) ** 2
 
                 # anticipation loss
-                safe_action_b, _, _, _ = self.ncbf_safety_layer(
-                    action_mean,
-                    state_b,
-                    last_action_b,
-                    last_state_b,
-                    history_latent_b,
-                    safety_layer_curriculum_coeff_b,
-                    ncbf_params_stack,
-                )
-                safe_action_b = jax.lax.stop_gradient(safe_action_b)
-                anticipation_loss = 0.5 * jnp.sum(jnp.square(action_mean - safe_action_b), axis=-1)
+                if self.anticipation_coef > 0.0:
+                    safe_action_b, _, _, _ = self.ncbf_safety_layer(
+                        action_mean,
+                        state_b,
+                        last_action_b,
+                        last_state_b,
+                        history_latent_b,
+                        safety_layer_curriculum_coeff_b,
+                        ncbf_params_stack,
+                    )
+                    safe_action_is_finite = jnp.all(jnp.isfinite(safe_action_b), axis=-1)
+                    safe_action_b = jnp.where(safe_action_is_finite[..., None], safe_action_b, action_mean)
+                    safe_action_b = jax.lax.stop_gradient(safe_action_b)
+                    anticipation_loss = 0.5 * jnp.sum(jnp.square(action_mean - safe_action_b), axis=-1)
+                else:
+                    safe_action_is_finite = jnp.asarray(True)
+                    anticipation_loss = jnp.zeros_like(pg_loss)
 
                 # Combine losses
                 loss = pg_loss - self.entropy_coef * entropy_loss + self.critic_coef * critic_loss + self.anticipation_coef * anticipation_loss
@@ -524,6 +530,7 @@ class PPO:
                     "loss/critic_loss": critic_loss,
                     "loss/entropy_loss": entropy_loss,
                     "loss/anticipation_loss": anticipation_loss,
+                    "loss/anticipation_nonfinite_rate": 1.0 - safe_action_is_finite.astype(jnp.float32),
                     "policy_ratio/approx_kl": approx_kl_div,
                     "policy_ratio/clip_fraction": clip_fraction,
                 }

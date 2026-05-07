@@ -372,11 +372,18 @@ def make_get_safe_action(
             phis,
         )
 
+        linearization_is_finite = jnp.all(jnp.isfinite(a)) & jnp.isfinite(c)
+        a = jnp.where(jnp.isfinite(a), a, jnp.zeros_like(a))
+        c = jnp.where(jnp.isfinite(c), c, jnp.asarray(0.0, dtype=action_raw.dtype))
+        residual_mean = jnp.nan_to_num(residual_mean, nan=0.0, posinf=0.0, neginf=0.0)
+        robust_residual = jnp.nan_to_num(robust_residual, nan=0.0, posinf=0.0, neginf=0.0)
+        residual_std = jnp.nan_to_num(residual_std, nan=0.0, posinf=0.0, neginf=0.0)
+
         aTa = jnp.dot(a, a) + 1e-12
         aTu = jnp.dot(a, action_raw)
 
         # constraint violation amount
-        delta = jnp.maximum(0.0, c - aTu)
+        delta = jnp.where(linearization_is_finite, jnp.maximum(0.0, c - aTu), 0.0)
 
         # closed-form QP solution with soft slack
         gain = delta / (aTa + (1.0 / lambda_s))
@@ -404,9 +411,13 @@ def make_get_safe_action(
             lambda x: x,
             u_processed
         )
+        u_processed_is_finite = jnp.all(jnp.isfinite(u_processed))
+        u_processed = jnp.where(u_processed_is_finite, u_processed, action_raw)
+        constraint_active = constraint_active & linearization_is_finite & u_processed_is_finite
         delta_u = jnp.linalg.norm(u_processed - action_raw)
 
         diagnostics = {
+            "linearization_is_finite": linearization_is_finite.astype(action_raw.dtype),
             "residual_mean": residual_mean,
             "residual_std": residual_std,
             "robust_residual": robust_residual,
