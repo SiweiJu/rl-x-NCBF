@@ -44,19 +44,31 @@ def _replace_optimizer_learning_rate(train_state: TrainState, learning_rate):
     return train_state.replace(opt_state=new_opt_state)
 
 
-def _adapt_learning_rate_from_kl(current_lr, approx_kl, target_kl, kl_margin, kl_lr_scale, lr_min, lr_max):
-    next_lr = jax.lax.cond(
-        approx_kl > target_kl * kl_margin,
-        lambda lr: lr / kl_lr_scale,
-        lambda lr: lr,
-        current_lr,
-    )
-    next_lr = jax.lax.cond(
-        approx_kl < target_kl / kl_margin,
-        lambda lr: lr * kl_lr_scale,
-        lambda lr: lr,
-        next_lr,
-    )
+def _adapt_learning_rate_from_kl(
+    current_lr,
+    approx_kl,
+    target_kl,
+    kl_margin,
+    kl_lr_scale,
+    kl_lr_gain,
+    lr_min,
+    lr_max,
+):
+    current_lr = jnp.asarray(current_lr)
+    eps = jnp.asarray(1e-8, dtype=current_lr.dtype)
+    approx_kl = jnp.maximum(jnp.asarray(approx_kl, dtype=current_lr.dtype), eps)
+    target_kl = jnp.maximum(jnp.asarray(target_kl, dtype=current_lr.dtype), eps)
+    kl_margin = jnp.maximum(jnp.asarray(kl_margin, dtype=current_lr.dtype), 1.0)
+    kl_lr_scale = jnp.maximum(jnp.asarray(kl_lr_scale, dtype=current_lr.dtype), 1.0)
+    kl_lr_gain = jnp.maximum(jnp.asarray(kl_lr_gain, dtype=current_lr.dtype), 0.0)
+
+    log_kl_error = jnp.log(target_kl / approx_kl)
+    deadband = jnp.log(kl_margin)
+    excess_error = jnp.maximum(jnp.abs(log_kl_error) - deadband, 0.0)
+    max_log_step = jnp.log(kl_lr_scale)
+    log_lr_step = jnp.sign(log_kl_error) * jnp.minimum(kl_lr_gain * excess_error, max_log_step)
+
+    next_lr = current_lr * jnp.exp(log_lr_step)
     return jnp.clip(next_lr, lr_min, lr_max)
 
 
@@ -83,7 +95,8 @@ class PPO:
         if self.adaptive_lr_target_kl <= 0.0:
             self.adaptive_lr_target_kl = float(config.algorithm.target_kl)
         self.adaptive_lr_kl_margin = float(config.algorithm.get("kl_margin", 2.0))
-        self.adaptive_lr_scale = float(config.algorithm.get("kl_lr_scale", 1.5))
+        self.adaptive_lr_scale = float(config.algorithm.get("kl_lr_scale", 1.25))
+        self.adaptive_lr_gain = float(config.algorithm.get("kl_lr_gain", 0.25))
         self.adaptive_lr_min = float(config.algorithm.get("lr_min", 1e-6))
         self.adaptive_lr_max = float(config.algorithm.get("lr_max", 0.0))
         if self.adaptive_lr_max <= 0.0:
@@ -1311,19 +1324,6 @@ class PPO:
                             policy_state,
                         )
                         critic_state = critic_state.apply_gradients(grads=critic_gradients)
-                        if self.adaptive_lr and self.adaptive_lr_target_kl > 0.0:
-                            next_lr = _adapt_learning_rate_from_kl(
-                                policy_state.opt_state[1].hyperparams["learning_rate"],
-                                metrics["policy_ratio/approx_kl"],
-                                self.adaptive_lr_target_kl,
-                                self.adaptive_lr_kl_margin,
-                                self.adaptive_lr_scale,
-                                self.adaptive_lr_min,
-                                self.adaptive_lr_max,
-                            )
-                            policy_state = _replace_optimizer_learning_rate(policy_state, next_lr)
-                            critic_state = _replace_optimizer_learning_rate(critic_state, next_lr)
-                            metrics["lr/adaptive_learning_rate"] = next_lr
                         encoder_state = encoder_state.apply_gradients(grads=encoder_gradients)
                         decoder_state = decoder_state.apply_gradients(grads=decoder_gradients)
                         ncbf_state = ncbf_state.apply_gradients(grads=ncbf_gradients)
@@ -1343,6 +1343,22 @@ class PPO:
                     carry, optimization_metrics = jax.lax.scan(minibatch_update, init_carry, batch_indices)
                     policy_state, critic_state, encoder_state, decoder_state, ncbf_state, key = carry
 
+                    if self.adaptive_lr and self.adaptive_lr_target_kl > 0.0:
+                        current_lr = policy_state.opt_state[1].hyperparams["learning_rate"]
+                        next_lr = _adapt_learning_rate_from_kl(
+                            current_lr,
+                            jnp.mean(optimization_metrics["policy_ratio/approx_kl"]),
+                            self.adaptive_lr_target_kl,
+                            self.adaptive_lr_kl_margin,
+                            self.adaptive_lr_scale,
+                            self.adaptive_lr_gain,
+                            self.adaptive_lr_min,
+                            self.adaptive_lr_max,
+                        )
+                        policy_state = _replace_optimizer_learning_rate(policy_state, next_lr)
+                        critic_state = _replace_optimizer_learning_rate(critic_state, next_lr)
+                        optimization_metrics["lr/adaptive_learning_rate"] = next_lr
+                        optimization_metrics["lr/adaptive_lr_multiplier"] = next_lr / (current_lr + 1e-12)
                     optimization_metrics["lr/learning_rate"] = policy_state.opt_state[1].hyperparams["learning_rate"]
                     optimization_metrics["v_value/explained_variance"] = 1 - jnp.var(returns - values) / (jnp.var(returns) + 1e-8)
                     optimization_metrics["policy/std_dev"] = jnp.mean(jnp.exp(jnp.clip(policy_state.params["params"]["policy_logstd"], -5.0, 2.0)))

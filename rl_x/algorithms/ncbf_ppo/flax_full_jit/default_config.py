@@ -20,8 +20,9 @@ def get_config(algorithm_name):
     config.target_kl = 0.03  # <= 0 disables PPO update gating
     config.adaptive_lr = False
     config.adaptive_lr_target_kl = 0.0  # <= 0 follows target_kl
-    config.kl_margin = 2.0
-    config.kl_lr_scale = 1.5
+    config.kl_margin = 2.0  # no LR change inside [target / margin, target * margin]
+    config.kl_lr_scale = 1.25  # max multiplicative LR change per PPO update
+    config.kl_lr_gain = 0.25  # log-space proportional gain outside the KL deadband
     config.lr_min = 1e-6
     config.lr_max = 0.0  # <= 0 uses the initial learning_rate as the max
     config.entropy_coef = 0.0
