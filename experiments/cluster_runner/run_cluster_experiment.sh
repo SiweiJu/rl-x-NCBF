@@ -58,6 +58,12 @@ extra_args=()
 if [[ -n "${REWARD_TYPE:-}" ]]; then
     extra_args+=(--environment.reward.type="${REWARD_TYPE}")
 fi
+if [[ -n "${USE_BOOSTER_DEFAULTS:-}" ]]; then
+    extra_args+=(--environment.use_booster_defaults="${USE_BOOSTER_DEFAULTS}")
+fi
+if [[ -n "${MUJOCO_MODEL_DR_TYPE:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.mujoco_model.type="${MUJOCO_MODEL_DR_TYPE}")
+fi
 if [[ -n "${EVALUATION_AND_SAVE_FREQUENCY:-}" ]]; then
     extra_args+=(--algorithm.evaluation_and_save_frequency="${EVALUATION_AND_SAVE_FREQUENCY}")
 fi
