@@ -24,9 +24,9 @@ def get_reward_function(name, env, **kwargs):
     elif name == "G1ball":
         return HumanoidBallReward(env, profile="g1", **kwargs)
     elif name == "booster":
-        return HumanoidReward(env, profile="booster", **kwargs)
+        return HumanoidReward(env, profile=env.env_config["reward"].get("profile", "g1"), **kwargs)
     elif name == "boosterball":
-        return HumanoidBallReward(env, profile="booster", **kwargs)
+        return HumanoidBallReward(env, profile=env.env_config["reward"].get("profile", "g1"), **kwargs)
     elif name == "humanoid":
         return HumanoidReward(env, profile=_humanoid_profile_from_name(name, env), **kwargs)
     elif name == "humanoidball":
