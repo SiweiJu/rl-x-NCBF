@@ -69,11 +69,15 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.env_curriculum_level_success_episode_return=40 \
     --environment.ncbf_use_policy_observations=True \
     --environment.train_robot="booster_t1" \
+    --environment.use_booster_defaults=True \
     --environment.termination.terminate_on_ball_plate_drop="${TERMINATE_ON_BALL_PLATE_DROP}" \
     --environment.ball_plate.enabled=True \
+    --environment.reward.type="G1ball" \
     --environment.ball_plate.stand_after_drop="${STAND_AFTER_DROP}" \
     --environment.ball_plate.post_drop_truncation_seconds="${POST_DROP_TRUNCATION_SECONDS}" \
     --environment.ball_plate.include_observations=False \
+    --environment.reward.ball_plate_drop_penalty_coeff=10.0 \
+    --environment.reward.below_height_penalty_coeff=50.0 \
     --runner.mode="test" \
     --runner.nr_test_episodes="${NR_TEST_EPISODES}" \
     --runner.load_model="${MODEL_PATH}" \
