@@ -6,7 +6,7 @@ EXPERIMENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
-MODEL_PATH="/home/siwei/Downloads/latest(53).model"
+MODEL_PATH="/home/siwei/Downloads/latest(63).model"
 EXTRA_ARGS=("$@")
 if [[ "$#" -gt 0 && "$1" != --* ]]; then
     MODEL_PATH="$1"
@@ -69,7 +69,7 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.env_curriculum_level_success_episode_return=40 \
     --environment.ncbf_use_policy_observations=True \
     --environment.train_robot="unitree_g1" \
-    --environment.termination.height_percentage_threshold=0.6 \
+    --environment.termination.height_percentage_threshold=0.4 \
     --environment.termination.terminate_on_ball_plate_drop="${TERMINATE_ON_BALL_PLATE_DROP}" \
     --environment.ball_plate.enabled=True \
     --environment.ball_plate.stand_after_drop="${STAND_AFTER_DROP}" \

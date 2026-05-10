@@ -37,10 +37,10 @@ class LocomotionEnv(gym.Env):
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.ball_plate_config = env_config.get("ball_plate", {})
         self.use_ball_plate = bool(self.ball_plate_config.get("enabled", False))
-        self.stand_after_ball_plate_drop = self.use_ball_plate and bool(self.ball_plate_config.get("stand_after_drop", False))
-        self.ball_plate_post_drop_truncation_seconds = float(self.ball_plate_config.get("post_drop_truncation_seconds", 3.0))
-        self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand", True))
-        self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations", True))
+        self.stand_after_ball_plate_drop = self.use_ball_plate and bool(self.ball_plate_config.get("stand_after_drop"))
+        self.ball_plate_post_drop_truncation_seconds = float(self.ball_plate_config.get("post_drop_truncation_seconds"))
+        self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand"))
+        self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations"))
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
         self.root_body_name = robot_config.get("root_body_name", "trunk")
@@ -361,7 +361,7 @@ class LocomotionEnv(gym.Env):
         self.observation_noise_function.init_attributes()
 
         eval_mode = True
-        self.max_curriculum_level = 0.0
+        self.max_curriculum_level = 0.5
         self.internal_state = {
             "mj_model": deepcopy(self.initial_mj_model),
             "data": mujoco.MjData(self.initial_mj_model),
@@ -743,7 +743,7 @@ class LocomotionEnv(gym.Env):
         if not self.stand_after_ball_plate_drop:
             return
 
-        post_drop = bool(self.internal_state["ball_plate_drop_latched"] or self.internal_state["ball_plate_dropped"])
+        post_drop = bool(self.internal_state["ball_plate_drop_latched"])
         if not post_drop:
             return
 
@@ -1027,13 +1027,14 @@ class LocomotionEnv(gym.Env):
 
         reward = self.reward_function.reward_and_info(chosen_action)
 
+        post_drop_truncated = self._update_ball_plate_post_drop_state()
+
         should_sample_commands = self.command_sampling_function.step()
         if should_sample_commands or self.command_function_type == "random_trajectory":
             self.command_function.get_next_command()
         self._apply_ball_plate_post_drop_command()
 
         next_observation = self.get_observation(chosen_action)
-        post_drop_truncated = self._update_ball_plate_post_drop_state()
         terminated = self.termination_function.should_terminate() | np.any(np.abs(self.internal_state["data"].qvel[:3]) == 100.0)
         truncated = (self.internal_state["info_episode_store"]["episode_step"] >= (self.horizon - 1)) or post_drop_truncated
         done = terminated | truncated

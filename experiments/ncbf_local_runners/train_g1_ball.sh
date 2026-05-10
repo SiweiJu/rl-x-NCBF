@@ -8,7 +8,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-per_state_post_drop_flag}"
+RUN_NAME="${RUN_NAME:-g1_2penalty}"
 
 cd "${EXPERIMENTS_DIR}"
 
@@ -35,14 +35,18 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --environment.nr_envs="${NR_ENVS}" \
     --environment.train_robot="unitree_g1" \
     --environment.ncbf_use_policy_observations=True \
+    --environment.command.sampling_type="step_probability_and_reset" \
     --environment.episode_length_in_seconds=20 \
-    --environment.env_curriculum_level_success_episode_return=40 \
+    --environment.env_curriculum_level_success_episode_return=20 \
     --environment.terrain.type="plane" \
     --environment.termination.terminate_on_ball_plate_drop=False \
     --environment.ball_plate.enabled=True \
+    --environment.reward.type="G1ball" \
     --environment.ball_plate.stand_after_drop=True \
     --environment.ball_plate.post_drop_truncation_seconds=3.0 \
     --environment.ball_plate.include_observations=False \
+    --environment.reward.ball_plate_drop_penalty_coeff=10.0 \
+    --environment.reward.below_height_penalty_coeff=50.0 \
     --runner.mode="train" \
     --runner.track_console=False \
     --runner.track_tb=True \

@@ -7,7 +7,7 @@ from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.default_config import ap
 
 
 def create_env(config):
-    use_booster_defaults = config.environment.get("use_booster_defaults", True)
+    use_booster_defaults = config.environment.get("use_booster_defaults", False)
     if (
         config.environment.train_robot == "booster_t1"
         and use_booster_defaults

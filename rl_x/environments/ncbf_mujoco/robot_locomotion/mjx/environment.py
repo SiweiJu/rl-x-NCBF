@@ -42,14 +42,14 @@ class LocomotionEnv:
         self.add_goal_arrow = env_config["add_goal_arrow"]
         self.ball_plate_config = env_config.get("ball_plate", {})
         self.use_ball_plate = bool(self.ball_plate_config.get("enabled", False))
-        self.stand_after_ball_plate_drop = self.use_ball_plate and bool(self.ball_plate_config.get("stand_after_drop", False))
-        self.ball_plate_post_drop_truncation_seconds = float(self.ball_plate_config.get("post_drop_truncation_seconds", 3.0))
-        self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand", True))
-        self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations", True))
+        self.stand_after_ball_plate_drop = self.use_ball_plate and bool(self.ball_plate_config.get("stand_after_drop"))
+        self.ball_plate_post_drop_truncation_seconds = float(self.ball_plate_config.get("post_drop_truncation_seconds"))
+        self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand"))
+        self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations"))
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
         safety_config = env_config.get("safety", {})
-        self.safe_time_limit_seconds = safety_config.get("safe_time_limit_seconds", 0.0)
+        self.safe_time_limit_seconds = safety_config.get("safe_time_limit_seconds")
         self.root_body_name = robot_config.get("root_body_name", "trunk")
 
         xml_path = (self.robot_config["directory_path"] / "data" / "plane.xml").as_posix()
@@ -685,7 +685,7 @@ class LocomotionEnv:
         if not self.stand_after_ball_plate_drop:
             return
 
-        post_drop = internal_state["ball_plate_drop_latched"] | internal_state["ball_plate_dropped"]
+        post_drop = internal_state["ball_plate_drop_latched"]
         internal_state["goal_velocities"] = jnp.where(
             post_drop,
             jnp.zeros_like(internal_state["goal_velocities"]),
@@ -779,7 +779,7 @@ class LocomotionEnv:
                 state.internal_state["actuator_joint_keep_nominal"] = jnp.tile(actuator_joint_keep_nominal, (self.nr_envs, 1))
 
         if self.stand_after_ball_plate_drop:
-            post_drop = state.internal_state["ball_plate_drop_latched"] | state.internal_state["ball_plate_dropped"]
+            post_drop = state.internal_state["ball_plate_drop_latched"]
             state.internal_state["goal_velocities"] = jnp.where(
                 post_drop[:, None],
                 jnp.zeros_like(state.internal_state["goal_velocities"]),
@@ -1037,12 +1037,13 @@ class LocomotionEnv:
 
         reward = self.reward_function.reward_and_info(data, mjx_model, state.internal_state, chosen_action, state.info)
 
+        post_drop_truncated = self._update_ball_plate_post_drop_state(state.internal_state)
+
         should_sample_commands = self.command_sampling_function.step(command_sampling_key)
         self.command_function.get_next_command(state.internal_state, should_sample_commands, command_key)
         self._apply_ball_plate_post_drop_command(state.internal_state)
 
         next_observation = self.get_observation(data, mjx_model, state.internal_state, observation_key, chosen_action)
-        post_drop_truncated = self._update_ball_plate_post_drop_state(state.internal_state)
         constraint_terminated = self.termination_function.should_terminate(state.internal_state)
         qvel_limit_terminated = jnp.any(jnp.abs(data.qvel[:3]) == 100.0)
         terminated = constraint_terminated | qvel_limit_terminated

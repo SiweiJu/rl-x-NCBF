@@ -1,6 +1,6 @@
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.default import DefaultReward
-from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.humanoid import HumanoidReward
-from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.humanoidball import HumanoidBallReward
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.defaultG1 import DefaultG1Reward
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mujoco.reward_functions.G1ball import G1BallReward
 
 
 def _humanoid_profile_from_name(name, env):
@@ -12,24 +12,11 @@ def _humanoid_profile_from_name(name, env):
 
 
 def get_reward_function(name, env, **kwargs):
-    if getattr(env, "use_ball_plate", False):
-        name = "humanoidball"
-    elif name == "default" and env.robot_config.get("short_name") == "g1":
-        name = "humanoid"
-
     if name == "default":
-        return DefaultReward(env, **kwargs)
+        return DefaultReward(env)
     elif name == "defaultG1":
-        return HumanoidReward(env, profile="g1", **kwargs)
+        return DefaultG1Reward(env)
     elif name == "G1ball":
-        return HumanoidBallReward(env, profile="g1", **kwargs)
-    elif name == "booster":
-        return HumanoidReward(env, profile=env.env_config["reward"].get("profile", "g1"), **kwargs)
-    elif name == "boosterball":
-        return HumanoidBallReward(env, profile=env.env_config["reward"].get("profile", "g1"), **kwargs)
-    elif name == "humanoid":
-        return HumanoidReward(env, profile=_humanoid_profile_from_name(name, env), **kwargs)
-    elif name == "humanoidball":
-        return HumanoidBallReward(env, profile=_humanoid_profile_from_name(name, env), **kwargs)
+        return G1BallReward(env)
     else:
         raise NotImplementedError

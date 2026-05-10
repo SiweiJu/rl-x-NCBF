@@ -265,6 +265,7 @@ def get_config(environment_name):
             "action_smoothness_coeff": 0.1,
             "collision_coeff": 2.0,
             "base_height_coeff": 30.0,
+            "below_height_penalty_coeff": 0.0,
             "foot_air_time_coeff": 3.0,
             "foot_air_time_per_robot_size_m": 0.4,
             "all_feet_off_ground_coeff": 2.0,
@@ -285,7 +286,7 @@ def get_config(environment_name):
             "ball_plate_velocity_coeff": 0.1,
             "ball_plate_on_plate_coeff": 1.0,
             "ball_plate_alive_coeff": 0.2,
-            "ball_plate_drop_penalty_coeff": 10.0,
+            "ball_plate_drop_penalty_coeff": 0.0,
         },
         "termination": {
             "type": "below_height",
@@ -625,7 +626,7 @@ def apply_boosterball_defaults(config):
         "ball_plate_velocity_coeff": 0.1,
         "ball_plate_on_plate_coeff": 1.0,
         "ball_plate_alive_coeff": 0.2,
-        "ball_plate_drop_penalty_coeff": 10.0,
+        "ball_plate_drop_penalty_coeff": 0.0,
     })
     config.domain_randomization.observation_noise.type = "ball"
     config.termination.type = "boosterball"

@@ -8,7 +8,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-booster_locomotion_test}"
+RUN_NAME="${RUN_NAME:-booster_locomotion_smoootherLR}"
 
 cd "${EXPERIMENTS_DIR}"
 

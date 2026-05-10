@@ -22,6 +22,7 @@ class DefaultG1Reward(DefaultReward):
         self.moving_command_threshold = reward_config.get("moving_command_threshold", 0.05)
         self.standing_command_threshold = reward_config.get("standing_command_threshold", self.moving_command_threshold)
         self.standing_leg_joint_velocity_coeff = reward_config.get("standing_leg_joint_velocity_coeff", 0.0) * env.dt
+        self.below_height_penalty_coeff = reward_config.get("below_height_penalty_coeff", 0.0) * env.dt
         self.contact_count_coeff = reward_config.get("contact_count_coeff", 2.0) * env.dt
         self.foot_stance_time_coeff = reward_config.get("foot_stance_time_coeff", 1.0) * env.dt
         self.foot_stance_time_per_robot_size_m = reward_config.get("foot_stance_time_per_robot_size_m", 0.6)
@@ -127,15 +128,39 @@ class DefaultG1Reward(DefaultReward):
         # Tracking velocity command reward
         current_imu_linear_velocity = data.sensordata[self.env.imu_linear_velocity_sensor_adr:self.env.imu_linear_velocity_sensor_adr + self.env.imu_linear_velocity_sensor_dim]
         desired_imu_linear_velocity_xy = internal_state["goal_velocities"][:2]
+        command_norm = jnp.linalg.norm(internal_state["goal_velocities"])
+        is_moving_command = command_norm > self.moving_command_threshold
+        is_standing_command = command_norm <= self.standing_command_threshold
+        moving_command_scale = is_moving_command.astype(jnp.float32)
+        standing_command_scale = is_standing_command.astype(jnp.float32)
         xy_difference = desired_imu_linear_velocity_xy - current_imu_linear_velocity[:2]
         xy_velocity_difference_norm = jnp.sum(jnp.square(xy_difference))
-        tracking_xy_velocity_command_reward = self.tracking_xy_velocity_command_coeff * jnp.exp(-xy_velocity_difference_norm / self.tracking_xy_temperature)
+        tracking_xy_velocity_command_reward = (
+            self.tracking_xy_velocity_command_coeff
+            * jnp.exp(-xy_velocity_difference_norm / self.tracking_xy_temperature)
+            * moving_command_scale
+        )
+        standing_xy_velocity_command_reward = (
+            self.tracking_xy_velocity_command_coeff
+            * jnp.exp(-jnp.sum(jnp.square(current_imu_linear_velocity[:2])) / self.tracking_xy_temperature)
+            * standing_command_scale
+        )
 
         # Tracking angular velocity command reward
         current_imu_angular_velocity = data.sensordata[self.env.imu_angular_velocity_sensor_adr:self.env.imu_angular_velocity_sensor_adr + self.env.imu_angular_velocity_sensor_dim]
         desired_imu_yaw_velocity = internal_state["goal_velocities"][2]
         yaw_velocity_difference_norm = jnp.square(current_imu_angular_velocity[2] - desired_imu_yaw_velocity)
-        tracking_yaw_velocity_command_reward = self.tracking_yaw_velocity_command_coeff * jnp.exp(-yaw_velocity_difference_norm / self.tracking_yaw_temperature)
+        tracking_yaw_velocity_command_reward = (
+            self.tracking_yaw_velocity_command_coeff
+            * jnp.exp(-yaw_velocity_difference_norm / self.tracking_yaw_temperature)
+            * moving_command_scale
+        )
+        standing_yaw_velocity_command_reward = (
+            self.tracking_yaw_velocity_command_coeff
+            * jnp.exp(-jnp.square(current_imu_angular_velocity[2]) / self.tracking_yaw_temperature)
+            * standing_command_scale
+        )
+        standing_command_reward = standing_xy_velocity_command_reward + standing_yaw_velocity_command_reward
 
         # Alive reward
         alive_clipped_reward = critical_coeff * self.alive_clipped_coeff * 1.0
@@ -174,6 +199,14 @@ class DefaultG1Reward(DefaultReward):
 
         height_difference_squared = (internal_state["robot_imu_height_over_ground"] - internal_state["robot_nominal_imu_height_over_ground"]) ** 2
         base_height_reward = critical_coeff * self.base_height_coeff * -height_difference_squared
+        below_height_threshold = (
+            self.env.env_config["termination"].get("height_percentage_threshold", 0.8)
+            * internal_state["robot_nominal_imu_height_over_ground"]
+        )
+        below_height_scale = (
+            internal_state["robot_imu_height_over_ground"] < below_height_threshold
+        ).astype(jnp.float32)
+        below_height_penalty_reward = self.below_height_penalty_coeff * -below_height_scale
 
         feet_floor_contacts = self.env.terrain_function.check_feet_floor_contact(data)
         all_feet_off_ground_reward = critical_coeff * self.all_feet_off_ground_coeff * -jnp.all(~feet_floor_contacts).astype(jnp.float32)
@@ -214,11 +247,6 @@ class DefaultG1Reward(DefaultReward):
         action_smoothness_norm = jnp.mean(jnp.square(action - 2 * internal_state["last_action"] + internal_state["second_last_action"]))
         action_smoothness_reward = style_coeff * self.action_smoothness_coeff * -action_smoothness_norm
 
-        command_norm = jnp.linalg.norm(internal_state["goal_velocities"])
-        is_moving_command = command_norm > self.moving_command_threshold
-        is_standing_command = command_norm <= self.standing_command_threshold
-        moving_command_scale = is_moving_command.astype(jnp.float32)
-        standing_command_scale = is_standing_command.astype(jnp.float32)
         standing_leg_joint_velocity_norm = jnp.mean(jnp.square(data.qvel[self.standing_leg_joint_qvel_id]))
         standing_leg_joint_velocity_reward = (
             self.standing_leg_joint_velocity_coeff
@@ -262,9 +290,9 @@ class DefaultG1Reward(DefaultReward):
         foot_lift_bonus_reward = gait_coeff * self.foot_lift_bonus_coeff * moving_command_scale * jnp.mean(swing_feet * foot_lift_fraction)
 
         survival_reward = self.survival
-        tracking_reward_linvel_x = jnp.exp(-jnp.square(current_imu_linear_velocity[0] - desired_imu_linear_velocity_xy[0]) * self.tracking_w_exp_linvel_x) * self.tracking_w_sum_linvel_x
-        tracking_reward_linvel_y = jnp.exp(-jnp.square(current_imu_linear_velocity[1] - desired_imu_linear_velocity_xy[1]) * self.tracking_w_exp_linvel_y) * self.tracking_w_sum_linvel_y
-        tracking_reward_angvel = jnp.exp(-jnp.square(current_imu_angular_velocity[2] - desired_imu_yaw_velocity) * self.tracking_w_exp_angvel) * self.tracking_w_sum_angvel
+        tracking_reward_linvel_x = jnp.exp(-jnp.square(current_imu_linear_velocity[0] - desired_imu_linear_velocity_xy[0]) * self.tracking_w_exp_linvel_x) * self.tracking_w_sum_linvel_x * moving_command_scale
+        tracking_reward_linvel_y = jnp.exp(-jnp.square(current_imu_linear_velocity[1] - desired_imu_linear_velocity_xy[1]) * self.tracking_w_exp_linvel_y) * self.tracking_w_sum_linvel_y * moving_command_scale
+        tracking_reward_angvel = jnp.exp(-jnp.square(current_imu_angular_velocity[2] - desired_imu_yaw_velocity) * self.tracking_w_exp_angvel) * self.tracking_w_sum_angvel * moving_command_scale
         joint_qpos_reward = jnp.exp(
             -self.nominal_joint_pos_exp *
             jnp.sum(jnp.square(data.qpos[self.nominal_joint_qpos_id] - self.nominal_joint_qpos[self.nominal_joint_qpos_id]))
@@ -329,10 +357,16 @@ class DefaultG1Reward(DefaultReward):
             feet_roll_reward + feet_distance_reward + air_time_reward + no_fly_reward +
             impact_reward + joint_deviation_l1_penalty
         )
-        tracking_reward = tracking_xy_velocity_command_reward + tracking_yaw_velocity_command_reward + booster_tracking_reward
+        tracking_reward = (
+            tracking_xy_velocity_command_reward +
+            tracking_yaw_velocity_command_reward +
+            standing_command_reward +
+            booster_tracking_reward
+        )
         critical_penalty = z_velocity_reward + imu_acceleration_reward + angular_velocity_reward + angular_position_reward + \
                            joint_position_limit_reward + joint_velocity_limit_reward + collision_reward + base_height_reward + \
-                           all_feet_off_ground_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward
+                           all_feet_off_ground_reward + foot_slip_reward + foot_z_velocity_reward + foot_flat_contact_reward + \
+                           below_height_penalty_reward
         style_penalty = actuator_joint_nominal_diff_reward + joint_velocity_reward + acceleration_reward + torque_reward + \
                         power_draw_penalty_reward + action_rate_reward + action_smoothness_reward
         gait_reward = foot_lift_bonus_reward
@@ -365,6 +399,9 @@ class DefaultG1Reward(DefaultReward):
         info[f"reward/booster_penalty_total"] = booster_penalty
         info[f"reward/track_xy_vel_cmd"] = tracking_xy_velocity_command_reward
         info[f"reward/track_yaw_vel_cmd"] = tracking_yaw_velocity_command_reward
+        info[f"reward/standing_xy_vel_cmd"] = standing_xy_velocity_command_reward
+        info[f"reward/standing_yaw_vel_cmd"] = standing_yaw_velocity_command_reward
+        info[f"reward/standing_command"] = standing_command_reward
         info[f"reward/alive_clipped"] = alive_clipped_reward
         info[f"reward/alive_unclipped"] = alive_unclipped_reward
         info[f"reward/z_velocity"] = z_velocity_reward
@@ -383,6 +420,7 @@ class DefaultG1Reward(DefaultReward):
         info[f"reward/standing_leg_joint_velocity"] = standing_leg_joint_velocity_reward
         info[f"reward/collision"] = collision_reward
         info[f"reward/base_height"] = base_height_reward
+        info[f"reward/below_height_penalty"] = below_height_penalty_reward
         info[f"reward/foot_air_time"] = foot_air_time_reward
         info[f"reward/contact_count"] = contact_count_reward
         info[f"reward/foot_stance_time"] = foot_stance_time_reward
@@ -408,6 +446,7 @@ class DefaultG1Reward(DefaultReward):
         info[f"env_info/standing_leg_joint_velocity_norm"] = standing_leg_joint_velocity_norm
         info[f"env_info/is_moving_command"] = moving_command_scale
         info[f"env_info/is_standing_command"] = standing_command_scale
+        info[f"env_info/below_height"] = below_height_scale
         info[f"env_info/xy_vel_diff_abs"] = jnp.nan_to_num(jnp.mean(jnp.minimum(jnp.abs(xy_difference), 2 * internal_state["max_command_velocity"])), nan=2 * internal_state["max_command_velocity"], posinf=2 * internal_state["max_command_velocity"], neginf=2 * internal_state["max_command_velocity"])
 
         return reward
