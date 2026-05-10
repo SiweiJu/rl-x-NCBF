@@ -342,7 +342,7 @@ class PPO:
         for key, value in diagnostics.items():
             if key in ("raw_action_norm", "processed_action_norm"):
                 neutral_value = raw_norm
-            elif key == "correction_scale":
+            elif key in ("correction_scale", "post_constraint_satisfied"):
                 neutral_value = jnp.ones_like(value)
             else:
                 neutral_value = jnp.zeros_like(value)
@@ -832,6 +832,12 @@ class PPO:
                     ncbf_metrics["ncbf/safety_layer_constraint_delta_max"] = jnp.max(safety_diagnostics["constraint_delta"])
                     ncbf_metrics["ncbf/safety_layer_robust_residual_min"] = jnp.min(safety_diagnostics["robust_residual"])
                     ncbf_metrics["ncbf/safety_layer_correction_clipped_rate"] = jnp.mean(safety_diagnostics["correction_clipped"])
+                    post_violation = safety_diagnostics["post_constraint_violation"]
+                    ncbf_metrics["ncbf/safety_layer_post_violation_rate"] = jnp.mean(post_violation)
+                    ncbf_metrics["ncbf/safety_layer_active_post_violation_rate"] = jnp.sum(post_violation * active_mask) / (n_active + 1e-8)
+                    ncbf_metrics["ncbf/safety_layer_post_constraint_delta_max"] = jnp.max(safety_diagnostics["post_constraint_delta"])
+                    ncbf_metrics["ncbf/safety_layer_post_linearized_margin_min"] = jnp.min(safety_diagnostics["post_linearized_margin"])
+                    ncbf_metrics["ncbf/safety_layer_nonfinite_linearization_rate"] = 1.0 - jnp.mean(safety_diagnostics["linearization_is_finite"])
 
                     @jax.jit
                     def append_to_buffer(buffer,
