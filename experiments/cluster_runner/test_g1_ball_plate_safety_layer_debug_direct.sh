@@ -25,8 +25,14 @@ echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
 eval "$(/home/ju/miniconda3/bin/conda shell.bash hook)"
 conda activate rlx-ncbf
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXPERIMENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+if [[ -f "${SUBMIT_DIR}/experiment.py" ]]; then
+    EXPERIMENTS_DIR="${SUBMIT_DIR}"
+elif [[ -f "${SUBMIT_DIR}/../experiment.py" ]]; then
+    EXPERIMENTS_DIR="$(cd "${SUBMIT_DIR}/.." && pwd)"
+else
+    EXPERIMENTS_DIR="/home/ju/repo/corl/ncbf-sl-debug/experiments"
+fi
 REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
