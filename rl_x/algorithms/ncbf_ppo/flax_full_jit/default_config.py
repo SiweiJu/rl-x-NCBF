@@ -65,6 +65,8 @@ def get_config(algorithm_name):
     config.ncbf.action_clipping = False
     config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
     config.ncbf.max_delta_u = 0.5  # max L2 action correction from the safety layer; <=0 disables
+    config.ncbf.safety_layer_projection = "soft_slack"  # soft_slack or hard_projection
+    config.ncbf.post_check_actual_residual = False  # expensive safety-layer debug diagnostic
     config.ncbf.safety_layer_std_coeff_start = -2.0
     config.ncbf.safety_layer_std_coeff_final = 1.0
 
