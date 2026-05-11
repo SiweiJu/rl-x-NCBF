@@ -90,10 +90,15 @@ def get_ncbf(config, env):
         zero = jnp.asarray(0.0, dtype=action.dtype)
         one = jnp.asarray(1.0, dtype=action.dtype)
         return {
+            "linearization_is_finite": one,
             "residual_mean": zero,
             "residual_std": zero,
             "robust_residual": zero,
             "constraint_delta": zero,
+            "post_linearized_margin": zero,
+            "post_constraint_delta": zero,
+            "post_constraint_violation": zero,
+            "post_constraint_satisfied": one,
             "constraint_grad_norm": zero,
             "qp_gain": zero,
             "correction_norm": zero,
@@ -512,12 +517,31 @@ def make_get_safe_action(
         constraint_active = constraint_active & linearization_is_finite & u_processed_is_finite
         delta_u = jnp.linalg.norm(u_processed - action_raw)
 
+        post_action_is_finite = jnp.all(jnp.isfinite(u_processed))
+        post_constraint_is_valid = linearization_is_finite & post_action_is_finite
+        post_linearized_margin = jnp.where(
+            post_constraint_is_valid,
+            jnp.dot(a, u_processed) - c,
+            jnp.asarray(0.0, dtype=action_raw.dtype),
+        )
+        post_constraint_delta = jnp.where(
+            post_constraint_is_valid,
+            jnp.maximum(0.0, -post_linearized_margin),
+            jnp.asarray(0.0, dtype=action_raw.dtype),
+        )
+        post_constraint_violation = post_constraint_delta > 1e-6
+        post_constraint_satisfied = post_constraint_is_valid & ~post_constraint_violation
+
         diagnostics = {
             "linearization_is_finite": linearization_is_finite.astype(action_raw.dtype),
             "residual_mean": residual_mean,
             "residual_std": residual_std,
             "robust_residual": robust_residual,
             "constraint_delta": delta,
+            "post_linearized_margin": post_linearized_margin,
+            "post_constraint_delta": post_constraint_delta,
+            "post_constraint_violation": post_constraint_violation.astype(action_raw.dtype),
+            "post_constraint_satisfied": post_constraint_satisfied.astype(action_raw.dtype),
             "constraint_grad_norm": jnp.sqrt(aTa),
             "qp_gain": gain,
             "correction_norm": correction_norm,
