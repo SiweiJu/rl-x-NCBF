@@ -15,6 +15,7 @@ REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
 
 CONDA_EXE="${CONDA_EXE:-/home/ju/miniconda3/bin/conda}"
 CONDA_ENV="${CONDA_ENV:-rlx-ncbf}"
+PYTHON_EXE="${PYTHON_EXE:-}"
 SEED="${SEED:-42}"
 NR_ENVS="${NR_ENVS:-4096}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-32768}"
@@ -54,8 +55,17 @@ SAVE_MODEL="${SAVE_MODEL:-True}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
-eval "$("${CONDA_EXE}" shell.bash hook)"
-conda activate "${CONDA_ENV}"
+if [[ -z "${PYTHON_EXE}" ]]; then
+    CONDA_ROOT="${CONDA_EXE%/bin/conda}"
+    ENV_PYTHON="${CONDA_ROOT}/envs/${CONDA_ENV}/bin/python"
+    if [[ -x "${ENV_PYTHON}" ]]; then
+        PYTHON_EXE="${ENV_PYTHON}"
+    else
+        eval "$("${CONDA_EXE}" shell.bash hook)"
+        conda activate "${CONDA_ENV}"
+        PYTHON_EXE="python"
+    fi
+fi
 
 cd "${EXPERIMENTS_DIR}"
 
@@ -86,7 +96,7 @@ if [[ "${BALL_PLATE_ENABLED}" == "True" ]]; then
     )
 fi
 
-python experiment.py \
+"${PYTHON_EXE}" experiment.py \
     --algorithm.name="${ALGORITHM_NAME}" \
     --algorithm.total_timesteps="${TOTAL_TIMESTEPS}" \
     --algorithm.minibatch_size="${MINIBATCH_SIZE}" \
