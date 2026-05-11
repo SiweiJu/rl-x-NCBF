@@ -160,7 +160,10 @@ class PPO:
         self.ncbf_max_log_std = getattr(config.algorithm.ncbf, "max_log_std")
         self.ncbf_safety_layer_std_coeff_start = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_start")
         self.ncbf_safety_layer_std_coeff_final = getattr(config.algorithm.ncbf, "safety_layer_std_coeff_final")
+        self.ncbf_lambda_slack = getattr(config.algorithm.ncbf, "lambda_slack", 1000.0)
         self.ncbf_max_delta_u = getattr(config.algorithm.ncbf, "max_delta_u", 0.0)
+        self.ncbf_safety_layer_projection = getattr(config.algorithm.ncbf, "safety_layer_projection", "soft_slack")
+        self.ncbf_post_check_actual_residual = bool(getattr(config.algorithm.ncbf, "post_check_actual_residual", False))
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
 
@@ -342,7 +345,7 @@ class PPO:
         for key, value in diagnostics.items():
             if key in ("raw_action_norm", "processed_action_norm"):
                 neutral_value = raw_norm
-            elif key in ("correction_scale", "linearization_is_finite", "post_constraint_satisfied"):
+            elif key in ("correction_scale", "linearization_is_finite", "post_constraint_satisfied", "actual_post_is_finite"):
                 neutral_value = jnp.ones_like(value)
             else:
                 neutral_value = jnp.zeros_like(value)
@@ -826,7 +829,16 @@ class PPO:
                     ncbf_metrics["ncbf/safety_layer_action_bound_saturation_rate"] = jnp.mean(
                         ((env_actions <= action_low + 1e-5) | (env_actions >= action_high - 1e-5)).astype(jnp.float32)
                     )
+                    ncbf_metrics["ncbf/safety_layer_lambda_slack_config"] = jnp.asarray(self.ncbf_lambda_slack, dtype=jnp.float32)
                     ncbf_metrics["ncbf/safety_layer_max_delta_u_config"] = jnp.asarray(self.ncbf_max_delta_u, dtype=jnp.float32)
+                    ncbf_metrics["ncbf/safety_layer_projection_is_hard"] = jnp.asarray(
+                        self.ncbf_safety_layer_projection == "hard_projection",
+                        dtype=jnp.float32,
+                    )
+                    ncbf_metrics["ncbf/safety_layer_actual_post_check_enabled"] = jnp.asarray(
+                        self.ncbf_post_check_actual_residual,
+                        dtype=jnp.float32,
+                    )
                     for diag_key, diag_value in safety_diagnostics.items():
                         ncbf_metrics[f"ncbf_safety_layer/{diag_key}"] = jnp.mean(diag_value)
                     ncbf_metrics["ncbf/safety_layer_constraint_delta_max"] = jnp.max(safety_diagnostics["constraint_delta"])
@@ -838,6 +850,34 @@ class PPO:
                     ncbf_metrics["ncbf/safety_layer_post_constraint_delta_max"] = jnp.max(safety_diagnostics["post_constraint_delta"])
                     ncbf_metrics["ncbf/safety_layer_post_linearized_margin_min"] = jnp.min(safety_diagnostics["post_linearized_margin"])
                     ncbf_metrics["ncbf/safety_layer_nonfinite_linearization_rate"] = 1.0 - jnp.mean(safety_diagnostics["linearization_is_finite"])
+                    ncbf_metrics["ncbf/safety_layer_unavailable_or_post_violation_rate"] = jnp.mean(
+                        jnp.maximum(1.0 - safety_diagnostics["linearization_is_finite"], post_violation)
+                    )
+                    required_correction_norm = safety_diagnostics["required_correction_norm"]
+                    ncbf_metrics["ncbf/safety_layer_required_correction_norm"] = jnp.mean(required_correction_norm)
+                    ncbf_metrics["ncbf/safety_layer_required_correction_norm_active_mean"] = (
+                        jnp.sum(required_correction_norm * active_mask) / (n_active + 1e-8)
+                    )
+                    ncbf_metrics["ncbf/safety_layer_required_correction_norm_max"] = jnp.max(required_correction_norm)
+                    ncbf_metrics["ncbf/safety_layer_required_exceeds_cap_rate"] = jnp.mean(safety_diagnostics["required_exceeds_cap"])
+                    ncbf_metrics["ncbf/safety_layer_capped_active_rate"] = jnp.mean(safety_diagnostics["capped_active"])
+                    ncbf_metrics["ncbf/safety_layer_soft_residual_fraction"] = jnp.mean(safety_diagnostics["soft_residual_fraction"])
+                    ncbf_metrics["ncbf/safety_layer_soft_residual_fraction_active_mean"] = (
+                        jnp.sum(safety_diagnostics["soft_residual_fraction"] * active_mask) / (n_active + 1e-8)
+                    )
+                    ncbf_metrics["ncbf/safety_layer_post_clip_changed_action_rate"] = jnp.mean(safety_diagnostics["post_clip_changed_action"])
+                    ncbf_metrics["ncbf/safety_layer_post_clip_action_delta_norm"] = jnp.mean(safety_diagnostics["post_clip_action_delta_norm"])
+                    actual_post_violation = safety_diagnostics["actual_post_violation"]
+                    ncbf_metrics["ncbf/safety_layer_actual_post_violation_rate"] = jnp.mean(actual_post_violation)
+                    ncbf_metrics["ncbf/safety_layer_active_actual_post_violation_rate"] = (
+                        jnp.sum(actual_post_violation * active_mask) / (n_active + 1e-8)
+                    )
+                    ncbf_metrics["ncbf/safety_layer_actual_post_robust_residual_min"] = jnp.min(
+                        safety_diagnostics["actual_post_robust_residual"]
+                    )
+                    ncbf_metrics["ncbf/safety_layer_actual_post_nonfinite_rate"] = (
+                        1.0 - jnp.mean(safety_diagnostics["actual_post_is_finite"])
+                    )
 
                     @jax.jit
                     def append_to_buffer(buffer,
@@ -1547,6 +1587,8 @@ class PPO:
             "lambda_slack",
             "action_clipping",
             "max_delta_u",
+            "safety_layer_projection",
+            "post_check_actual_residual",
             "safety_layer_std_coeff_start",
             "safety_layer_std_coeff_final",
         }

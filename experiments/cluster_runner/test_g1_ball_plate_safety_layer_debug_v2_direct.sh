@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=g1_ball_sl_direct
+#SBATCH --job-name=g1_ball_sl_v2
 #SBATCH --output=log/out_and_err_%x_%A_%a.txt
 #SBATCH --error=log/out_and_err_%x_%A_%a.txt
 #SBATCH --partition=gpu
@@ -10,7 +10,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem-per-cpu=15G
 #SBATCH --time=71:59:59
-#SBATCH --array=0-5
+#SBATCH --array=0-8
 
 set -euo pipefail
 
@@ -48,67 +48,95 @@ TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
 case "${TASK_ID}" in
     0)
         USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-False}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-soft_slack}"
         NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000.0}"
         NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-0.5}"
-        NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.1}"
-        NCBF_ETA_CBF="${NCBF_ETA_CBF:-0.5}"
         DEFAULT_RUN_NAME="g1_ball_sl_off"
         ;;
     1)
         USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-soft_slack}"
         NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000.0}"
         NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-0.5}"
-        NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.1}"
-        NCBF_ETA_CBF="${NCBF_ETA_CBF:-0.5}"
-        DEFAULT_RUN_NAME="g1_ball_sl_current"
+        DEFAULT_RUN_NAME="g1_ball_sl_soft_lam1e3_cap0p5"
         ;;
     2)
         USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
-        NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-True}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-soft_slack}"
+        NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-100000.0}"
         NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-0.5}"
-        NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.1}"
-        NCBF_ETA_CBF="${NCBF_ETA_CBF:-0.5}"
-        DEFAULT_RUN_NAME="g1_ball_sl_action_clip"
+        DEFAULT_RUN_NAME="g1_ball_sl_soft_lam1e5_cap0p5"
         ;;
     3)
         USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-soft_slack}"
         NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
-        NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-1.0}"
-        NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.1}"
-        NCBF_ETA_CBF="${NCBF_ETA_CBF:-0.5}"
-        DEFAULT_RUN_NAME="g1_ball_sl_cap_$(sanitize "${NCBF_MAX_DELTA_U}")"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000000.0}"
+        NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-0.5}"
+        DEFAULT_RUN_NAME="g1_ball_sl_soft_lam1e6_cap0p5"
         ;;
     4)
         USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-hard_projection}"
         NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
-        NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-0.5}"
-        NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.2}"
-        NCBF_ETA_CBF="${NCBF_ETA_CBF:-0.5}"
-        DEFAULT_RUN_NAME="g1_ball_sl_gamma_$(sanitize "${NCBF_GAMMA_C}")"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000.0}"
+        NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-0.0}"
+        DEFAULT_RUN_NAME="g1_ball_sl_hard_nocap"
         ;;
     5)
         USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-hard_projection}"
         NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000.0}"
         NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-0.5}"
-        NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.1}"
-        NCBF_ETA_CBF="${NCBF_ETA_CBF:-0.25}"
-        DEFAULT_RUN_NAME="g1_ball_sl_eta_$(sanitize "${NCBF_ETA_CBF}")"
+        DEFAULT_RUN_NAME="g1_ball_sl_hard_cap0p5"
+        ;;
+    6)
+        USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-hard_projection}"
+        NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000.0}"
+        NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-1.0}"
+        DEFAULT_RUN_NAME="g1_ball_sl_hard_cap1p0"
+        ;;
+    7)
+        USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-hard_projection}"
+        NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000.0}"
+        NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-2.0}"
+        DEFAULT_RUN_NAME="g1_ball_sl_hard_cap2p0"
+        ;;
+    8)
+        USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
+        NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-hard_projection}"
+        NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-True}"
+        NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000.0}"
+        NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-1.0}"
+        DEFAULT_RUN_NAME="g1_ball_sl_hard_cap1p0_clip"
         ;;
     *)
-        echo "SLURM_ARRAY_TASK_ID=${TASK_ID} is outside the configured sweep size 6." >&2
+        echo "SLURM_ARRAY_TASK_ID=${TASK_ID} is outside the configured sweep size 9." >&2
         exit 2
         ;;
 esac
 
-RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-SLDBG_}"
+NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.1}"
+NCBF_ETA_CBF="${NCBF_ETA_CBF:-0.5}"
+NCBF_POST_CHECK_ACTUAL_RESIDUAL="${NCBF_POST_CHECK_ACTUAL_RESIDUAL:-True}"
+RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-SLDBG2_}"
 RUN_NAME="${RUN_NAME:-${DEFAULT_RUN_NAME}}"
 
 echo "Task ID: ${TASK_ID}"
 echo "Use safety layer: ${USE_SAFETY_LAYER}"
+echo "Safety-layer projection: ${NCBF_SAFETY_LAYER_PROJECTION}"
 echo "Action clipping: ${NCBF_ACTION_CLIPPING}"
+echo "Lambda slack: ${NCBF_LAMBDA_SLACK}"
 echo "Max delta u: ${NCBF_MAX_DELTA_U}"
-echo "Safety-layer projection: ${NCBF_SAFETY_LAYER_PROJECTION:-soft_slack}"
-echo "Post-check actual residual: ${NCBF_POST_CHECK_ACTUAL_RESIDUAL:-False}"
+echo "Post-check actual residual: ${NCBF_POST_CHECK_ACTUAL_RESIDUAL}"
 echo "Gamma c: ${NCBF_GAMMA_C}"
 echo "Eta CBF: ${NCBF_ETA_CBF}"
 echo "Run name: ${RUN_NAME_PREFIX}${RUN_NAME}"
@@ -118,7 +146,7 @@ cd "${EXPERIMENTS_DIR}"
 
 python experiment.py \
     --algorithm.name="ncbf_ppo.flax_full_jit" \
-    --algorithm.total_timesteps="${TOTAL_TIMESTEPS:-50000000}" \
+    --algorithm.total_timesteps="${TOTAL_TIMESTEPS:-200000000}" \
     --algorithm.minibatch_size="${MINIBATCH_SIZE:-4096}" \
     --algorithm.learning_rate="${LEARNING_RATE:-4e-4}" \
     --algorithm.adaptive_lr="${ADAPTIVE_LR:-True}" \
@@ -129,10 +157,10 @@ python experiment.py \
     --algorithm.ncbf.output_distribution="${NCBF_OUTPUT_DISTRIBUTION:-deterministic}" \
     --algorithm.ncbf.gamma_c="${NCBF_GAMMA_C}" \
     --algorithm.ncbf.eta_cbf="${NCBF_ETA_CBF}" \
-    --algorithm.ncbf.lambda_slack="${NCBF_LAMBDA_SLACK:-1000.0}" \
+    --algorithm.ncbf.lambda_slack="${NCBF_LAMBDA_SLACK}" \
     --algorithm.ncbf.max_delta_u="${NCBF_MAX_DELTA_U}" \
-    --algorithm.ncbf.safety_layer_projection="${NCBF_SAFETY_LAYER_PROJECTION:-soft_slack}" \
-    --algorithm.ncbf.post_check_actual_residual="${NCBF_POST_CHECK_ACTUAL_RESIDUAL:-False}" \
+    --algorithm.ncbf.safety_layer_projection="${NCBF_SAFETY_LAYER_PROJECTION}" \
+    --algorithm.ncbf.post_check_actual_residual="${NCBF_POST_CHECK_ACTUAL_RESIDUAL}" \
     --algorithm.ncbf.H="${NCBF_H:-25}" \
     --algorithm.ncbf_buffer.neg_buffer_size="${NCBF_NEG_BUFFER_SIZE:-1}" \
     --algorithm.ncbf_buffer.neg_sampling_ratio="${NCBF_NEG_SAMPLING_RATIO:-0.2}" \
@@ -162,5 +190,5 @@ python experiment.py \
     --runner.save_model="${SAVE_MODEL:-True}" \
     --runner.wandb_entity="${WANDB_ENTITY:-catherineju-rwth-aachen-university}" \
     --runner.project_name="${PROJECT_NAME:-202605_ncbf}" \
-    --runner.exp_name="${EXP_NAME:-sl_check}" \
+    --runner.exp_name="${EXP_NAME:-sl_check_v2}" \
     --runner.run_name="${RUN_NAME_PREFIX}${RUN_NAME}"

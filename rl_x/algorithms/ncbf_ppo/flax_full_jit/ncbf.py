@@ -78,10 +78,18 @@ def get_ncbf(config, env):
     eta_cbf = config.algorithm.ncbf.eta_cbf
     lambda_s = config.algorithm.ncbf.lambda_slack
     max_delta_u = config.algorithm.ncbf.max_delta_u
+    safety_layer_projection = getattr(config.algorithm.ncbf, "safety_layer_projection", "soft_slack")
+    post_check_actual_residual = bool(getattr(config.algorithm.ncbf, "post_check_actual_residual", False))
     output_distribution = getattr(config.algorithm.ncbf, "output_distribution", "deterministic")
     min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
     max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
     residual_mc_samples = getattr(config.algorithm.ncbf, "residual_mc_samples", 16)
+
+    if safety_layer_projection not in ("soft_slack", "hard_projection"):
+        raise ValueError(
+            "algorithm.ncbf.safety_layer_projection must be one of "
+            "'soft_slack' or 'hard_projection'"
+        )
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
@@ -99,11 +107,22 @@ def get_ncbf(config, env):
             "post_constraint_delta": zero,
             "post_constraint_violation": zero,
             "post_constraint_satisfied": one,
+            "actual_post_residual_mean": zero,
+            "actual_post_robust_residual": zero,
+            "actual_post_residual_std": zero,
+            "actual_post_is_finite": one,
+            "actual_post_violation": zero,
             "constraint_grad_norm": zero,
             "qp_gain": zero,
             "correction_norm": zero,
             "correction_scale": one,
             "correction_clipped": zero,
+            "required_correction_norm": zero,
+            "required_exceeds_cap": zero,
+            "soft_residual_fraction": zero,
+            "capped_active": zero,
+            "post_clip_action_delta_norm": zero,
+            "post_clip_changed_action": zero,
             "raw_action_norm": jnp.linalg.norm(action),
             "processed_action_norm": jnp.linalg.norm(action),
         }
@@ -137,6 +156,8 @@ def get_ncbf(config, env):
             lambda_s=lambda_s,
             max_delta_u=max_delta_u,
             action_clipping=ncbf_clipping,
+            safety_layer_projection=safety_layer_projection,
+            post_check_actual_residual=post_check_actual_residual,
         )
 
     # dummy
@@ -313,6 +334,8 @@ def make_get_safe_action(
     lambda_s: float,
     max_delta_u: float,
     action_clipping: bool,
+    safety_layer_projection: str,
+    post_check_actual_residual: bool,
 ):
     """
     Returns a JIT-able safety layer.
@@ -438,6 +461,34 @@ def make_get_safe_action(
 
         return a, c_lin, residual_mean, robust_residual, residual_std_sg
 
+    def actual_robust_residual_for_action(
+        obs_t: Array,
+        u: Array,
+        obs_last: Array,
+        u_last: Array,
+        latent_z: Array,
+        safety_layer_curriculum_coeff: Array,
+        phi: dict,
+    ):
+        x_t = obs_t[ncbf_obs_from_obs_idx]
+        x_last = obs_last[ncbf_obs_from_obs_idx]
+        beta_coeff = jnp.asarray(safety_layer_curriculum_coeff, dtype=u.dtype)
+
+        _, _, current_details = ncbf_apply(
+            phi,
+            jnp.concatenate([x_last, u_last, latent_z], axis=-1),
+        )
+        _, _, next_details = ncbf_apply(
+            phi,
+            jnp.concatenate([x_t, u, latent_z], axis=-1),
+        )
+        residual_mean, residual_std = residual_mean_and_std(
+            current_details,
+            next_details,
+        )
+        robust_residual = residual_mean - beta_coeff * residual_std
+        return residual_mean, robust_residual, residual_std
+
     @jax.jit
     def get_safe_action(
         action_raw: Array,
@@ -478,11 +529,19 @@ def make_get_safe_action(
         # Constraint violation amount for a^T u >= c.
         delta = jnp.where(linearization_is_finite, jnp.maximum(0.0, c - aTu), 0.0)
 
-        # Closed-form one-constraint QP solution with soft slack:
-        #   min ||u - u0||^2 + lambda_s * xi^2
-        #   s.t. a^T u + xi >= c, xi >= 0.
-        gain = delta / (aTa + (1.0 / lambda_s))
+        # Closed-form one-constraint correction. The default keeps the existing
+        # soft-slack behavior; hard_projection is a debug mode that projects
+        # onto the affine constraint before optional caps/clipping.
+        lambda_s_safe = jnp.maximum(
+            jnp.asarray(lambda_s, dtype=action_raw.dtype),
+            jnp.asarray(1e-12, dtype=action_raw.dtype),
+        )
+        soft_gain = delta / (aTa + (1.0 / lambda_s_safe))
+        hard_gain = delta / aTa
+        gain = hard_gain if safety_layer_projection == "hard_projection" else soft_gain
         correction = gain * a
+
+        required_correction_norm = delta / (jnp.sqrt(aTa) + 1e-12)
 
         # Optional correction clipping. Note: if max_delta_u clips the correction,
         # the final action may no longer exactly satisfy the affine constraint.
@@ -497,7 +556,7 @@ def make_get_safe_action(
 
         constraint_active = jnp.array(delta > 0.0)
 
-        u_processed = jax.lax.cond(
+        u_pre_post_clip = jax.lax.cond(
             use_safety_layer,
             lambda _: u_safe,
             lambda _: action_raw,
@@ -510,8 +569,9 @@ def make_get_safe_action(
             action_clipping,
             lambda x: jnp.clip(x, act_low, act_high),
             lambda x: x,
-            u_processed,
+            u_pre_post_clip,
         )
+        post_clip_action_delta_norm = jnp.linalg.norm(u_processed - u_pre_post_clip)
         u_processed_is_finite = jnp.all(jnp.isfinite(u_processed))
         u_processed = jnp.where(u_processed_is_finite, u_processed, action_raw)
         constraint_active = constraint_active & linearization_is_finite & u_processed_is_finite
@@ -531,6 +591,30 @@ def make_get_safe_action(
         )
         post_constraint_violation = post_constraint_delta > 1e-6
         post_constraint_satisfied = post_constraint_is_valid & ~post_constraint_violation
+        actual_post_residual_mean = jnp.asarray(0.0, dtype=action_raw.dtype)
+        actual_post_robust_residual = jnp.asarray(0.0, dtype=action_raw.dtype)
+        actual_post_residual_std = jnp.asarray(0.0, dtype=action_raw.dtype)
+        actual_post_is_finite = jnp.asarray(True)
+        actual_post_violation = jnp.asarray(False)
+        if post_check_actual_residual:
+            actual_post_residual_mean, actual_post_robust_residual, actual_post_residual_std = actual_robust_residual_for_action(
+                obs_t,
+                u_processed,
+                last_obs,
+                last_action,
+                latent_z,
+                safety_layer_curriculum_coeff,
+                phis,
+            )
+            actual_post_is_finite = (
+                jnp.isfinite(actual_post_residual_mean)
+                & jnp.isfinite(actual_post_robust_residual)
+                & jnp.isfinite(actual_post_residual_std)
+            )
+            actual_post_residual_mean = jnp.nan_to_num(actual_post_residual_mean, nan=0.0, posinf=0.0, neginf=0.0)
+            actual_post_robust_residual = jnp.nan_to_num(actual_post_robust_residual, nan=0.0, posinf=0.0, neginf=0.0)
+            actual_post_residual_std = jnp.nan_to_num(actual_post_residual_std, nan=0.0, posinf=0.0, neginf=0.0)
+            actual_post_violation = actual_post_is_finite & (actual_post_robust_residual < -1e-6)
 
         diagnostics = {
             "linearization_is_finite": linearization_is_finite.astype(action_raw.dtype),
@@ -542,11 +626,22 @@ def make_get_safe_action(
             "post_constraint_delta": post_constraint_delta,
             "post_constraint_violation": post_constraint_violation.astype(action_raw.dtype),
             "post_constraint_satisfied": post_constraint_satisfied.astype(action_raw.dtype),
+            "actual_post_residual_mean": actual_post_residual_mean,
+            "actual_post_robust_residual": actual_post_robust_residual,
+            "actual_post_residual_std": actual_post_residual_std,
+            "actual_post_is_finite": actual_post_is_finite.astype(action_raw.dtype),
+            "actual_post_violation": actual_post_violation.astype(action_raw.dtype),
             "constraint_grad_norm": jnp.sqrt(aTa),
             "qp_gain": gain,
             "correction_norm": correction_norm,
             "correction_scale": correction_scale,
             "correction_clipped": ((max_delta > 0.0) & (correction_scale < 0.999)).astype(action_raw.dtype),
+            "required_correction_norm": required_correction_norm,
+            "required_exceeds_cap": ((max_delta > 0.0) & (required_correction_norm > max_delta + 1e-6)).astype(action_raw.dtype),
+            "soft_residual_fraction": jnp.where(delta > 1e-8, post_constraint_delta / (delta + 1e-8), 0.0),
+            "capped_active": ((delta > 0.0) & (max_delta > 0.0) & (correction_scale < 0.999)).astype(action_raw.dtype),
+            "post_clip_action_delta_norm": post_clip_action_delta_norm,
+            "post_clip_changed_action": (post_clip_action_delta_norm > 1e-6).astype(action_raw.dtype),
             "raw_action_norm": jnp.linalg.norm(action_raw),
             "processed_action_norm": jnp.linalg.norm(u_processed),
         }
