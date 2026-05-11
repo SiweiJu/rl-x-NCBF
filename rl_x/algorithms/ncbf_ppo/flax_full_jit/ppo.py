@@ -342,7 +342,7 @@ class PPO:
         for key, value in diagnostics.items():
             if key in ("raw_action_norm", "processed_action_norm"):
                 neutral_value = raw_norm
-            elif key in ("correction_scale", "post_constraint_satisfied"):
+            elif key in ("correction_scale", "linearization_is_finite", "post_constraint_satisfied"):
                 neutral_value = jnp.ones_like(value)
             else:
                 neutral_value = jnp.zeros_like(value)
