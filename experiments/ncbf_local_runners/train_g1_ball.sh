@@ -8,7 +8,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-g1_2penalty}"
+RUN_NAME="${RUN_NAME:-max_delta_u_0}"
 
 cd "${EXPERIMENTS_DIR}"
 
@@ -26,6 +26,7 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.ncbf.eta_cbf=0.5 \
     --algorithm.ncbf_buffer.neg_buffer_size=1 \
     --algorithm.ncbf.coef_decay_lambda=0.95 \
+    --algorithm.ncbf.max_delta_u=0.0 \
     --algorithm.next_step_predictor.lr=1e-5 \
     --algorithm.next_step_predictor.aux_loss_coef=1 \
     --algorithm.use_decoder_output_for_policy=True \

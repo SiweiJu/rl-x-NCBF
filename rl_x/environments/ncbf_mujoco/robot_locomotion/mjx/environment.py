@@ -89,6 +89,7 @@ class LocomotionEnv:
             floor.hfield = "empty_hfield"
 
         if self.use_ball_plate:
+            self._make_ball_plate_contact_geoms_mjx_compatible(xml_handle)
             self._add_ball_plate_to_xml(xml_handle)
         
         if self.should_render and self.add_goal_arrow:
@@ -432,6 +433,13 @@ class LocomotionEnv:
                     geom.remove()
 
 
+    def _make_ball_plate_contact_geoms_mjx_compatible(self, xml_handle):
+        for geom_name in self.ball_plate_config.get("mjx_capsule_contact_geom_names", []):
+            geom = xml_handle.find("geom", geom_name)
+            if geom is not None:
+                geom.type = "capsule"
+
+
     def _add_ball_plate_to_xml(self, xml_handle):
         plate_size = np.array(self.ball_plate_config["plate_size"], dtype=float)
         plate_pos = np.array(self.ball_plate_config["plate_home_pos"], dtype=float)
@@ -487,9 +495,13 @@ class LocomotionEnv:
             dtype=float,
         )
         forearm_contact_radius = float(self.ball_plate_config["forearm_contact_radius"])
-        add_forearm_plate_guards = not (
-            self.use_capsule_hand and self.ball_plate_config.get("capsule_hand_disable_forearm_guards", True)
-        )
+        add_torso_plate_guard = self.ball_plate_config.get("add_torso_plate_guard", True)
+        add_upper_arm_plate_guards = self.ball_plate_config.get("add_upper_arm_plate_guards", True)
+        add_forearm_plate_guards = self.ball_plate_config.get("add_forearm_plate_guards")
+        if add_forearm_plate_guards is None:
+            add_forearm_plate_guards = not (
+                self.use_capsule_hand and self.ball_plate_config.get("capsule_hand_disable_forearm_guards", True)
+            )
         add_support_fist_geoms = self.ball_plate_config.get("add_support_fist_geoms", True)
         if add_support_fist_geoms:
             if self.use_capsule_hand:
@@ -501,9 +513,11 @@ class LocomotionEnv:
             else:
                 left_fist.add("geom", name="left_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{left_fist_pos[0] - fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]} {left_fist_pos[0] + fist_half_length} {left_fist_pos[1]} {left_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
                 right_fist.add("geom", name="right_plate_support_fist", type="capsule", size=str(fist_radius), fromto=f"{right_fist_pos[0] - fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]} {right_fist_pos[0] + fist_half_length} {right_fist_pos[1]} {right_fist_pos[2]}", rgba="0.68 0.68 0.68 1", contype="0", conaffinity="0")
-        torso_contact_body.add("geom", name="torso_plate_guard", type="sphere", pos=" ".join(map(str, torso_contact_pos)), size=str(torso_contact_size), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
-        left_upper_arm_contact_body.add("geom", name="left_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, left_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
-        right_upper_arm_contact_body.add("geom", name="right_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, right_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        if add_torso_plate_guard:
+            torso_contact_body.add("geom", name="torso_plate_guard", type="sphere", pos=" ".join(map(str, torso_contact_pos)), size=str(torso_contact_size), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+        if add_upper_arm_plate_guards:
+            left_upper_arm_contact_body.add("geom", name="left_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, left_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
+            right_upper_arm_contact_body.add("geom", name="right_upper_arm_plate_guard", type="capsule", size=str(upper_arm_contact_radius), fromto=" ".join(map(str, right_upper_arm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
         if add_forearm_plate_guards:
             left_forearm_contact_body.add("geom", name="left_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, left_forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
             right_forearm_contact_body.add("geom", name="right_forearm_plate_guard", type="capsule", size=str(forearm_contact_radius), fromto=" ".join(map(str, right_forearm_contact_fromto)), rgba="0.2 0.2 0.2 0", contype="0", conaffinity="0")
@@ -553,7 +567,7 @@ class LocomotionEnv:
             support_contact_geom_names = ["left_plate_support_fist", "right_plate_support_fist"] if add_support_fist_geoms else []
         for support_geom_name in support_contact_geom_names:
             xml_handle.contact.add("pair", geom1=support_geom_name, geom2="ball_plate_geom", condim=plate_support_pair_dim, friction=plate_support_pair_friction, **robot_contact_pair_kwargs)
-        for torso_geom_name in ["torso_plate_guard", *self.ball_plate_config.get("torso_contact_geom_names", [])]:
+        for torso_geom_name in self._get_ball_plate_torso_contact_geom_names():
             xml_handle.contact.add("pair", geom1=torso_geom_name, geom2="ball_plate_geom", condim=plate_torso_pair_dim, friction=plate_torso_pair_friction, **robot_contact_pair_kwargs)
         for arm_geom_name in self._get_ball_plate_arm_contact_geom_names():
             xml_handle.contact.add("pair", geom1=arm_geom_name, geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction, **robot_contact_pair_kwargs)
@@ -576,18 +590,32 @@ class LocomotionEnv:
 
     def _get_ball_plate_robot_contact_geom_names(self):
         return [
-            "torso_plate_guard",
-            *self.ball_plate_config.get("torso_contact_geom_names", []),
+            *self._get_ball_plate_torso_contact_geom_names(),
             *self._get_ball_plate_arm_contact_geom_names(),
         ]
 
 
+    def _get_ball_plate_torso_contact_geom_names(self):
+        torso_contact_geom_names = []
+        if self.ball_plate_config.get("add_torso_plate_guard", True):
+            torso_contact_geom_names.append("torso_plate_guard")
+        torso_contact_geom_names.extend(self.ball_plate_config.get("torso_contact_geom_names", []))
+        return torso_contact_geom_names
+
+
     def _get_ball_plate_arm_contact_geom_names(self):
-        arm_contact_geom_names = [
-            "left_upper_arm_plate_guard",
-            "right_upper_arm_plate_guard",
-        ]
-        if not (self.use_capsule_hand and self.ball_plate_config.get("capsule_hand_disable_forearm_guards", True)):
+        arm_contact_geom_names = []
+        if self.ball_plate_config.get("add_upper_arm_plate_guards", True):
+            arm_contact_geom_names.extend([
+                "left_upper_arm_plate_guard",
+                "right_upper_arm_plate_guard",
+            ])
+        add_forearm_plate_guards = self.ball_plate_config.get("add_forearm_plate_guards")
+        if add_forearm_plate_guards is None:
+            add_forearm_plate_guards = not (
+                self.use_capsule_hand and self.ball_plate_config.get("capsule_hand_disable_forearm_guards", True)
+            )
+        if add_forearm_plate_guards:
             arm_contact_geom_names.extend([
                 "left_forearm_plate_guard",
                 "right_forearm_plate_guard",

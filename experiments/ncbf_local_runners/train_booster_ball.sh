@@ -8,7 +8,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-booster_2penalty}"
+RUN_NAME="${RUN_NAME:-booster_refactored_no_safety}"
 
 cd "${EXPERIMENTS_DIR}"
 
@@ -19,7 +19,7 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.learning_rate=4e-4 \
     --algorithm.nr_steps=128 \
     --algorithm.nr_epochs=4 \
-    --algorithm.ncbf.use_safety_layer=True \
+    --algorithm.ncbf.use_safety_layer=False \
     --algorithm.ncbf.H=25 \
     --algorithm.ncbf.action_clipping=False \
     --algorithm.ncbf.gamma_c=0.1 \
