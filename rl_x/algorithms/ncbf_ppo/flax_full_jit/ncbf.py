@@ -79,6 +79,7 @@ def get_ncbf(config, env):
     lambda_s = config.algorithm.ncbf.lambda_slack
     max_delta_u = config.algorithm.ncbf.max_delta_u
     safety_layer_projection = getattr(config.algorithm.ncbf, "safety_layer_projection", "soft_slack")
+    safety_layer_min_grad_norm = getattr(config.algorithm.ncbf, "safety_layer_min_grad_norm", 0.0)
     post_check_actual_residual = bool(getattr(config.algorithm.ncbf, "post_check_actual_residual", False))
     output_distribution = getattr(config.algorithm.ncbf, "output_distribution", "deterministic")
     min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
@@ -119,6 +120,9 @@ def get_ncbf(config, env):
             "correction_clipped": zero,
             "required_correction_norm": zero,
             "required_exceeds_cap": zero,
+            "low_grad_linearization": zero,
+            "low_grad_active": zero,
+            "low_grad_guarded": zero,
             "soft_residual_fraction": zero,
             "capped_active": zero,
             "post_clip_action_delta_norm": zero,
@@ -157,6 +161,7 @@ def get_ncbf(config, env):
             max_delta_u=max_delta_u,
             action_clipping=ncbf_clipping,
             safety_layer_projection=safety_layer_projection,
+            safety_layer_min_grad_norm=safety_layer_min_grad_norm,
             post_check_actual_residual=post_check_actual_residual,
         )
 
@@ -335,6 +340,7 @@ def make_get_safe_action(
     max_delta_u: float,
     action_clipping: bool,
     safety_layer_projection: str,
+    safety_layer_min_grad_norm: float,
     post_check_actual_residual: bool,
 ):
     """
@@ -524,10 +530,16 @@ def make_get_safe_action(
         residual_std = jnp.nan_to_num(residual_std, nan=0.0, posinf=0.0, neginf=0.0)
 
         aTa = jnp.dot(a, a) + 1e-12
+        grad_norm = jnp.sqrt(aTa)
         aTu = jnp.dot(a, action_raw)
 
         # Constraint violation amount for a^T u >= c.
         delta = jnp.where(linearization_is_finite, jnp.maximum(0.0, c - aTu), 0.0)
+        min_grad_norm = jnp.asarray(safety_layer_min_grad_norm, dtype=action_raw.dtype)
+        low_grad_linearization = linearization_is_finite & (grad_norm < min_grad_norm)
+        low_grad_active = low_grad_linearization & (delta > 0.0)
+        low_grad_guarded = (min_grad_norm > 0.0) & low_grad_active
+        correction_delta = jnp.where(low_grad_guarded, jnp.asarray(0.0, dtype=action_raw.dtype), delta)
 
         # Closed-form one-constraint correction. The default keeps the existing
         # soft-slack behavior; hard_projection is a debug mode that projects
@@ -536,12 +548,12 @@ def make_get_safe_action(
             jnp.asarray(lambda_s, dtype=action_raw.dtype),
             jnp.asarray(1e-12, dtype=action_raw.dtype),
         )
-        soft_gain = delta / (aTa + (1.0 / lambda_s_safe))
-        hard_gain = delta / aTa
+        soft_gain = correction_delta / (aTa + (1.0 / lambda_s_safe))
+        hard_gain = correction_delta / aTa
         gain = hard_gain if safety_layer_projection == "hard_projection" else soft_gain
         correction = gain * a
 
-        required_correction_norm = delta / (jnp.sqrt(aTa) + 1e-12)
+        required_correction_norm = delta / (grad_norm + 1e-12)
 
         # Optional correction clipping. Note: if max_delta_u clips the correction,
         # the final action may no longer exactly satisfy the affine constraint.
@@ -631,13 +643,16 @@ def make_get_safe_action(
             "actual_post_residual_std": actual_post_residual_std,
             "actual_post_is_finite": actual_post_is_finite.astype(action_raw.dtype),
             "actual_post_violation": actual_post_violation.astype(action_raw.dtype),
-            "constraint_grad_norm": jnp.sqrt(aTa),
+            "constraint_grad_norm": grad_norm,
             "qp_gain": gain,
             "correction_norm": correction_norm,
             "correction_scale": correction_scale,
             "correction_clipped": ((max_delta > 0.0) & (correction_scale < 0.999)).astype(action_raw.dtype),
             "required_correction_norm": required_correction_norm,
             "required_exceeds_cap": ((max_delta > 0.0) & (required_correction_norm > max_delta + 1e-6)).astype(action_raw.dtype),
+            "low_grad_linearization": low_grad_linearization.astype(action_raw.dtype),
+            "low_grad_active": low_grad_active.astype(action_raw.dtype),
+            "low_grad_guarded": low_grad_guarded.astype(action_raw.dtype),
             "soft_residual_fraction": jnp.where(delta > 1e-8, post_constraint_delta / (delta + 1e-8), 0.0),
             "capped_active": ((delta > 0.0) & (max_delta > 0.0) & (correction_scale < 0.999)).astype(action_raw.dtype),
             "post_clip_action_delta_norm": post_clip_action_delta_norm,

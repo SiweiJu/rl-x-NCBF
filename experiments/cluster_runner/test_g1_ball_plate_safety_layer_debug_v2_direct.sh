@@ -136,6 +136,7 @@ echo "Safety-layer projection: ${NCBF_SAFETY_LAYER_PROJECTION}"
 echo "Action clipping: ${NCBF_ACTION_CLIPPING}"
 echo "Lambda slack: ${NCBF_LAMBDA_SLACK}"
 echo "Max delta u: ${NCBF_MAX_DELTA_U}"
+echo "Safety-layer min grad norm: ${NCBF_SAFETY_LAYER_MIN_GRAD_NORM:-0.0}"
 echo "Post-check actual residual: ${NCBF_POST_CHECK_ACTUAL_RESIDUAL}"
 echo "Gamma c: ${NCBF_GAMMA_C}"
 echo "Eta CBF: ${NCBF_ETA_CBF}"
@@ -160,6 +161,7 @@ python experiment.py \
     --algorithm.ncbf.lambda_slack="${NCBF_LAMBDA_SLACK}" \
     --algorithm.ncbf.max_delta_u="${NCBF_MAX_DELTA_U}" \
     --algorithm.ncbf.safety_layer_projection="${NCBF_SAFETY_LAYER_PROJECTION}" \
+    --algorithm.ncbf.safety_layer_min_grad_norm="${NCBF_SAFETY_LAYER_MIN_GRAD_NORM:-0.0}" \
     --algorithm.ncbf.post_check_actual_residual="${NCBF_POST_CHECK_ACTUAL_RESIDUAL}" \
     --algorithm.ncbf.H="${NCBF_H:-25}" \
     --algorithm.ncbf_buffer.neg_buffer_size="${NCBF_NEG_BUFFER_SIZE:-1}" \
