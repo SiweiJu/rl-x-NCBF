@@ -33,6 +33,7 @@ NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
 NCBF_LAMBDA_SLACK="${NCBF_LAMBDA_SLACK:-1000.0}"
 NCBF_MAX_DELTA_U="${NCBF_MAX_DELTA_U:-0.5}"
 NCBF_SAFETY_LAYER_PROJECTION="${NCBF_SAFETY_LAYER_PROJECTION:-soft_slack}"
+NCBF_SAFETY_LAYER_MIN_GRAD_NORM="${NCBF_SAFETY_LAYER_MIN_GRAD_NORM:-0.0}"
 NCBF_POST_CHECK_ACTUAL_RESIDUAL="${NCBF_POST_CHECK_ACTUAL_RESIDUAL:-False}"
 NCBF_NEG_BUFFER_SIZE="${NCBF_NEG_BUFFER_SIZE:-1}"
 NCBF_NEG_SAMPLING_RATIO="${NCBF_NEG_SAMPLING_RATIO:-0.2}"
@@ -114,6 +115,7 @@ fi
     --algorithm.ncbf.lambda_slack="${NCBF_LAMBDA_SLACK}" \
     --algorithm.ncbf.max_delta_u="${NCBF_MAX_DELTA_U}" \
     --algorithm.ncbf.safety_layer_projection="${NCBF_SAFETY_LAYER_PROJECTION}" \
+    --algorithm.ncbf.safety_layer_min_grad_norm="${NCBF_SAFETY_LAYER_MIN_GRAD_NORM}" \
     --algorithm.ncbf.post_check_actual_residual="${NCBF_POST_CHECK_ACTUAL_RESIDUAL}" \
     --algorithm.ncbf.H="${NCBF_H}" \
     --algorithm.ncbf_buffer.neg_buffer_size="${NCBF_NEG_BUFFER_SIZE}" \

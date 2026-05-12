@@ -163,6 +163,7 @@ class PPO:
         self.ncbf_lambda_slack = getattr(config.algorithm.ncbf, "lambda_slack", 1000.0)
         self.ncbf_max_delta_u = getattr(config.algorithm.ncbf, "max_delta_u", 0.0)
         self.ncbf_safety_layer_projection = getattr(config.algorithm.ncbf, "safety_layer_projection", "soft_slack")
+        self.ncbf_safety_layer_min_grad_norm = getattr(config.algorithm.ncbf, "safety_layer_min_grad_norm", 0.0)
         self.ncbf_post_check_actual_residual = bool(getattr(config.algorithm.ncbf, "post_check_actual_residual", False))
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
@@ -835,6 +836,10 @@ class PPO:
                         self.ncbf_safety_layer_projection == "hard_projection",
                         dtype=jnp.float32,
                     )
+                    ncbf_metrics["ncbf/safety_layer_min_grad_norm_config"] = jnp.asarray(
+                        self.ncbf_safety_layer_min_grad_norm,
+                        dtype=jnp.float32,
+                    )
                     ncbf_metrics["ncbf/safety_layer_actual_post_check_enabled"] = jnp.asarray(
                         self.ncbf_post_check_actual_residual,
                         dtype=jnp.float32,
@@ -860,7 +865,22 @@ class PPO:
                     )
                     ncbf_metrics["ncbf/safety_layer_required_correction_norm_max"] = jnp.max(required_correction_norm)
                     ncbf_metrics["ncbf/safety_layer_required_exceeds_cap_rate"] = jnp.mean(safety_diagnostics["required_exceeds_cap"])
+                    ncbf_metrics["ncbf/safety_layer_active_required_exceeds_cap_rate"] = (
+                        jnp.sum(safety_diagnostics["required_exceeds_cap"] * active_mask) / (n_active + 1e-8)
+                    )
                     ncbf_metrics["ncbf/safety_layer_capped_active_rate"] = jnp.mean(safety_diagnostics["capped_active"])
+                    ncbf_metrics["ncbf/safety_layer_low_grad_linearization_rate"] = jnp.mean(
+                        safety_diagnostics["low_grad_linearization"]
+                    )
+                    ncbf_metrics["ncbf/safety_layer_low_grad_active_rate"] = jnp.mean(
+                        safety_diagnostics["low_grad_active"]
+                    )
+                    ncbf_metrics["ncbf/safety_layer_active_low_grad_fraction"] = (
+                        jnp.sum(safety_diagnostics["low_grad_active"] * active_mask) / (n_active + 1e-8)
+                    )
+                    ncbf_metrics["ncbf/safety_layer_low_grad_guarded_rate"] = jnp.mean(
+                        safety_diagnostics["low_grad_guarded"]
+                    )
                     ncbf_metrics["ncbf/safety_layer_soft_residual_fraction"] = jnp.mean(safety_diagnostics["soft_residual_fraction"])
                     ncbf_metrics["ncbf/safety_layer_soft_residual_fraction_active_mean"] = (
                         jnp.sum(safety_diagnostics["soft_residual_fraction"] * active_mask) / (n_active + 1e-8)
@@ -1588,6 +1608,7 @@ class PPO:
             "action_clipping",
             "max_delta_u",
             "safety_layer_projection",
+            "safety_layer_min_grad_norm",
             "post_check_actual_residual",
             "safety_layer_std_coeff_start",
             "safety_layer_std_coeff_final",
