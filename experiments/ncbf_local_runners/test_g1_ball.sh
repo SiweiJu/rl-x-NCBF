@@ -6,7 +6,7 @@ EXPERIMENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
-MODEL_PATH="/home/siwei/Downloads/latest(63).model"
+MODEL_PATH="/home/siwei/Downloads/latest(68).model"
 EXTRA_ARGS=("$@")
 if [[ "$#" -gt 0 && "$1" != --* ]]; then
     MODEL_PATH="$1"
@@ -23,8 +23,8 @@ SEED="${SEED:-41}"
 NR_TEST_EPISODES="${NR_TEST_EPISODES:-10}"
 EPISODE_SECONDS="${EPISODE_SECONDS:-20}"
 RENDER="${RENDER:-True}"
-ACTION_NOISE_SAMPLING_RATIO="${ACTION_NOISE_SAMPLING_RATIO:-0.0}"
-USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-False}"
+ACTION_NOISE_SAMPLING_RATIO="${ACTION_NOISE_SAMPLING_RATIO:-0.2}"
+USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
 TERMINATE_ON_BALL_PLATE_DROP="${TERMINATE_ON_BALL_PLATE_DROP:-False}"
 STAND_AFTER_DROP="${STAND_AFTER_DROP:-True}"
 POST_DROP_TRUNCATION_SECONDS="${POST_DROP_TRUNCATION_SECONDS:-3.0}"
@@ -45,15 +45,10 @@ cd "${EXPERIMENTS_DIR}"
 
 conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --algorithm.name="ncbf_ppo.flax" \
-    --algorithm.nr_steps=128 \
-    --algorithm.minibatch_size=64 \
-    --algorithm.total_timesteps=2000011264 \
     --algorithm.ncbf.use_safety_layer="${USE_SAFETY_LAYER}" \
     --algorithm.ncbf.gamma_c="${NCBF_GAMMA_C}" \
     --algorithm.ncbf.eta_cbf=0.5 \
-    --algorithm.ncbf.lambda_slack=10 \
-    --algorithm.ncbf.H=25 \
-    --algorithm.ncbf.action_clipping=False \
+    --algorithm.ncbf.lambda_slack=1000 \
     "${NCBF_OUTPUT_DISTRIBUTION_ARGS[@]}" \
     --algorithm.next_step_predictor.history_encoder_hidden_size=64 \
     --algorithm.rollout_save_name="${ROLLOUT_SAVE_NAME}" \

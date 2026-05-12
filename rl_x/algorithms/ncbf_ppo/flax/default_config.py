@@ -63,6 +63,10 @@ def get_config(algorithm_name):
     config.ncbf.eta_cbf = 1.0 # class Kappa function parameter for CBF constraint
     config.ncbf.gamma_c = 1.0     # safety threshold (>=1 is safe, <=0 is unsafe)
     config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
+    config.ncbf.max_delta_u = 0.0  # max L2 action correction from the safety layer; <=0 disables
+    config.ncbf.safety_layer_projection = "soft_slack"  # soft_slack or hard_projection
+    config.ncbf.safety_layer_min_grad_norm = 0.0  # <=0 disables low-gradient guard
+    config.ncbf.post_check_actual_residual = False  # expensive safety-layer debug diagnostic
     config.ncbf.safety_layer_std_coeff_start = -2.0
     config.ncbf.safety_layer_std_coeff_final = 1.0
 

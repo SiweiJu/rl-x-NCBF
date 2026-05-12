@@ -8,12 +8,12 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-booster_refactored_no_safety}"
+RUN_NAME="${RUN_NAME:-booster_same_algo_terminate_on_ball_dropping}"
 
 cd "${EXPERIMENTS_DIR}"
 
 conda run --no-capture-output -n ncbf-mjx python experiment.py \
-    --algorithm.name="ncbf_ppo.flax_full_jit" \
+    --algorithm.name="ncbf_ppo.flax_full_jit_booster" \
     --algorithm.total_timesteps=200000000 \
     --algorithm.minibatch_size=4096 \
     --algorithm.learning_rate=4e-4 \
@@ -26,6 +26,7 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.ncbf.eta_cbf=0.5 \
     --algorithm.ncbf_buffer.neg_buffer_size=1 \
     --algorithm.ncbf.coef_decay_lambda=0.95 \
+    --algorithm.ncbf.output_distribution="logistic_normal" \
     --algorithm.next_step_predictor.lr=1e-5 \
     --algorithm.next_step_predictor.aux_loss_coef=1 \
     --algorithm.use_decoder_output_for_policy=True \
@@ -40,12 +41,12 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --environment.episode_length_in_seconds=20 \
     --environment.env_curriculum_level_success_episode_return=20 \
     --environment.terrain.type="plane" \
-    --environment.termination.terminate_on_ball_plate_drop=False \
+    --environment.termination.terminate_on_ball_plate_drop=True \
     --environment.ball_plate.enabled=True \
     --environment.reward.type="G1ball" \
     --environment.ball_plate.stand_after_drop=True \
     --environment.ball_plate.post_drop_truncation_seconds=3.0 \
-    --environment.ball_plate.include_observations=False \
+    --environment.ball_plate.include_observations=True \
     --environment.reward.ball_plate_drop_penalty_coeff=10.0 \
     --environment.reward.below_height_penalty_coeff=50.0 \
     --runner.mode="train" \

@@ -177,8 +177,8 @@ class PPO:
         self.rollout_save_name = config.algorithm.rollout_save_name
 
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
-        if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
-            raise ValueError("NCBF batch size must divide evenly into nr_steps * nr_envs.")
+        # if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
+        #     raise ValueError("NCBF batch size must divide evenly into nr_steps * nr_envs.")
 
         rlx_logger.info(f"Using device: {jax.default_backend()}")
         
@@ -1304,6 +1304,20 @@ class PPO:
         checkpoint_dir = f"{checkpoint_dir}/tmp"
 
         loaded_algorithm_config = json.load(open(f"{checkpoint_dir}/config_algorithm.json", "r"))
+        decoder_output_param = "algorithm.use_decoder_output_for_policy"
+        if (
+            decoder_output_param in explicitly_set_algorithm_params
+            and "use_decoder_output_for_policy" in loaded_algorithm_config
+        ):
+            checkpoint_uses_decoder_output = bool(loaded_algorithm_config["use_decoder_output_for_policy"])
+            requested_uses_decoder_output = bool(config.algorithm.use_decoder_output_for_policy)
+            if requested_uses_decoder_output != checkpoint_uses_decoder_output:
+                raise ValueError(
+                    "Loaded policy architecture mismatch: checkpoint was saved with "
+                    f"use_decoder_output_for_policy={checkpoint_uses_decoder_output}, "
+                    f"but CLI requested {requested_uses_decoder_output}. "
+                    "Use the checkpoint value when loading this model."
+                )
         for key, value in loaded_algorithm_config.items():
 
             if isinstance(value, dict):
