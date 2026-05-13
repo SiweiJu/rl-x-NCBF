@@ -664,6 +664,7 @@ class LocomotionEnv(gym.Env):
 
     def _get_ball_plate_arm_contact_geom_names(self):
         arm_contact_geom_names = []
+        support_contact_geom_names = set(self._get_ball_plate_support_contact_geom_names())
         if self.ball_plate_config.get("add_upper_arm_plate_guards", True):
             arm_contact_geom_names.extend([
                 "left_upper_arm_plate_guard",
@@ -680,7 +681,7 @@ class LocomotionEnv(gym.Env):
                 "right_forearm_plate_guard",
             ])
         arm_contact_geom_names.extend(self.ball_plate_config.get("arm_contact_geom_names", []))
-        return arm_contact_geom_names
+        return [geom_name for geom_name in arm_contact_geom_names if geom_name not in support_contact_geom_names]
 
 
     def _get_ball_plate_pair_ids(self, other_geom_names):
