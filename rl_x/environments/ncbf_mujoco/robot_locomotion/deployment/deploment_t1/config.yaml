@@ -56,7 +56,7 @@ common:
 
 policy:
   model_type: auto
-  model_path: policies/latest.model
+  model_path: policies/vxnpfyel.model
   observation_size: 81
   action_size: 23
   action_scale: 1.0
@@ -106,5 +106,4 @@ command:
 safety:
   max_abs_joint_velocity: 25.0
   max_target_delta_per_step: 0.35
-  clip_target_to_joint_limits: true
-
+  clip_target_to_joint_limits: false

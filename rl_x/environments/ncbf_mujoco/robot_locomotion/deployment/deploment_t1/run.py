@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,9 @@ class T1DeploymentController:
 
         self.cfg = cfg
         self.policy = load_policy(cfg["policy"], config_dir=config_dir)
+        self.node.get_logger().info(
+            f"Policy model loaded: {cfg['policy'].get('model_path', '<unknown>')}"
+        )
         self.observation_builder = T1ObservationBuilder(cfg)
 
         common_cfg = cfg["common"]
@@ -57,11 +61,19 @@ class T1DeploymentController:
         self.max_abs_joint_velocity = float(safety_cfg.get("max_abs_joint_velocity", 25.0))
         self.max_target_delta_per_step = float(safety_cfg.get("max_target_delta_per_step", 0.35))
         self.clip_target_to_joint_limits = bool(safety_cfg.get("clip_target_to_joint_limits", True))
+        self.hold_policy_until_command = bool(safety_cfg.get("hold_policy_until_command", False))
+        self.policy_latency_warn_ms = float(safety_cfg.get("policy_latency_warn_ms", 40.0))
+        self.debug_policy_steps = int(safety_cfg.get("debug_policy_steps", 20))
 
         self.agent_started = False
         self.command = CommandState(height=self.standing_height)
         self.previous_action = np.zeros(self.robot.num_dof, dtype=np.float32)
         self.last_target = self.default_qpos.copy()
+        self.policy_command_active = False
+        self._debug_policy_steps_remaining = 0
+        self._debug_policy_step_index = 0
+        self._last_policy_latency_warn_time = 0.0
+        self._warmup_policy()
         self.timer = self.node.create_timer(1.0 / float(robot_cfg.get("control_frequency", 50.0)), self.step)
 
         self.node.get_logger().info(
@@ -78,7 +90,13 @@ class T1DeploymentController:
         if np.max(np.abs(self.robot.q_vel)) > self.max_abs_joint_velocity:
             self.node.get_logger().error("Joint velocity safety limit exceeded; stopping policy.")
             self.agent_started = False
+            self.policy_command_active = False
             return
+
+        if not self.policy_command_active:
+            if self.hold_policy_until_command and not self._has_motion_command():
+                return
+            self._activate_policy_commands()
 
         self.command.gait_phase = np.fmod(
             self.command.gait_phase + (1.0 / float(self.cfg["robot"].get("control_frequency", 50.0))) * self.command.gait_frequency,
@@ -97,7 +115,10 @@ class T1DeploymentController:
             projected_gravity=projected_gravity,
             command=self.command,
         )
+        policy_start = time.perf_counter()
         policy_output = self.policy.act(observation)
+        policy_elapsed_ms = (time.perf_counter() - policy_start) * 1000.0
+        self._warn_if_policy_slow(policy_elapsed_ms)
         self.previous_action[:] = policy_output.action
 
         target = self.default_qpos + self.action_scale * policy_output.action
@@ -107,6 +128,11 @@ class T1DeploymentController:
             delta = np.clip(target - self.last_target, -self.max_target_delta_per_step, self.max_target_delta_per_step)
             target = self.last_target + delta
         self.last_target[:] = target
+
+        if self._debug_policy_steps_remaining > 0:
+            self._debug_policy_step_index += 1
+            self._debug_policy_steps_remaining -= 1
+            self._log_policy_step_debug(policy_output, target, observation, policy_elapsed_ms)
 
         self.robot.send_cmd(q_target_pos=target, target_kp=self.kp, target_kd=self.kd)
 
@@ -164,7 +190,9 @@ class T1DeploymentController:
         self.agent_started = True
         self.command = CommandState(height=self.standing_height)
         self.previous_action[:] = 0.0
-        self.last_target[:] = np.asarray(self.robot.q_pos, dtype=np.float32)
+        current_q = np.asarray(self.robot.q_pos, dtype=np.float32)
+        self.last_target[:] = current_q
+        self.policy_command_active = False
         projected_gravity = self._quat_to_projected_gravity(
             np.asarray(self.robot.quat, dtype=np.float32),
             np.array([0.0, 0.0, -1.0], dtype=np.float32),
@@ -178,12 +206,26 @@ class T1DeploymentController:
             command=self.command,
         )
         self.policy.reset(initial_observation)
+        self._log_policy_start_debug(projected_gravity, initial_observation)
+        if self.hold_policy_until_command and not self._has_motion_command():
+            self.node.get_logger().info("Policy armed; holding bridge command until nonzero motion command.")
+        else:
+            self._activate_policy_commands()
         self.node.get_logger().info("Policy started.")
+
+    def _activate_policy_commands(self) -> None:
+        current_q = np.asarray(self.robot.q_pos, dtype=np.float32)
+        self.last_target[:] = current_q
+        self.policy_command_active = True
+        self._debug_policy_steps_remaining = max(0, self.debug_policy_steps)
+        self._debug_policy_step_index = 0
+        self.node.get_logger().info("Policy command output enabled.")
 
     def _stop_policy(self) -> None:
         self.agent_started = False
         self.command = CommandState(height=self.standing_height)
         self.previous_action[:] = 0.0
+        self.policy_command_active = False
         self.node.get_logger().info("Policy stopped.")
 
     def _update_gait_frequency(self) -> None:
@@ -191,6 +233,87 @@ class T1DeploymentController:
         commands[np.abs(commands) < self.zero_clip_threshold] = 0.0
         self.command.vx, self.command.vy, self.command.yaw = [float(x) for x in commands]
         self.command.gait_frequency = self.moving_gait_frequency if np.linalg.norm(commands) > 0.0 else 0.0
+
+    def _has_motion_command(self) -> bool:
+        return bool(np.linalg.norm([self.command.vx, self.command.vy, self.command.yaw]) > 0.0)
+
+    def _warmup_policy(self) -> None:
+        observation = self.observation_builder.build(
+            dof_pos=self.default_qpos,
+            dof_vel=np.zeros(self.robot.num_dof, dtype=np.float32),
+            previous_action=np.zeros(self.robot.num_dof, dtype=np.float32),
+            base_ang_vel=np.zeros(3, dtype=np.float32),
+            projected_gravity=np.array([0.0, 0.0, -1.0], dtype=np.float32),
+            command=CommandState(height=self.standing_height),
+        )
+        start = time.perf_counter()
+        self.policy.reset(observation)
+        output = self.policy.act(observation)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        self.policy.reset(observation)
+        self.previous_action[:] = 0.0
+        self.node.get_logger().info(
+            "Policy warmup complete: "
+            f"{elapsed_ms:.1f} ms, max|action|={float(np.max(np.abs(output.action))):.3f}."
+        )
+
+    def _warn_if_policy_slow(self, elapsed_ms: float) -> None:
+        if elapsed_ms <= self.policy_latency_warn_ms:
+            return
+        now = time.monotonic()
+        if now - self._last_policy_latency_warn_time < 1.0:
+            return
+        self._last_policy_latency_warn_time = now
+        self.node.get_logger().warn(
+            f"Policy inference latency {elapsed_ms:.1f} ms exceeds "
+            f"{self.policy_latency_warn_ms:.1f} ms."
+        )
+
+    def _log_policy_start_debug(self, projected_gravity: np.ndarray, observation: np.ndarray) -> None:
+        q_pos = np.asarray(self.robot.q_pos, dtype=np.float32)
+        q_vel = np.asarray(self.robot.q_vel, dtype=np.float32)
+        q_error = q_pos - self.default_qpos
+        abs_error = np.abs(q_error)
+        largest = np.argsort(abs_error)[-5:][::-1]
+        joint_error_summary = ", ".join(
+            f"{idx}:{q_error[idx]:+.3f}" for idx in largest if abs_error[idx] > 0.01
+        ) or "all < 0.01"
+        self.node.get_logger().info(
+            "Policy start debug: "
+            f"max|q-default|={float(abs_error.max()):.3f}, "
+            f"max|dq|={float(np.max(np.abs(q_vel))):.3f}, "
+            f"largest q errors [{joint_error_summary}]"
+        )
+        self.node.get_logger().info(
+            "Policy start debug: "
+            f"quat={np.array2string(np.asarray(self.robot.quat, dtype=np.float32), precision=3)}, "
+            f"projected_gravity={np.array2string(projected_gravity, precision=3)}, "
+            f"command_obs={np.array2string(observation[72:78], precision=3)}"
+        )
+
+    def _log_policy_step_debug(self, policy_output, target: np.ndarray, observation: np.ndarray, policy_elapsed_ms: float) -> None:
+        action = np.asarray(policy_output.action, dtype=np.float32)
+        raw_action = np.asarray(policy_output.raw_action, dtype=np.float32)
+        target = np.asarray(target, dtype=np.float32)
+        largest = np.argsort(np.abs(action))[-5:][::-1]
+        action_summary = ", ".join(
+            f"{idx}:{action[idx]:+.3f}" for idx in largest if abs(action[idx]) > 0.01
+        ) or "all < 0.01"
+        target_error = target - self.default_qpos
+        self.node.get_logger().info(
+            f"Policy step debug #{self._debug_policy_step_index}: "
+            f"latency={policy_elapsed_ms:.1f} ms, "
+            f"command_obs={np.array2string(observation[72:78], precision=3)}, "
+            f"raw max|a|={float(np.max(np.abs(raw_action))):.3f}, "
+            f"action min/max/mean={float(action.min()):+.3f}/"
+            f"{float(action.max()):+.3f}/{float(action.mean()):+.3f}, "
+            f"largest actions [{action_summary}]"
+        )
+        self.node.get_logger().info(
+            f"Policy step debug #{self._debug_policy_step_index}: "
+            f"max|target-default|={float(np.max(np.abs(target_error))):.3f}, "
+            f"target={np.array2string(target, precision=3)}"
+        )
 
     @staticmethod
     def _quat_to_projected_gravity(quat_wxyz: np.ndarray, vector: np.ndarray) -> np.ndarray:

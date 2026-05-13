@@ -7,8 +7,12 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Sequence
 
+import flax.linen as nn
+import jax.numpy as jnp
 import numpy as np
+from flax.linen.initializers import constant, orthogonal
 
 
 def _add_repo_root_to_path() -> None:
@@ -71,10 +75,192 @@ class TorchScriptPolicy(DeploymentPolicy):
         return PolicyOutput(action=action_np, raw_action=raw_action)
 
 
+class _ActionSpaceType:
+    CONTINUOUS = "continuous"
+
+
+class _ObservationSpaceType:
+    FLAT_VALUES = "flat_values"
+
+
+def _get_policy(config, env):
+    import jax
+    import jax.numpy as jnp
+
+    action_space_type = env.general_properties.action_space_type
+    observation_space_type = env.general_properties.observation_space_type
+    policy_observation_indices = getattr(
+        env,
+        "policy_observation_indices",
+        jnp.arange(env.single_observation_space.shape[0]),
+    )
+    use_history_latent = getattr(config.algorithm, "use_history_latent_for_policy", False)
+    use_decoder_output = getattr(config.algorithm, "use_decoder_output_for_policy", False)
+
+    if (
+        action_space_type == _ActionSpaceType.CONTINUOUS
+        and observation_space_type == _ObservationSpaceType.FLAT_VALUES
+    ):
+        return (
+            _Policy(
+                env.single_action_space.shape,
+                config.algorithm.std_dev,
+                policy_observation_indices,
+                config.algorithm.hidden_layers,
+                use_history_latent,
+                use_decoder_output,
+            ),
+            _get_processed_action_function(
+                config.algorithm.action_clipping_and_rescaling,
+                getattr(config.algorithm, "action_clip", 0.0),
+                jnp.array(env.single_action_space.low),
+                jnp.array(env.single_action_space.high),
+            ),
+        )
+    raise ValueError("Unsupported action/observation space for deployment policy.")
+
+
+def _get_processed_action_function(action_clipping_and_rescaling, action_clip, env_as_low, env_as_high):
+    import jax
+    import jax.numpy as jnp
+
+    if action_clipping_and_rescaling:
+        def get_clipped_and_scaled_action(action, env_as_low=env_as_low, env_as_high=env_as_high):
+            clipped_action = jnp.clip(action, -1, 1)
+            return env_as_low + (0.5 * (clipped_action + 1.0) * (env_as_high - env_as_low))
+
+        return jax.jit(get_clipped_and_scaled_action)
+    if action_clip > 0.0:
+        return jax.jit(lambda x: jnp.clip(x, -action_clip, action_clip))
+    return jax.jit(lambda x: x)
+
+
+def _get_history_encoder(config, env):
+    encoder_type = getattr(config.algorithm.next_step_predictor, "history_encoder_type", "FFNN")
+    hidden_size = getattr(config.algorithm.next_step_predictor, "history_encoder_hidden_size", 128)
+    observation_indices = getattr(env, "policy_observation_indices")
+    history_length = getattr(env, "nr_history_steps", 10)
+
+    if encoder_type == "FFNN":
+        return _FFNNEncoder(
+            hidden_size=hidden_size,
+            observation_indices=observation_indices,
+            history_length=history_length,
+        )
+    if encoder_type == "GRU":
+        return _GRUEncoder(hidden_size=hidden_size)
+    raise ValueError(f"Unknown encoder type: {encoder_type}")
+
+
+def _get_decoder(config, env):
+    history_encoder_hidden_size = getattr(
+        config.algorithm.next_step_predictor,
+        "history_encoder_hidden_size",
+        128,
+    )
+    prediction_indices = getattr(env, "next_state_indices", None)
+    decoder_output_dim = prediction_indices.shape[0]
+    return _FeedforwardDecoder(hidden_size=history_encoder_hidden_size, output_dim=decoder_output_dim)
+
+
+def _dense_init_scale(scale):
+    return orthogonal(scale)
+
+
+def _zero_init():
+    return constant(0.0)
+
+
+def _logstd_init(std_dev):
+    return constant(jnp.log(std_dev))
+
+
+class _Policy(nn.Module):
+    as_shape: Sequence[int]
+    std_dev: float
+    policy_observation_indices: Sequence[int]
+    hidden_layers: Sequence[int]
+    use_history_latent: bool = False
+    use_decoder_output: bool = False
+
+    @nn.compact
+    def __call__(self, x, history_latent=None, decoder_output=None):
+        x = x[..., self.policy_observation_indices]
+        if self.use_history_latent:
+            if history_latent is None:
+                raise ValueError("Policy was configured to use history latent, but none was passed.")
+            x = jnp.concatenate([x, history_latent], axis=-1)
+        if self.use_decoder_output:
+            if decoder_output is None:
+                raise ValueError("Policy was configured to use decoder output, but none was passed.")
+            x = jnp.concatenate([x, decoder_output], axis=-1)
+        policy_mean = x
+        for hidden_units in self.hidden_layers:
+            policy_mean = nn.Dense(
+                hidden_units,
+                kernel_init=_dense_init_scale(np.sqrt(2)),
+                bias_init=_zero_init(),
+            )(policy_mean)
+            policy_mean = nn.elu(policy_mean)
+        policy_mean = nn.Dense(
+            np.prod(self.as_shape).item(),
+            kernel_init=_dense_init_scale(0.01),
+            bias_init=_zero_init(),
+        )(policy_mean)
+        policy_logstd = self.param(
+            "policy_logstd",
+            _logstd_init(self.std_dev),
+            (1, np.prod(self.as_shape).item()),
+        )
+        return policy_mean, policy_logstd
+
+
+class _FFNNEncoder(nn.Module):
+    hidden_size: int
+    observation_indices: Sequence[int]
+    history_length: int
+
+    @nn.compact
+    def __call__(self, x):
+        x = x[..., self.observation_indices]
+        x = x.reshape(*x.shape[:-2], self.history_length * len(self.observation_indices))
+        x = nn.Dense(512, kernel_init=_dense_init_scale(np.sqrt(2)), bias_init=_zero_init())(x)
+        x = nn.elu(x)
+        x = nn.Dense(256, kernel_init=_dense_init_scale(np.sqrt(2)), bias_init=_zero_init())(x)
+        x = nn.elu(x)
+        return nn.Dense(self.hidden_size, kernel_init=_dense_init_scale(np.sqrt(2)), bias_init=_zero_init())(x)
+
+
+class _GRUEncoder(nn.Module):
+    hidden_size: int
+
+    @nn.compact
+    def __call__(self, x):
+        gru = nn.RNN(
+            nn.GRUCell(features=self.hidden_size),
+            return_carry=True,
+            time_major=False,
+        )
+        carry, _ = gru(x)
+        return carry
+
+
+class _FeedforwardDecoder(nn.Module):
+    hidden_size: int
+    output_dim: int
+
+    @nn.compact
+    def __call__(self, z, x, a):
+        decoder_input = jnp.concatenate([z, a, x], axis=-1)
+        x = nn.Dense(128, kernel_init=_dense_init_scale(np.sqrt(2)), bias_init=_zero_init())(decoder_input)
+        x = nn.elu(x)
+        x = nn.Dense(256, kernel_init=_dense_init_scale(np.sqrt(2)), bias_init=_zero_init())(x)
+        x = nn.elu(x)
+        return nn.Dense(self.output_dim, kernel_init=_dense_init_scale(np.sqrt(2)), bias_init=_zero_init())(x)
+
+
 class RlxFlaxPolicy(DeploymentPolicy):
     def __init__(self, cfg: dict, config_dir: str | Path | None = None):
-        _add_repo_root_to_path()
-
         import jax
         import jax.numpy as jnp
         import optax
@@ -82,12 +268,6 @@ class RlxFlaxPolicy(DeploymentPolicy):
         from flax.training import orbax_utils
         from flax.training.train_state import TrainState
         from ml_collections import ConfigDict
-
-        from rl_x.algorithms.ncbf_ppo.flax.decoder import get_decoder
-        from rl_x.algorithms.ncbf_ppo.flax.history_encoder import get_history_encoder
-        from rl_x.algorithms.ncbf_ppo.flax.policy import get_policy
-        from rl_x.environments.action_space_type import ActionSpaceType
-        from rl_x.environments.observation_space_type import ObservationSpaceType
 
         self.jax = jax
         self.jnp = jnp
@@ -104,6 +284,7 @@ class RlxFlaxPolicy(DeploymentPolicy):
         self.decoder_output_size = int(cfg.get("decoder_output_size", 49))
         self.clip_actions = float(cfg.get("clip_actions", 0.0))
         self.use_jit = bool(cfg.get("jit", True))
+        self.policy_observation_indices = self._policy_observation_indices(cfg)
 
         action_low = cfg.get("action_low", [-np.inf] * self.action_size)
         action_high = cfg.get("action_high", [np.inf] * self.action_size)
@@ -123,14 +304,15 @@ class RlxFlaxPolicy(DeploymentPolicy):
             action_high=action_high,
             history_length=self.history_length,
             decoder_output_size=self.decoder_output_size,
-            action_space_type=ActionSpaceType.CONTINUOUS,
-            observation_space_type=ObservationSpaceType.FLAT_VALUES,
+            policy_observation_indices=self.policy_observation_indices,
+            action_space_type=_ActionSpaceType.CONTINUOUS,
+            observation_space_type=_ObservationSpaceType.FLAT_VALUES,
             jnp=jnp,
         )
 
-        self.policy, self.get_processed_action = get_policy(self.config, env)
-        self.encoder = get_history_encoder(self.config, env)
-        self.decoder = get_decoder(self.config, env)
+        self.policy, self.get_processed_action = _get_policy(self.config, env)
+        self.encoder = _get_history_encoder(self.config, env)
+        self.decoder = _get_decoder(self.config, env)
 
         self.use_history_latent = bool(getattr(self.config.algorithm, "use_history_latent_for_policy", False))
         self.use_decoder_output = bool(getattr(self.config.algorithm, "use_decoder_output_for_policy", False))
@@ -242,24 +424,62 @@ class RlxFlaxPolicy(DeploymentPolicy):
                 raise FileNotFoundError(f"Missing config_algorithm.json inside {self.model_path}.")
             return json.loads(config_path.read_text(encoding="utf-8"))
 
+    def _policy_observation_indices(self, cfg: dict) -> np.ndarray:
+        configured_indices = cfg.get("policy_observation_indices")
+        if configured_indices is not None:
+            indices = np.asarray(configured_indices, dtype=np.int32).reshape(-1)
+        elif self.observation_size == 81:
+            indices = np.concatenate([
+                np.arange(75, dtype=np.int32),
+                np.arange(78, 81, dtype=np.int32),
+            ])
+        else:
+            indices = np.arange(self.observation_size, dtype=np.int32)
+
+        if indices.size == 0:
+            raise ValueError("policy.policy_observation_indices must not be empty.")
+        if np.any(indices < 0) or np.any(indices >= self.observation_size):
+            raise ValueError(
+                "policy.policy_observation_indices contains values outside "
+                f"the observation size {self.observation_size}."
+            )
+        return indices
+
     def _restore_checkpoint(self) -> None:
         target = {
-            "policy": self.policy_state,
-            "encoder": self.encoder_state,
-            "decoder": self.decoder_state,
+            "policy": {"params": self.policy_state.params},
         }
+        if self.use_history_latent or self.use_decoder_output:
+            target["encoder"] = {"params": self.encoder_state.params}
+        if self.use_decoder_output:
+            target["decoder"] = {"params": self.decoder_state.params}
+
         with tempfile.TemporaryDirectory(prefix="rlx_t1_model_") as tmp_dir:
             shutil.unpack_archive(str(self.model_path), tmp_dir, "zip")
-            try:
-                restore_args = self.orbax_utils.restore_args_from_target(target)
-                restored = self.checkpointer.restore(tmp_dir, item=target, restore_args=restore_args)
-                self._assign_restored_objects(restored)
-                return
-            except Exception:
-                pass
+            sharding_file = Path(tmp_dir) / "_sharding"
+            if sharding_file.exists():
+                sharding_file.unlink()
+            restore_args = self.orbax_utils.restore_args_from_target(target)
+            restored = self.checkpointer.restore(
+                tmp_dir,
+                item=target,
+                restore_args=restore_args,
+                partial_restore=True,
+            )
+            self._assign_restored_model_params(restored)
 
-            restored = self.checkpointer.restore(tmp_dir)
-            self._assign_restored_objects(restored)
+    def _assign_restored_model_params(self, restored) -> None:
+        if "policy" not in restored or "params" not in restored["policy"]:
+            raise ValueError("Restored checkpoint does not contain policy params.")
+        self.policy_state = self.policy_state.replace(params=restored["policy"]["params"])
+        if self.use_history_latent or self.use_decoder_output:
+            if "encoder" not in restored or "params" not in restored["encoder"]:
+                raise ValueError("Policy needs history encoder params, but checkpoint has no encoder entry.")
+            self.encoder_state = self.encoder_state.replace(params=restored["encoder"]["params"])
+        if self.use_decoder_output:
+            if "decoder" not in restored or "params" not in restored["decoder"]:
+                raise ValueError("Policy needs decoder params, but checkpoint has no decoder entry.")
+            self.decoder_state = self.decoder_state.replace(params=restored["decoder"]["params"])
 
     def _assign_restored_objects(self, restored) -> None:
         if "policy" not in restored:
@@ -312,6 +532,7 @@ class _DeploymentEnvSpec:
         action_high: np.ndarray,
         history_length: int,
         decoder_output_size: int,
+        policy_observation_indices: np.ndarray,
         action_space_type,
         observation_space_type,
         jnp,
@@ -322,7 +543,7 @@ class _DeploymentEnvSpec:
             high=action_high,
         )
         self.single_observation_space = SimpleNamespace(shape=(observation_size,))
-        self.policy_observation_indices = jnp.arange(observation_size)
+        self.policy_observation_indices = jnp.asarray(policy_observation_indices, dtype=jnp.int32)
         self.critic_observation_indices = jnp.arange(observation_size)
         self.next_state_indices = jnp.arange(decoder_output_size)
         self.nr_history_steps = history_length
