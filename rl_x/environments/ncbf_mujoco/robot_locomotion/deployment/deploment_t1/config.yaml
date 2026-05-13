@@ -1,0 +1,110 @@
+robot:
+  robot_type: T1
+  num_dof: 23
+  control_frequency: 50.0
+  interpolation_order: 0.8
+
+common:
+  default_qpos: [
+    0.0, 0.0,
+    0.2, -1.35, 0.0, -0.5,
+    0.2, 1.35, 0.0, 0.5,
+    0.0,
+    -0.2, 0.0, 0.0, 0.4, -0.25, 0.0,
+    -0.2, 0.0, 0.0, 0.4, -0.25, 0.0
+  ]
+  stiffness: [
+    20.0, 20.0,
+    20.0, 20.0, 20.0, 20.0,
+    20.0, 20.0, 20.0, 20.0,
+    200.0,
+    200.0, 200.0, 200.0, 200.0, 50.0, 50.0,
+    200.0, 200.0, 200.0, 200.0, 50.0, 50.0
+  ]
+  damping: [
+    0.2, 0.2,
+    0.5, 0.5, 0.5, 0.5,
+    0.5, 0.5, 0.5, 0.5,
+    5.0,
+    5.0, 5.0, 5.0, 5.0, 3.0, 3.0,
+    5.0, 5.0, 5.0, 5.0, 3.0, 3.0
+  ]
+  torque_limit: [
+    7.0, 7.0,
+    10.0, 10.0, 10.0, 10.0,
+    10.0, 10.0, 10.0, 10.0,
+    30.0,
+    60.0, 25.0, 30.0, 60.0, 24.0, 15.0,
+    60.0, 25.0, 30.0, 60.0, 24.0, 15.0
+  ]
+  joint_limit_low: [
+    -1.57, -0.35,
+    -3.31, -1.74, -2.27, -2.27,
+    -3.31, -1.57, -2.27, -2.27,
+    -1.57,
+    -1.8, -0.2, -1.0, 0.0, -0.87, -0.44,
+    -1.8, -1.57, -1.0, 0.0, -0.87, -0.44
+  ]
+  joint_limit_high: [
+    1.57, 1.22,
+    1.22, 1.57, 2.27, 2.27,
+    1.22, 1.74, 2.27, 2.27,
+    1.57,
+    1.57, 1.57, 1.0, 2.34, 0.35, 0.44,
+    1.57, 0.2, 1.0, 2.34, 0.35, 0.44
+  ]
+
+policy:
+  model_type: auto
+  model_path: policies/latest.model
+  observation_size: 81
+  action_size: 23
+  action_scale: 1.0
+  clip_actions: 1.0
+  history_length: 10
+  decoder_output_size: 49
+  jit: true
+  action_low: [
+    -1.57, -0.35,
+    -3.51, -0.39, -2.27, -1.77,
+    -3.51, -2.92, -2.27, -2.77,
+    -1.57,
+    -1.60, -0.20, -1.00, -0.40, -0.62, -0.44,
+    -1.60, -1.57, -1.00, -0.40, -0.62, -0.44
+  ]
+  action_high: [
+    1.57, 1.22,
+    1.02, 2.92, 2.27, 2.77,
+    1.02, 0.39, 2.27, 1.77,
+    1.57,
+    1.77, 1.57, 1.00, 1.94, 0.60, 0.44,
+    1.77, 0.20, 1.00, 1.94, 0.60, 0.44
+  ]
+
+observation:
+  joint_position_scale: 1.0
+  joint_velocity_scale: 0.1
+  previous_action_scale: 1.0
+  angular_velocity_scale: 1.0
+  gravity_scale: 1.0
+  clip_observation: 10.0
+  ball_plate:
+    enabled: false
+    observation_size: 12
+    include_drop_signal: false
+
+command:
+  max_x_velocity: 0.8
+  max_y_velocity: 0.5
+  max_yaw_velocity: 1.0
+  velocity_step: 0.1
+  yaw_step: 0.1
+  zero_clip_threshold: 0.02
+  standing_height: 0.67
+  gait_frequency: 1.25
+
+safety:
+  max_abs_joint_velocity: 25.0
+  max_target_delta_per_step: 0.35
+  clip_target_to_joint_limits: true
+
