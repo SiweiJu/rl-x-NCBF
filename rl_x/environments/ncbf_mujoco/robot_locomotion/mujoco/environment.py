@@ -506,6 +506,8 @@ class LocomotionEnv(gym.Env):
         plate_torso_pair_dim = str(self.ball_plate_config.get("plate_torso_contact_dim", 3))
         plate_arm_pair_friction = " ".join(map(str, self.ball_plate_config.get("plate_arm_contact_friction", [1.0, 1.0, 0.005, 0.0001, 0.0001])))
         plate_arm_pair_dim = str(self.ball_plate_config.get("plate_arm_contact_dim", 3))
+        arm_self_pair_friction = " ".join(map(str, self.ball_plate_config.get("arm_self_contact_friction", self.ball_plate_config.get("plate_arm_contact_friction", [1.0, 1.0, 0.005, 0.0001, 0.0001]))))
+        arm_self_pair_dim = str(self.ball_plate_config.get("arm_self_contact_dim", self.ball_plate_config.get("plate_arm_contact_dim", 3)))
         robot_contact_pair_kwargs = {}
         if "plate_robot_contact_solref" in self.ball_plate_config:
             robot_contact_pair_kwargs["solref"] = " ".join(map(str, self.ball_plate_config["plate_robot_contact_solref"]))
@@ -513,6 +515,13 @@ class LocomotionEnv(gym.Env):
             robot_contact_pair_kwargs["solimp"] = " ".join(map(str, self.ball_plate_config["plate_robot_contact_solimp"]))
         if "plate_robot_contact_margin" in self.ball_plate_config:
             robot_contact_pair_kwargs["margin"] = str(self.ball_plate_config["plate_robot_contact_margin"])
+        arm_self_contact_pair_kwargs = {}
+        if "arm_self_contact_solref" in self.ball_plate_config:
+            arm_self_contact_pair_kwargs["solref"] = " ".join(map(str, self.ball_plate_config["arm_self_contact_solref"]))
+        if "arm_self_contact_solimp" in self.ball_plate_config:
+            arm_self_contact_pair_kwargs["solimp"] = " ".join(map(str, self.ball_plate_config["arm_self_contact_solimp"]))
+        if "arm_self_contact_margin" in self.ball_plate_config:
+            arm_self_contact_pair_kwargs["margin"] = str(self.ball_plate_config["arm_self_contact_margin"])
 
         left_fist = xml_handle.find("body", self.ball_plate_config["left_fist_body"])
         right_fist = xml_handle.find("body", self.ball_plate_config["right_fist_body"])
@@ -619,6 +628,8 @@ class LocomotionEnv(gym.Env):
             xml_handle.contact.add("pair", geom1=torso_geom_name, geom2="ball_plate_geom", condim=plate_torso_pair_dim, friction=plate_torso_pair_friction, **robot_contact_pair_kwargs)
         for arm_geom_name in self._get_ball_plate_arm_contact_geom_names():
             xml_handle.contact.add("pair", geom1=arm_geom_name, geom2="ball_plate_geom", condim=plate_arm_pair_dim, friction=plate_arm_pair_friction, **robot_contact_pair_kwargs)
+        for geom1_name, geom2_name in self.ball_plate_config.get("arm_self_contact_geom_pairs", []):
+            xml_handle.contact.add("pair", geom1=geom1_name, geom2=geom2_name, condim=arm_self_pair_dim, friction=arm_self_pair_friction, **arm_self_contact_pair_kwargs)
         xml_handle.contact.add("pair", geom1="floor", geom2="ball_plate_geom")
         xml_handle.contact.add("pair", geom1="floor", geom2="plate_ball_geom")
 

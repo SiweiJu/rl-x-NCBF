@@ -204,6 +204,7 @@ class DefaultG1Reward(DefaultReward):
         nr_collisions = np.maximum(nr_collisions - self.env.internal_state["nr_collisions_in_nominal"], 0)
         collision_reward = critical_coeff * self.collision_coeff * -nr_collisions
 
+        print("nominal height: ", self.env.internal_state["robot_imu_height_over_ground"])
         height_difference_squared = (self.env.internal_state["robot_imu_height_over_ground"] - self.env.internal_state["robot_nominal_imu_height_over_ground"]) ** 2
         base_height_reward = critical_coeff * self.base_height_coeff * -height_difference_squared
         below_height_threshold = (

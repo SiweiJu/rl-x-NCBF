@@ -1576,7 +1576,7 @@ class PPO:
             while not done:
                 latent_z = self.encoder.apply(self.encoder_state.params, history_stack[None, ...])
 
-                print("goal velocities: ", self.env.envs[0].internal_state["goal_velocities"])
+                # print("goal velocities: ", self.env.envs[0].internal_state["goal_velocities"])
                 processed_action, raw_action, constraint_active, delta_u = get_action(self.policy_state, state, previous_state, last_action, latent_z)
                 # params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])
                 h_input = jnp.concatenate([state[:, self.env.envs[0].ncbf_observation_indices], processed_action, latent_z], axis=-1)

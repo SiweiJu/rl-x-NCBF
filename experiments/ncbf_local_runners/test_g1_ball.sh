@@ -23,7 +23,7 @@ SEED="${SEED:-41}"
 NR_TEST_EPISODES="${NR_TEST_EPISODES:-10}"
 EPISODE_SECONDS="${EPISODE_SECONDS:-20}"
 RENDER="${RENDER:-True}"
-ACTION_NOISE_SAMPLING_RATIO="${ACTION_NOISE_SAMPLING_RATIO:-0.2}"
+ACTION_NOISE_SAMPLING_RATIO="${ACTION_NOISE_SAMPLING_RATIO:-0.0}"
 USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
 TERMINATE_ON_BALL_PLATE_DROP="${TERMINATE_ON_BALL_PLATE_DROP:-False}"
 STAND_AFTER_DROP="${STAND_AFTER_DROP:-True}"
@@ -59,6 +59,7 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.seed="${SEED}" \
     --environment.render="${RENDER}" \
     --environment.command.type="random" \
+    --environment.reward.type="G1ball" \
     --environment.add_goal_arrow=True \
     --environment.episode_length_in_seconds="${EPISODE_SECONDS}" \
     --environment.env_curriculum_level_success_episode_return=40 \
