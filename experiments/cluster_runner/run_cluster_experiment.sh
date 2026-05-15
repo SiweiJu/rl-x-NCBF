@@ -64,6 +64,30 @@ fi
 if [[ -n "${MUJOCO_MODEL_DR_TYPE:-}" ]]; then
     extra_args+=(--environment.domain_randomization.mujoco_model.type="${MUJOCO_MODEL_DR_TYPE}")
 fi
+if [[ -n "${DOMAIN_RANDOMIZATION_SAMPLING_TYPE:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.sampling_type="${DOMAIN_RANDOMIZATION_SAMPLING_TYPE}")
+fi
+if [[ -n "${DOMAIN_RANDOMIZATION_SAMPLING_PROBABILITY:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.sampling_probability="${DOMAIN_RANDOMIZATION_SAMPLING_PROBABILITY}")
+fi
+if [[ -n "${ACTION_DELAY_TYPE:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.action_delay.type="${ACTION_DELAY_TYPE}")
+fi
+if [[ -n "${SEEN_ROBOT_DR_TYPE:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.seen_robot.type="${SEEN_ROBOT_DR_TYPE}")
+fi
+if [[ -n "${UNSEEN_ROBOT_DR_TYPE:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.unseen_robot.type="${UNSEEN_ROBOT_DR_TYPE}")
+fi
+if [[ -n "${OBSERVATION_NOISE_TYPE:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.observation_noise.type="${OBSERVATION_NOISE_TYPE}")
+fi
+if [[ -n "${PERTURBATION_TYPE:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.perturbation.type="${PERTURBATION_TYPE}")
+fi
+if [[ -n "${JOINT_DROPOUT_TYPE:-}" ]]; then
+    extra_args+=(--environment.domain_randomization.joint_dropout.type="${JOINT_DROPOUT_TYPE}")
+fi
 if [[ -n "${EVALUATION_AND_SAVE_FREQUENCY:-}" ]]; then
     extra_args+=(--algorithm.evaluation_and_save_frequency="${EVALUATION_AND_SAVE_FREQUENCY}")
 fi

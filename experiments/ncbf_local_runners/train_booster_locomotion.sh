@@ -8,12 +8,13 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-42}"
 NR_ENVS="${NR_ENVS:-4096}"
-RUN_NAME="${RUN_NAME:-booster_locomotion_old_config_boostertrain_motor}"
+RUN_NAME="${RUN_NAME:-booster_locomotion_substep_pd_low_dr}"
+CONDA_ENV="${CONDA_ENV:-loco_mjx}"
 
 cd "${EXPERIMENTS_DIR}"
 
-conda run --no-capture-output -n ncbf-mjx python experiment.py \
-    --algorithm.name="ncbf_ppo.flax_full_jit" \
+conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
+    --algorithm.name="ncbf_ppo.flax_full_jit_booster" \
     --algorithm.total_timesteps=1000000000 \
     --algorithm.minibatch_size=32768 \
     --algorithm.learning_rate=4e-4 \
@@ -32,13 +33,18 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.next_step_predictor.lr=1e-5 \
     --algorithm.next_step_predictor.aux_loss_coef=1 \
     --algorithm.adaptive_lr=True \
-    --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
+    --environment.name="ncbf_mujoco.robot_locomotion.mjx_booster" \
     --environment.seed="${SEED}" \
     --environment.nr_envs="${NR_ENVS}" \
     --environment.train_robot="booster_t1" \
-    --environment.use_booster_defaults=False \
-    --environment.reward.type="defaultG1" \
+    --environment.use_booster_defaults=True \
+    --environment.domain_randomization.action_delay.type="none" \
+    --environment.domain_randomization.seen_robot.type="none" \
+    --environment.domain_randomization.unseen_robot.type="none" \
     --environment.domain_randomization.mujoco_model.type="none" \
+    --environment.domain_randomization.observation_noise.type="none" \
+    --environment.domain_randomization.perturbation.type="none" \
+    --environment.domain_randomization.joint_dropout.type="none" \
     --environment.ncbf_use_policy_observations=True \
     --environment.episode_length_in_seconds=20 \
     --environment.env_curriculum_level_success_episode_return=30 \
@@ -50,5 +56,5 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --runner.save_model=True \
     --runner.wandb_entity="catherineju-rwth-aachen-university" \
     --runner.project_name="202605_ncbf" \
-    --runner.exp_name="booster_locomotion_safety_shield" \
+    --runner.exp_name="locomotion_safety_shield" \
     --runner.run_name="${RUN_NAME}"

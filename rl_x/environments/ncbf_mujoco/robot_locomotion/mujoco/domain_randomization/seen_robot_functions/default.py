@@ -60,7 +60,7 @@ class DefaultDRSeenRobotFunction:
         self.default_joint_frictionlosses = self.env.initial_mj_model.dof_frictionloss[6:]
         self.default_p_gain = -self.env.initial_mj_model.actuator_biasprm[0, 1]
         self.default_d_gain = -self.env.initial_mj_model.actuator_biasprm[0, 2]
-        self.default_scaling_factor = env.robot_config["scaling_factor"]
+        self.default_scaling_factor = np.asarray(env.robot_config["scaling_factor"], dtype=np.float32)
 
 
     def init(self):
