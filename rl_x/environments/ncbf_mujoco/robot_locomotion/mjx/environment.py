@@ -1046,18 +1046,10 @@ class LocomotionEnv:
         chosen_action = action[:self.nr_actuator_joints]
         delayed_action = self.domain_randomization_action_delay_function.delay_action(chosen_action, state.internal_state, action_delay_key)
 
-        if self.use_torque_pd_control:
-            def physics_step(data, _):
-                control = self.control_function.process_action(delayed_action, state.internal_state, data)
-                return mjx.step(state.mjx_model, data.replace(ctrl=control)), None
-        else:
-            control = self.control_function.process_action(delayed_action, state.internal_state, state.data)
-
-            def physics_step(data, _):
-                return mjx.step(state.mjx_model, data.replace(ctrl=control)), None
+        control = self.control_function.process_action(delayed_action, state.internal_state, state.data)
 
         data, _ = jax.lax.scan(
-            f=physics_step,
+            f=lambda data, _: (mjx.step(state.mjx_model, data.replace(ctrl=control)), None),
             init=state.data,
             xs=(),
             length=self.nr_substeps

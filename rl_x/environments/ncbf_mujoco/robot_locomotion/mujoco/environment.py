@@ -1022,14 +1022,10 @@ class LocomotionEnv(gym.Env):
         chosen_action = action[:self.nr_actuator_joints]
         delayed_action = self.domain_randomization_action_delay_function.delay_action(chosen_action)
 
-        if self.use_torque_pd_control:
-            for _ in range(self.nr_substeps):
-                self.internal_state["data"].ctrl = self.control_function.process_action(delayed_action)
-                mujoco.mj_step(self.internal_state["mj_model"], self.internal_state["data"])
-        else:
-            control = self.control_function.process_action(delayed_action)
-            self.internal_state["data"].ctrl = control
-            mujoco.mj_step(self.internal_state["mj_model"], self.internal_state["data"], self.nr_substeps)
+        control = self.control_function.process_action(delayed_action)
+
+        self.internal_state["data"].ctrl = control
+        mujoco.mj_step(self.internal_state["mj_model"], self.internal_state["data"], self.nr_substeps)
 
         # for debugging
         # copy data to avoid modifying it in-place
