@@ -68,6 +68,8 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.use_booster_defaults=False \
     --environment.reward.type="defaultG1" \
     --environment.domain_randomization.mujoco_model.type="none" \
+    --environment.domain_randomization.seen_robot.type="booster" \
+    --environment.domain_randomization.unseen_robot.type="none" \
     --runner.mode="test" \
     --runner.nr_test_episodes="${NR_TEST_EPISODES}" \
     --runner.load_model="${MODEL_PATH}" \

@@ -40,6 +40,8 @@ conda run --no-capture-output -n "${CONDA_ENV}" python experiment.py \
     --environment.use_booster_defaults=False \
     --environment.reward.type="defaultG1" \
     --environment.domain_randomization.mujoco_model.type="none" \
+    --environment.domain_randomization.seen_robot.type="booster" \
+    --environment.domain_randomization.unseen_robot.type="none" \
     --environment.ncbf_use_policy_observations=True \
     --environment.episode_length_in_seconds=20 \
     --environment.env_curriculum_level_success_episode_return=30 \

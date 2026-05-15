@@ -58,8 +58,18 @@ class DefaultDRSeenRobotFunction:
         self.default_joint_armatures = self.env.initial_mj_model.dof_armature[6:]
         self.default_joint_stiffnesses = self.env.initial_mj_model.jnt_stiffness[1:]
         self.default_joint_frictionlosses = self.env.initial_mj_model.dof_frictionloss[6:]
-        self.default_p_gain = -self.env.initial_mj_model.actuator_biasprm[0, 1]
-        self.default_d_gain = -self.env.initial_mj_model.actuator_biasprm[0, 2]
+        self.default_p_gain = (
+            env.actuator_joint_stiffness.copy()
+            if env.use_torque_pd_control
+            else -self.env.initial_mj_model.actuator_biasprm[0, 1]
+        )
+        self.default_d_gain = (
+            env.actuator_joint_damping.copy()
+            if env.use_torque_pd_control
+            else -self.env.initial_mj_model.actuator_biasprm[0, 2]
+        )
+        self.default_velocity_limits = env.actuator_joint_velocity_limits.copy()
+        self.default_knee_point_velocities = env.actuator_joint_knee_point_velocities.copy()
         self.default_scaling_factor = np.asarray(env.robot_config["scaling_factor"], dtype=np.float32)
 
 
@@ -77,8 +87,20 @@ class DefaultDRSeenRobotFunction:
         self.env.internal_state["seen_p_gain"] = self.default_p_gain
         self.env.internal_state["seen_d_gain"] = self.default_d_gain
         self.env.internal_state["scaling_factor"] = self.default_scaling_factor
-        self.env.internal_state["partial_actuator_gainprm_without_dropout"] = self.env.initial_mj_model.actuator_gainprm[:, 0]
-        self.env.internal_state["partial_actuator_biasprm_without_dropout"] = self.env.initial_mj_model.actuator_biasprm[:, 1:3]
+        if self.env.use_torque_pd_control:
+            self.env.internal_state["actuator_p_gains"] = self.default_p_gain.copy()
+            self.env.internal_state["actuator_d_gains"] = self.default_d_gain.copy()
+            self.env.internal_state["actuator_effort_limits"] = self.default_torque_limits.copy()
+            self.env.internal_state["actuator_velocity_limits"] = self.default_velocity_limits.copy()
+            self.env.internal_state["actuator_knee_point_velocities"] = self.default_knee_point_velocities.copy()
+            self.env.internal_state["partial_actuator_gainprm_without_dropout"] = self.default_p_gain.copy()
+            self.env.internal_state["partial_actuator_biasprm_without_dropout"] = np.stack(
+                [-self.default_p_gain, -self.default_d_gain],
+                axis=1,
+            )
+        else:
+            self.env.internal_state["partial_actuator_gainprm_without_dropout"] = self.env.initial_mj_model.actuator_gainprm[:, 0]
+            self.env.internal_state["partial_actuator_biasprm_without_dropout"] = self.env.initial_mj_model.actuator_biasprm[:, 1:3]
         self.env.internal_state["robot_nominal_qpos_height_over_ground"] = self.env.initial_qpos[2]
         self.env.internal_state["robot_nominal_imu_height_over_ground"] = self.env.initial_imu_height
 
@@ -106,6 +128,8 @@ class DefaultDRSeenRobotFunction:
         joint_positions = self.default_jnt_pos * body_size_factor
         default_torque_limits = self.default_torque_limits * avg_body_size_factor
         default_actuator_joint_max_velocities = self.default_actuator_joint_max_velocities * avg_body_size_factor
+        default_velocity_limits = self.default_velocity_limits * avg_body_size_factor
+        default_knee_point_velocities = self.default_knee_point_velocities * avg_body_size_factor
         default_joint_dampings = self.default_joint_dampings * avg_body_size_factor
         default_joint_armatures = self.default_joint_armatures * avg_body_size_factor
         default_joint_stiffnesses = self.default_joint_stiffnesses * avg_body_size_factor
@@ -221,9 +245,10 @@ class DefaultDRSeenRobotFunction:
         self.env.internal_state["mj_model"].dof_armature[6:] = dof_armature
         self.env.internal_state["mj_model"].jnt_stiffness[1:] = jnt_stiffness
         self.env.internal_state["mj_model"].dof_frictionloss[6:] = dof_frictionloss
-        self.env.internal_state["mj_model"].actuator_gainprm[:, 0] = p_gain
-        self.env.internal_state["mj_model"].actuator_biasprm[:, 1] = -p_gain
-        self.env.internal_state["mj_model"].actuator_biasprm[:, 2] = -d_gain
+        if not self.env.use_torque_pd_control:
+            self.env.internal_state["mj_model"].actuator_gainprm[:, 0] = p_gain
+            self.env.internal_state["mj_model"].actuator_biasprm[:, 1] = -p_gain
+            self.env.internal_state["mj_model"].actuator_biasprm[:, 2] = -d_gain
 
         self.env.internal_state["seen_body_masses"] = seen_body_masses
         self.env.internal_state["seen_body_inertias"] = seen_inertias
@@ -239,8 +264,17 @@ class DefaultDRSeenRobotFunction:
         self.env.internal_state["seen_p_gain"] = seen_p_gain
         self.env.internal_state["seen_d_gain"] = seen_d_gain
         self.env.internal_state["scaling_factor"] = scaling_factor
-        self.env.internal_state["partial_actuator_gainprm_without_dropout"] = self.env.internal_state["mj_model"].actuator_gainprm[:, 0]
-        self.env.internal_state["partial_actuator_biasprm_without_dropout"] = self.env.internal_state["mj_model"].actuator_biasprm[:, 1:3]
+        if self.env.use_torque_pd_control:
+            self.env.internal_state["actuator_p_gains"] = p_gain
+            self.env.internal_state["actuator_d_gains"] = d_gain
+            self.env.internal_state["actuator_effort_limits"] = torque_limits
+            self.env.internal_state["actuator_velocity_limits"] = default_velocity_limits
+            self.env.internal_state["actuator_knee_point_velocities"] = default_knee_point_velocities
+            self.env.internal_state["partial_actuator_gainprm_without_dropout"] = p_gain
+            self.env.internal_state["partial_actuator_biasprm_without_dropout"] = np.stack([-p_gain, -d_gain], axis=1)
+        else:
+            self.env.internal_state["partial_actuator_gainprm_without_dropout"] = self.env.internal_state["mj_model"].actuator_gainprm[:, 0]
+            self.env.internal_state["partial_actuator_biasprm_without_dropout"] = self.env.internal_state["mj_model"].actuator_biasprm[:, 1:3]
 
         qpos = self.env.initial_qpos.copy()
         qpos[self.env.actuator_joint_mask_qpos] = self.env.internal_state["actuator_joint_nominal_positions"]

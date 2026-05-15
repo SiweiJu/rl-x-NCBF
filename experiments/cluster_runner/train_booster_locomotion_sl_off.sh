@@ -27,6 +27,8 @@ export USE_SAFETY_LAYER="False"
 export USE_BOOSTER_DEFAULTS="False"
 export REWARD_TYPE="defaultG1"
 export MUJOCO_MODEL_DR_TYPE="none"
+export SEEN_ROBOT_DR_TYPE="booster"
+export UNSEEN_ROBOT_DR_TYPE="none"
 export CURRICULUM_RETURN="30"
 export BALL_PLATE_ENABLED="False"
 

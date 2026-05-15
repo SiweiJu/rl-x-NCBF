@@ -88,6 +88,8 @@ export TRAIN_ROBOT="${TRAIN_ROBOT:-booster_t1}"
 export USE_BOOSTER_DEFAULTS="${USE_BOOSTER_DEFAULTS:-False}"
 export REWARD_TYPE="${REWARD_TYPE:-defaultG1}"
 export MUJOCO_MODEL_DR_TYPE="${MUJOCO_MODEL_DR_TYPE:-none}"
+export SEEN_ROBOT_DR_TYPE="${SEEN_ROBOT_DR_TYPE:-booster}"
+export UNSEEN_ROBOT_DR_TYPE="${UNSEEN_ROBOT_DR_TYPE:-none}"
 
 if [[ "${safety_tag}" == "off" ]]; then
     DEFAULT_RUN_NAME="booster_locomotion_sl_off"
