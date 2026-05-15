@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=booster_substep_lowdr_sl_off
+#SBATCH --job-name=booster_oldcfg_substep_sl_off
 #SBATCH --output=log/out_and_err_%x_%j.txt
 #SBATCH --error=log/out_and_err_%x_%j.txt
 #SBATCH --partition=gpu
@@ -18,20 +18,15 @@ CLUSTER_RUNNER_DIR="${SUBMIT_DIR}"
 if [[ ! -f "${CLUSTER_RUNNER_DIR}/run_cluster_experiment.sh" && -f "${CLUSTER_RUNNER_DIR}/cluster_runner/run_cluster_experiment.sh" ]]; then
     CLUSTER_RUNNER_DIR="${CLUSTER_RUNNER_DIR}/cluster_runner"
 fi
-export ALGORITHM_NAME="ncbf_ppo.flax_full_jit_booster"
-export ENVIRONMENT_NAME="ncbf_mujoco.robot_locomotion.mjx_booster"
+export ALGORITHM_NAME="ncbf_ppo.flax_full_jit"
+export ENVIRONMENT_NAME="ncbf_mujoco.robot_locomotion.mjx"
 export TRAIN_ROBOT="booster_t1"
-export RUN_NAME="booster_locomotion_substep_pd_low_dr_sl_off"
-export EXP_NAME="locomotion_safety_shield"
+export RUN_NAME="booster_locomotion_old_config_boostertrain_motor_substep_sl_off"
+export EXP_NAME="booster_locomotion_safety_shield"
 export USE_SAFETY_LAYER="False"
-export USE_BOOSTER_DEFAULTS="True"
-export ACTION_DELAY_TYPE="none"
-export SEEN_ROBOT_DR_TYPE="none"
-export UNSEEN_ROBOT_DR_TYPE="none"
+export USE_BOOSTER_DEFAULTS="False"
+export REWARD_TYPE="defaultG1"
 export MUJOCO_MODEL_DR_TYPE="none"
-export OBSERVATION_NOISE_TYPE="none"
-export PERTURBATION_TYPE="none"
-export JOINT_DROPOUT_TYPE="none"
 export CURRICULUM_RETURN="30"
 export BALL_PLATE_ENABLED="False"
 
