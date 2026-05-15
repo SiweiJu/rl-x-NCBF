@@ -15,7 +15,7 @@ class BoosterDRSeenRobotFunction:
         self.randomize_joint_armature = config.get("randomize_joint_armature", True)
         self.joint_armature_range = jnp.array(config.get("joint_armature_range", [0.007, 0.013]))
         self.randomize_com_displacement = config.get("randomize_com_displacement", True)
-        self.com_displacement_range = jnp.array(config.get("com_displacement_range", [-0.05, 0.05]))
+        self.com_displacement_range = self._axis_range(config.get("com_displacement_range", [-0.05, 0.05]))
         self.randomize_link_mass = config.get("randomize_link_mass", True)
         link_mass_range = config.get("link_mass_multiplier_range", {
             "root_body": [0.8, 1.2],
@@ -27,6 +27,11 @@ class BoosterDRSeenRobotFunction:
         self.add_d_gains_noise = config.get("add_d_gains_noise", True)
         self.p_gains_noise_scale = config.get("p_gains_noise_scale", 0.15)
         self.d_gains_noise_scale = config.get("d_gains_noise_scale", 0.15)
+        self.add_actuator_joint_nominal_position = config.get("add_actuator_joint_nominal_position", 0.0)
+        self.randomize_actuator_joint_nominal_position = config.get(
+            "randomize_actuator_joint_nominal_position",
+            self.add_actuator_joint_nominal_position > 0.0,
+        )
 
         self.default_body_mass = env.initial_mjx_model.body_mass
         self.default_body_inertia = env.initial_mjx_model.body_inertia
@@ -34,9 +39,12 @@ class BoosterDRSeenRobotFunction:
         self.default_dof_damping = env.initial_mjx_model.dof_damping
         self.default_dof_frictionloss = env.initial_mjx_model.dof_frictionloss
         self.default_dof_armature = env.initial_mjx_model.dof_armature
-        self.default_p_gain = env.initial_mjx_model.actuator_gainprm[:, 0]
-        self.default_d_gain = -env.initial_mjx_model.actuator_biasprm[:, 2]
-        self.default_scaling_factor = env.robot_config["scaling_factor"]
+        self.default_p_gain = env.actuator_joint_stiffness if env.use_torque_pd_control else env.initial_mjx_model.actuator_gainprm[:, 0]
+        self.default_d_gain = env.actuator_joint_damping if env.use_torque_pd_control else -env.initial_mjx_model.actuator_biasprm[:, 2]
+        self.default_effort_limits = env.actuator_joint_effort_limits
+        self.default_velocity_limits = env.actuator_joint_velocity_limits
+        self.default_knee_point_velocities = env.actuator_joint_knee_point_velocities
+        self.default_scaling_factor = env.scaling_factor
         self.default_actuator_joint_nominal_positions = env.initial_qpos[env.actuator_joint_mask_qpos]
         self.default_actuator_joint_max_velocities = env.actuator_joint_max_velocities
 
@@ -54,12 +62,22 @@ class BoosterDRSeenRobotFunction:
         return value_range[0] + (value_range[1] - value_range[0]) * interpolation
 
 
+    @staticmethod
+    def _axis_range(value_range):
+        if hasattr(value_range, "get"):
+            return jnp.array([value_range.get(axis, [0.0, 0.0]) for axis in ("x", "y", "z")])
+        value_range = jnp.array(value_range)
+        if value_range.ndim == 1:
+            return jnp.tile(value_range, (3, 1))
+        return value_range
+
+
     def init(self, internal_state):
         internal_state["seen_body_masses"] = self.default_body_mass[1:]
         internal_state["seen_body_inertias"] = self.default_body_inertia[1:]
         internal_state["seen_body_coms"] = self.default_body_ipos[1:]
         internal_state["seen_body_positions"] = self.env.initial_mjx_model.body_pos[1:]
-        internal_state["seen_torque_limits"] = self.env.initial_mjx_model.actuator_forcerange[:, 1]
+        internal_state["seen_torque_limits"] = self.default_effort_limits
         internal_state["seen_joint_ranges"] = self.env.initial_mjx_model.jnt_range[1:]
         internal_state["seen_joint_dampings"] = self.default_dof_damping[6:]
         internal_state["seen_joint_armatures"] = self.default_dof_armature[6:]
@@ -68,6 +86,11 @@ class BoosterDRSeenRobotFunction:
         internal_state["seen_p_gain"] = self.default_p_gain
         internal_state["seen_d_gain"] = self.default_d_gain
         internal_state["scaling_factor"] = self.default_scaling_factor
+        internal_state["actuator_p_gains"] = self.default_p_gain
+        internal_state["actuator_d_gains"] = self.default_d_gain
+        internal_state["actuator_effort_limits"] = self.default_effort_limits
+        internal_state["actuator_velocity_limits"] = self.default_velocity_limits
+        internal_state["actuator_knee_point_velocities"] = self.default_knee_point_velocities
         internal_state["partial_actuator_gainprm_without_dropout"] = self.default_p_gain
         internal_state["partial_actuator_biasprm_without_dropout"] = self.env.initial_mjx_model.actuator_biasprm[:, 1:3]
         internal_state["robot_nominal_qpos_height_over_ground"] = self.env.initial_qpos[2]
@@ -87,7 +110,7 @@ class BoosterDRSeenRobotFunction:
 
 
     def sample(self, internal_state, mjx_model, data, should_randomize, key):
-        keys = jax.random.split(key, 8)
+        keys = jax.random.split(key, 9)
 
         root_multiplier = self._lerp(self.root_body_mass_range, jax.random.uniform(keys[0]))
         other_multipliers = self._lerp(
@@ -99,7 +122,7 @@ class BoosterDRSeenRobotFunction:
             body_mass = body_mass.at[self.root_body_id].set(self.default_body_mass[self.root_body_id] * root_multiplier)
             body_mass = body_mass.at[self.other_body_ids].set(self.default_body_mass[self.other_body_ids] * other_multipliers)
 
-        com_displacement = self._lerp(self.com_displacement_range, jax.random.uniform(keys[2], shape=(3,)))
+        com_displacement = self._lerp(self.com_displacement_range.T, jax.random.uniform(keys[2], shape=(3,)))
         body_ipos = self.default_body_ipos
         if self.randomize_com_displacement:
             body_ipos = body_ipos.at[self.root_body_id].set(self.default_body_ipos[self.root_body_id] + com_displacement)
@@ -132,9 +155,31 @@ class BoosterDRSeenRobotFunction:
                 self.d_gains_noise_scale * self.default_d_gain
             )
 
-        actuator_gainprm = mjx_model.actuator_gainprm.at[:, 0].set(p_gain)
-        actuator_biasprm = mjx_model.actuator_biasprm.at[:, 1].set(-p_gain)
-        actuator_biasprm = actuator_biasprm.at[:, 2].set(-d_gain)
+        actuator_joint_nominal_positions = self.default_actuator_joint_nominal_positions
+        if self.randomize_actuator_joint_nominal_position:
+            actuator_joint_nominal_positions = actuator_joint_nominal_positions + jax.random.uniform(
+                keys[8],
+                shape=actuator_joint_nominal_positions.shape,
+                minval=-self.add_actuator_joint_nominal_position,
+                maxval=self.add_actuator_joint_nominal_position,
+            )
+            joint_ranges = mjx_model.jnt_range[self.env.actuator_joint_mask_joints]
+            actuator_joint_nominal_positions = jnp.clip(
+                actuator_joint_nominal_positions,
+                joint_ranges[:, 0],
+                joint_ranges[:, 1],
+            )
+
+        if self.env.use_torque_pd_control:
+            actuator_gainprm = mjx_model.actuator_gainprm
+            actuator_biasprm = mjx_model.actuator_biasprm
+            actuator_forcerange = mjx_model.actuator_forcerange.at[:, 0].set(-self.default_effort_limits)
+            actuator_forcerange = actuator_forcerange.at[:, 1].set(self.default_effort_limits)
+        else:
+            actuator_gainprm = mjx_model.actuator_gainprm.at[:, 0].set(p_gain)
+            actuator_biasprm = mjx_model.actuator_biasprm.at[:, 1].set(-p_gain)
+            actuator_biasprm = actuator_biasprm.at[:, 2].set(-d_gain)
+            actuator_forcerange = mjx_model.actuator_forcerange
 
         new_mjx_model = mjx_model.tree_replace({
             "body_mass": body_mass,
@@ -144,6 +189,7 @@ class BoosterDRSeenRobotFunction:
             "dof_armature": dof_armature,
             "actuator_gainprm": actuator_gainprm,
             "actuator_biasprm": actuator_biasprm,
+            "actuator_forcerange": actuator_forcerange,
         })
         mjx_model = jax.lax.cond(should_randomize, lambda _: new_mjx_model, lambda _: mjx_model, None)
 
@@ -156,7 +202,7 @@ class BoosterDRSeenRobotFunction:
         internal_state["seen_d_gain"] = jnp.where(should_randomize, d_gain, internal_state["seen_d_gain"])
         internal_state["actuator_joint_nominal_positions"] = jnp.where(
             should_randomize,
-            self.default_actuator_joint_nominal_positions,
+            actuator_joint_nominal_positions,
             internal_state["actuator_joint_nominal_positions"],
         )
         internal_state["actuator_joint_max_velocities"] = jnp.where(
@@ -165,6 +211,23 @@ class BoosterDRSeenRobotFunction:
             internal_state["actuator_joint_max_velocities"],
         )
         internal_state["scaling_factor"] = jnp.where(should_randomize, self.default_scaling_factor, internal_state["scaling_factor"])
+        internal_state["actuator_p_gains"] = jnp.where(should_randomize, p_gain, internal_state["actuator_p_gains"])
+        internal_state["actuator_d_gains"] = jnp.where(should_randomize, d_gain, internal_state["actuator_d_gains"])
+        internal_state["actuator_effort_limits"] = jnp.where(
+            should_randomize,
+            self.default_effort_limits,
+            internal_state["actuator_effort_limits"],
+        )
+        internal_state["actuator_velocity_limits"] = jnp.where(
+            should_randomize,
+            self.default_velocity_limits,
+            internal_state["actuator_velocity_limits"],
+        )
+        internal_state["actuator_knee_point_velocities"] = jnp.where(
+            should_randomize,
+            self.default_knee_point_velocities,
+            internal_state["actuator_knee_point_velocities"],
+        )
         internal_state["partial_actuator_gainprm_without_dropout"] = jnp.where(
             should_randomize,
             p_gain,

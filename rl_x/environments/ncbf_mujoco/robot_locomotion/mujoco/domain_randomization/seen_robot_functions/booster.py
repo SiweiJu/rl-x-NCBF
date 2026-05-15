@@ -13,7 +13,7 @@ class BoosterDRSeenRobotFunction:
         self.randomize_joint_armature = config.get("randomize_joint_armature", True)
         self.joint_armature_range = np.array(config.get("joint_armature_range", [0.007, 0.013]))
         self.randomize_com_displacement = config.get("randomize_com_displacement", True)
-        self.com_displacement_range = np.array(config.get("com_displacement_range", [-0.05, 0.05]))
+        self.com_displacement_range = self._axis_range(config.get("com_displacement_range", [-0.05, 0.05]))
         self.randomize_link_mass = config.get("randomize_link_mass", True)
         link_mass_range = config.get("link_mass_multiplier_range", {
             "root_body": [0.8, 1.2],
@@ -25,6 +25,11 @@ class BoosterDRSeenRobotFunction:
         self.add_d_gains_noise = config.get("add_d_gains_noise", True)
         self.p_gains_noise_scale = config.get("p_gains_noise_scale", 0.15)
         self.d_gains_noise_scale = config.get("d_gains_noise_scale", 0.15)
+        self.add_actuator_joint_nominal_position = config.get("add_actuator_joint_nominal_position", 0.0)
+        self.randomize_actuator_joint_nominal_position = config.get(
+            "randomize_actuator_joint_nominal_position",
+            self.add_actuator_joint_nominal_position > 0.0,
+        )
 
         self.default_body_mass = env.initial_mj_model.body_mass.copy()
         self.default_body_inertia = env.initial_mj_model.body_inertia.copy()
@@ -32,9 +37,20 @@ class BoosterDRSeenRobotFunction:
         self.default_dof_damping = env.initial_mj_model.dof_damping.copy()
         self.default_dof_frictionloss = env.initial_mj_model.dof_frictionloss.copy()
         self.default_dof_armature = env.initial_mj_model.dof_armature.copy()
-        self.default_p_gain = env.initial_mj_model.actuator_gainprm[:, 0].copy()
-        self.default_d_gain = -env.initial_mj_model.actuator_biasprm[:, 2].copy()
-        self.default_scaling_factor = env.robot_config["scaling_factor"]
+        self.default_p_gain = (
+            env.actuator_joint_stiffness.copy()
+            if env.use_torque_pd_control
+            else env.initial_mj_model.actuator_gainprm[:, 0].copy()
+        )
+        self.default_d_gain = (
+            env.actuator_joint_damping.copy()
+            if env.use_torque_pd_control
+            else -env.initial_mj_model.actuator_biasprm[:, 2].copy()
+        )
+        self.default_effort_limits = env.actuator_joint_effort_limits.copy()
+        self.default_velocity_limits = env.actuator_joint_velocity_limits.copy()
+        self.default_knee_point_velocities = env.actuator_joint_knee_point_velocities.copy()
+        self.default_scaling_factor = env.scaling_factor.copy()
         self.default_actuator_joint_nominal_positions = env.initial_qpos[env.actuator_joint_mask_qpos].copy()
         self.default_actuator_joint_max_velocities = env.actuator_joint_max_velocities.copy()
 
@@ -51,12 +67,22 @@ class BoosterDRSeenRobotFunction:
         return value_range[0] + (value_range[1] - value_range[0]) * interpolation
 
 
+    @staticmethod
+    def _axis_range(value_range):
+        if hasattr(value_range, "get"):
+            return np.array([value_range.get(axis, [0.0, 0.0]) for axis in ("x", "y", "z")], dtype=float)
+        value_range = np.array(value_range, dtype=float)
+        if value_range.ndim == 1:
+            return np.tile(value_range, (3, 1))
+        return value_range
+
+
     def init(self):
         self.env.internal_state["seen_body_masses"] = self.default_body_mass[1:]
         self.env.internal_state["seen_body_inertias"] = self.default_body_inertia[1:]
         self.env.internal_state["seen_body_coms"] = self.default_body_ipos[1:]
         self.env.internal_state["seen_body_positions"] = self.env.initial_mj_model.body_pos[1:]
-        self.env.internal_state["seen_torque_limits"] = self.env.initial_mj_model.actuator_forcerange[:, 1]
+        self.env.internal_state["seen_torque_limits"] = self.default_effort_limits
         self.env.internal_state["seen_joint_ranges"] = self.env.initial_mj_model.jnt_range[1:]
         self.env.internal_state["seen_joint_dampings"] = self.default_dof_damping[6:]
         self.env.internal_state["seen_joint_armatures"] = self.default_dof_armature[6:]
@@ -65,6 +91,11 @@ class BoosterDRSeenRobotFunction:
         self.env.internal_state["seen_p_gain"] = self.default_p_gain
         self.env.internal_state["seen_d_gain"] = self.default_d_gain
         self.env.internal_state["scaling_factor"] = self.default_scaling_factor
+        self.env.internal_state["actuator_p_gains"] = self.default_p_gain.copy()
+        self.env.internal_state["actuator_d_gains"] = self.default_d_gain.copy()
+        self.env.internal_state["actuator_effort_limits"] = self.default_effort_limits.copy()
+        self.env.internal_state["actuator_velocity_limits"] = self.default_velocity_limits.copy()
+        self.env.internal_state["actuator_knee_point_velocities"] = self.default_knee_point_velocities.copy()
         self.env.internal_state["partial_actuator_gainprm_without_dropout"] = self.default_p_gain
         self.env.internal_state["partial_actuator_biasprm_without_dropout"] = self.env.initial_mj_model.actuator_biasprm[:, 1:3].copy()
         self.env.internal_state["robot_nominal_qpos_height_over_ground"] = self.env.initial_qpos[2]
@@ -99,7 +130,7 @@ class BoosterDRSeenRobotFunction:
         if self.randomize_com_displacement:
             body_ipos[self.root_body_id] = (
                 self.default_body_ipos[self.root_body_id] +
-                self._lerp(self.com_displacement_range, self.env.np_rng.uniform(size=(3,)))
+                self._lerp(self.com_displacement_range.T, self.env.np_rng.uniform(size=(3,)))
             )
 
         joint_damping = self.default_dof_damping[6:].copy()
@@ -136,14 +167,32 @@ class BoosterDRSeenRobotFunction:
                 self.d_gains_noise_scale * self.default_d_gain
             )
 
+        actuator_joint_nominal_positions = self.default_actuator_joint_nominal_positions.copy()
+        if self.randomize_actuator_joint_nominal_position:
+            actuator_joint_nominal_positions += self.env.np_rng.uniform(
+                low=-self.add_actuator_joint_nominal_position,
+                high=self.add_actuator_joint_nominal_position,
+                size=actuator_joint_nominal_positions.shape,
+            )
+            joint_ranges = model.jnt_range[self.env.actuator_joint_mask_joints]
+            actuator_joint_nominal_positions = np.clip(
+                actuator_joint_nominal_positions,
+                joint_ranges[:, 0],
+                joint_ranges[:, 1],
+            )
+
         model.body_mass[:] = body_mass
         model.body_ipos[:] = body_ipos
         model.dof_damping[:] = dof_damping
         model.dof_frictionloss[:] = dof_frictionloss
         model.dof_armature[:] = dof_armature
-        model.actuator_gainprm[:, 0] = p_gain
-        model.actuator_biasprm[:, 1] = -p_gain
-        model.actuator_biasprm[:, 2] = -d_gain
+        if self.env.use_torque_pd_control:
+            model.actuator_forcerange[:, 0] = -self.default_effort_limits
+            model.actuator_forcerange[:, 1] = self.default_effort_limits
+        else:
+            model.actuator_gainprm[:, 0] = p_gain
+            model.actuator_biasprm[:, 1] = -p_gain
+            model.actuator_biasprm[:, 2] = -d_gain
 
         self.env.internal_state["seen_body_masses"] = body_mass[1:]
         self.env.internal_state["seen_body_coms"] = body_ipos[1:]
@@ -152,8 +201,13 @@ class BoosterDRSeenRobotFunction:
         self.env.internal_state["seen_joint_frictionlosses"] = joint_friction_loss
         self.env.internal_state["seen_p_gain"] = p_gain
         self.env.internal_state["seen_d_gain"] = d_gain
-        self.env.internal_state["actuator_joint_nominal_positions"] = self.default_actuator_joint_nominal_positions.copy()
+        self.env.internal_state["actuator_joint_nominal_positions"] = actuator_joint_nominal_positions
         self.env.internal_state["actuator_joint_max_velocities"] = self.default_actuator_joint_max_velocities.copy()
         self.env.internal_state["scaling_factor"] = self.default_scaling_factor
+        self.env.internal_state["actuator_p_gains"] = p_gain
+        self.env.internal_state["actuator_d_gains"] = d_gain
+        self.env.internal_state["actuator_effort_limits"] = self.default_effort_limits
+        self.env.internal_state["actuator_velocity_limits"] = self.default_velocity_limits
+        self.env.internal_state["actuator_knee_point_velocities"] = self.default_knee_point_velocities
         self.env.internal_state["partial_actuator_gainprm_without_dropout"] = p_gain
         self.env.internal_state["partial_actuator_biasprm_without_dropout"] = np.stack([-p_gain, -d_gain], axis=1)

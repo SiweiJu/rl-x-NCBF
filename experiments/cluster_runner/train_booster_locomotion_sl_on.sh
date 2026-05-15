@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=booster_loco_sl_on
+#SBATCH --job-name=booster_bt_t1_sl_on
 #SBATCH --output=log/out_and_err_%x_%j.txt
 #SBATCH --error=log/out_and_err_%x_%j.txt
 #SBATCH --partition=gpu
@@ -21,8 +21,9 @@ fi
 export ALGORITHM_NAME="ncbf_ppo.flax_full_jit_booster"
 export ENVIRONMENT_NAME="ncbf_mujoco.robot_locomotion.mjx_booster"
 export TRAIN_ROBOT="booster_t1"
-export RUN_NAME="booster_locomotion_sl_on"
+export RUN_NAME="booster_locomotion_boostertrain_t1_sl_on"
 export USE_SAFETY_LAYER="True"
+export USE_BOOSTER_DEFAULTS="True"
 export CURRICULUM_RETURN="30"
 export BALL_PLATE_ENABLED="False"
 

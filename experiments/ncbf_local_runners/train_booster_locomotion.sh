@@ -8,12 +8,12 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
-RUN_NAME="${RUN_NAME:-booster_locomotion_test}"
+RUN_NAME="${RUN_NAME:-booster_locomotion_boostertrain_t1}"
 
 cd "${EXPERIMENTS_DIR}"
 
 conda run --no-capture-output -n ncbf-mjx python experiment.py \
-    --algorithm.name="ncbf_ppo.flax_full_jit" \
+    --algorithm.name="ncbf_ppo.flax_full_jit_booster" \
     --algorithm.total_timesteps=1000000000 \
     --algorithm.minibatch_size=4096 \
     --algorithm.learning_rate=4e-4 \
@@ -28,13 +28,11 @@ conda run --no-capture-output -n ncbf-mjx python experiment.py \
     --algorithm.next_step_predictor.lr=1e-5 \
     --algorithm.next_step_predictor.aux_loss_coef=1 \
     --algorithm.adaptive_lr=True \
-    --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
+    --environment.name="ncbf_mujoco.robot_locomotion.mjx_booster" \
     --environment.seed="${SEED}" \
     --environment.nr_envs="${NR_ENVS}" \
     --environment.train_robot="booster_t1" \
-    --environment.use_booster_defaults=False \
-    --environment.reward.type="defaultG1" \
-    --environment.domain_randomization.mujoco_model.type="none" \
+    --environment.use_booster_defaults=True \
     --environment.ncbf_use_policy_observations=True \
     --environment.episode_length_in_seconds=20 \
     --environment.env_curriculum_level_success_episode_return=30 \

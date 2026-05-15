@@ -111,7 +111,7 @@ class LocomotionEnv:
         
         self.imu_site_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_SITE, "imu")
         self.trunk_body_id = mujoco.mj_name2id(self.initial_mj_model, mujoco.mjtObj.mjOBJ_BODY, self.root_body_name)
-        self.actuator_joint_max_velocities = jnp.array(robot_config["actuator_joint_max_velocities"])
+        self.actuator_joint_max_velocities = jnp.array(robot_config["actuator_joint_max_velocities"], dtype=jnp.float32)
         self.initial_qpos = jnp.array(self.initial_mj_model.keyframe("home").qpos)
         self.initial_imu_orientation_rotation_inverse = Rotation.from_matrix(self.c_data.site_xmat[self.imu_site_id].reshape(3, 3)).inv()
         self.initial_imu_height = self.c_data.site_xpos[self.imu_site_id, 2]
@@ -125,6 +125,28 @@ class LocomotionEnv:
         }
         self.nr_actuator_joints = len(self.actuator_joint_names)
         self.nr_joints = self.initial_mj_model.njnt
+        self.scaling_factor = jnp.array(robot_config["scaling_factor"], dtype=jnp.float32)
+        self.use_torque_pd_control = bool(robot_config.get("use_torque_pd_control", False))
+        self.actuator_joint_effort_limits = jnp.array(
+            robot_config.get("actuator_joint_effort_limits", self.initial_mj_model.actuator_forcerange[:, 1]),
+            dtype=jnp.float32,
+        )
+        self.actuator_joint_velocity_limits = jnp.array(
+            robot_config.get("actuator_joint_velocity_limits", self.actuator_joint_max_velocities),
+            dtype=jnp.float32,
+        )
+        self.actuator_joint_knee_point_velocities = jnp.array(
+            robot_config.get("actuator_joint_knee_point_velocities", self.actuator_joint_velocity_limits),
+            dtype=jnp.float32,
+        )
+        self.actuator_joint_stiffness = jnp.array(
+            robot_config.get("actuator_joint_stiffness", self.initial_mj_model.actuator_gainprm[:, 0]),
+            dtype=jnp.float32,
+        )
+        self.actuator_joint_damping = jnp.array(
+            robot_config.get("actuator_joint_damping", -self.initial_mj_model.actuator_biasprm[:, 2]),
+            dtype=jnp.float32,
+        )
 
         imu_angular_velocity_sensor_id = self.initial_mj_model.sensor("imu_angular_velocity").id
         self.imu_angular_velocity_sensor_adr = self.initial_mj_model.sensor_adr[imu_angular_velocity_sensor_id]
@@ -365,8 +387,11 @@ class LocomotionEnv:
         action_space_size = self.nr_actuator_joints
         actuator_joint_limit_positions = self.initial_mjx_model.jnt_range[self.actuator_joint_mask_joints]
         actuator_joint_nominal_positions = self.initial_qpos[self.actuator_joint_mask_qpos]
-        scaling_factor = robot_config["scaling_factor"]
-        actuator_joint_limit_positions_normalized = (actuator_joint_limit_positions - actuator_joint_nominal_positions[:, None]) / scaling_factor
+        scaling_factor = self.scaling_factor
+        action_space_scaling_factor = scaling_factor if scaling_factor.ndim == 0 else scaling_factor[:, None]
+        actuator_joint_limit_positions_normalized = (
+            actuator_joint_limit_positions - actuator_joint_nominal_positions[:, None]
+        ) / action_space_scaling_factor
 
         self.single_action_space = BoxSpace(low=actuator_joint_limit_positions_normalized[:, 0], high=actuator_joint_limit_positions_normalized[:, 1], shape=(action_space_size,), dtype=jnp.float32)
 
@@ -834,6 +859,13 @@ class LocomotionEnv:
             "env_curriculum_levels_in_a_row": 0.0,
             "actuator_joint_nominal_positions": self.initial_qpos[self.actuator_joint_mask_qpos],
             "actuator_joint_max_velocities": self.actuator_joint_max_velocities,
+            "scaling_factor": self.scaling_factor,
+            "use_torque_pd_control": self.use_torque_pd_control,
+            "actuator_p_gains": self.actuator_joint_stiffness,
+            "actuator_d_gains": self.actuator_joint_damping,
+            "actuator_effort_limits": self.actuator_joint_effort_limits,
+            "actuator_velocity_limits": self.actuator_joint_velocity_limits,
+            "actuator_knee_point_velocities": self.actuator_joint_knee_point_velocities,
             "goal_velocities": jnp.array([0.0, 0.0, 0.0]),
             "imu_orientation_rotation": Rotation.from_quat([0.0, 0.0, 0.0, 1.0]),
             "imu_orientation_rotation_inverse": Rotation.from_quat([0.0, 0.0, 0.0, 1.0]).inv(),
@@ -1014,10 +1046,10 @@ class LocomotionEnv:
         chosen_action = action[:self.nr_actuator_joints]
         delayed_action = self.domain_randomization_action_delay_function.delay_action(chosen_action, state.internal_state, action_delay_key)
 
-        target_joint_positions = self.control_function.process_action(delayed_action, state.internal_state)
+        control = self.control_function.process_action(delayed_action, state.internal_state, state.data)
 
         data, _ = jax.lax.scan(
-            f=lambda data, _: (mjx.step(state.mjx_model, data.replace(ctrl=target_joint_positions)), None),
+            f=lambda data, _: (mjx.step(state.mjx_model, data.replace(ctrl=control)), None),
             init=state.data,
             xs=(),
             length=self.nr_substeps

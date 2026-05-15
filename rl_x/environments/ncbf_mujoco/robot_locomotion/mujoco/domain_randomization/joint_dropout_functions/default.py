@@ -19,11 +19,15 @@ class DefaultDRJointDropout:
         self.env.internal_state["joint_dropout_lock_mask"] = self.env.np_rng.binomial(n=1, p=(1 - self.env.internal_state["env_curriculum_coeff"] * self.dropout_lock_chance), size=self.env.internal_state["joint_dropout_lock_mask"].shape) == 1.0
         self.env.internal_state["joint_dropout_mask"] = self.env.internal_state["joint_dropout_open_mask"] | self.env.internal_state["joint_dropout_lock_mask"]
 
-        modified_actuator_gainprm = self.env.internal_state["partial_actuator_gainprm_without_dropout"] * self.env.internal_state["joint_dropout_mask"]
-        modified_actuator_biasprm = self.env.internal_state["partial_actuator_biasprm_without_dropout"] * self.env.internal_state["joint_dropout_mask"].reshape(-1, 1)
+        modified_actuator_gainprm = self.env.internal_state["partial_actuator_gainprm_without_dropout"] * self.env.internal_state["joint_dropout_open_mask"]
+        modified_actuator_biasprm = self.env.internal_state["partial_actuator_biasprm_without_dropout"] * self.env.internal_state["joint_dropout_open_mask"].reshape(-1, 1)
 
-        self.env.internal_state["mj_model"].actuator_gainprm[:, 0] = modified_actuator_gainprm
-        self.env.internal_state["mj_model"].actuator_biasprm[:, 1:3] = modified_actuator_biasprm
+        if self.env.use_torque_pd_control:
+            self.env.internal_state["actuator_p_gains"] = modified_actuator_gainprm
+            self.env.internal_state["actuator_d_gains"] = -modified_actuator_biasprm[:, 1]
+        else:
+            self.env.internal_state["mj_model"].actuator_gainprm[:, 0] = modified_actuator_gainprm
+            self.env.internal_state["mj_model"].actuator_biasprm[:, 1:3] = modified_actuator_biasprm
 
         locked_actuator_joint_ranges_min = self.env.internal_state["actuator_joint_nominal_positions"] - 0.001
         locked_actuator_joint_ranges_max = self.env.internal_state["actuator_joint_nominal_positions"] + 0.001
