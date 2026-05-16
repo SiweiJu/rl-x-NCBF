@@ -22,6 +22,10 @@ class DefaultG1Reward(DefaultReward):
         self.moving_command_threshold = reward_config.get("moving_command_threshold", 0.05)
         self.standing_command_threshold = reward_config.get("standing_command_threshold", self.moving_command_threshold)
         self.standing_leg_joint_velocity_coeff = reward_config.get("standing_leg_joint_velocity_coeff", 0.0) * env.dt
+        self.standing_still_bonus_coeff = reward_config.get("standing_still_bonus_coeff", 0.0) * env.dt
+        self.standing_still_xy_velocity_temperature = reward_config.get("standing_still_xy_velocity_temperature", 0.04)
+        self.standing_still_yaw_velocity_temperature = reward_config.get("standing_still_yaw_velocity_temperature", 0.04)
+        self.standing_still_joint_velocity_temperature = reward_config.get("standing_still_joint_velocity_temperature", 25.0)
         self.contact_count_coeff = reward_config.get("contact_count_coeff", 2.0) * env.dt
         self.foot_stance_time_coeff = reward_config.get("foot_stance_time_coeff", 1.0) * env.dt
         self.foot_stance_time_per_robot_size_m = reward_config.get("foot_stance_time_per_robot_size_m", 0.6)
@@ -226,6 +230,19 @@ class DefaultG1Reward(DefaultReward):
             * standing_command_scale
             * jnp.asarray(self.has_standing_leg_joint_velocity_reward, dtype=jnp.float32)
         )
+        standing_xy_velocity_norm = jnp.sum(jnp.square(current_imu_linear_velocity[:2]))
+        standing_yaw_velocity_norm = jnp.square(current_imu_angular_velocity[2])
+        standing_still_bonus_score = (
+            jnp.exp(-standing_xy_velocity_norm / self.standing_still_xy_velocity_temperature)
+            * jnp.exp(-standing_yaw_velocity_norm / self.standing_still_yaw_velocity_temperature)
+            * jnp.exp(-standing_leg_joint_velocity_norm / self.standing_still_joint_velocity_temperature)
+        )
+        standing_still_bonus_reward = (
+            self.standing_still_bonus_coeff
+            * standing_command_scale
+            * standing_still_bonus_score
+            * jnp.asarray(self.has_standing_leg_joint_velocity_reward, dtype=jnp.float32)
+        )
 
         feet_first_contact = feet_floor_contacts & (~internal_state["previous_feet_floor_contacts"])
         target_foot_air_time = self.foot_air_time_per_robot_size_m * internal_state["robot_dimensions_mean"]
@@ -339,9 +356,10 @@ class DefaultG1Reward(DefaultReward):
         gait_penalty = foot_air_time_reward + symmetry_air_reward + contact_count_reward + foot_stance_time_reward + foot_clearance_reward
         alive_total = alive_clipped_reward + alive_unclipped_reward + survival_reward + extra_alive_reward
         penalty_total = critical_penalty + style_penalty + standing_leg_joint_velocity_reward + gait_penalty + booster_penalty + extra_penalty
+        standing_reward = standing_still_bonus_reward
         pre_clip_total = (
             tracking_reward + penalty_total + gait_reward +
-            extra_positive_reward + alive_clipped_reward + survival_reward + extra_alive_reward
+            standing_reward + extra_positive_reward + alive_clipped_reward + survival_reward + extra_alive_reward
         )
         reward = jnp.maximum(pre_clip_total, 0.0) + alive_unclipped_reward
         reward = jnp.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
@@ -381,6 +399,8 @@ class DefaultG1Reward(DefaultReward):
         info[f"reward/action_rate"] = action_rate_reward
         info[f"reward/action_smoothness"] = action_smoothness_reward
         info[f"reward/standing_leg_joint_velocity"] = standing_leg_joint_velocity_reward
+        info[f"reward/standing_still_bonus"] = standing_still_bonus_reward
+        info[f"reward/standing_total"] = standing_reward
         info[f"reward/collision"] = collision_reward
         info[f"reward/base_height"] = base_height_reward
         info[f"reward/foot_air_time"] = foot_air_time_reward
@@ -406,6 +426,9 @@ class DefaultG1Reward(DefaultReward):
         info[f"reward/gait_reward_total"] = gait_reward
         info[f"reward/total"] = reward
         info[f"env_info/standing_leg_joint_velocity_norm"] = standing_leg_joint_velocity_norm
+        info[f"env_info/standing_still_bonus_score"] = standing_still_bonus_score
+        info[f"env_info/standing_xy_velocity_norm"] = standing_xy_velocity_norm
+        info[f"env_info/standing_yaw_velocity_norm"] = standing_yaw_velocity_norm
         info[f"env_info/is_moving_command"] = moving_command_scale
         info[f"env_info/is_standing_command"] = standing_command_scale
         info[f"env_info/xy_vel_diff_abs"] = jnp.nan_to_num(jnp.mean(jnp.minimum(jnp.abs(xy_difference), 2 * internal_state["max_command_velocity"])), nan=2 * internal_state["max_command_velocity"], posinf=2 * internal_state["max_command_velocity"], neginf=2 * internal_state["max_command_velocity"])
