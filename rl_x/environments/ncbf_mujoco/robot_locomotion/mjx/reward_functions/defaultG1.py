@@ -19,6 +19,9 @@ class DefaultG1Reward(DefaultReward):
         self.gait_initial_coeff = reward_config.get("gait_initial_coeff", 1.0)
         self.gait_final_coeff = reward_config.get("gait_final_coeff", 1.0)
         self.gait_fixed_coeff = reward_config.get("gait_fixed_coeff", 1.0)
+        self.reward_clip_mode = reward_config.get("reward_clip_mode", "zero")
+        self.reward_clip_leaky_slope = reward_config.get("reward_clip_leaky_slope", 0.0)
+        self.reward_clip_floor = reward_config.get("reward_clip_floor", 0.0)
         self.moving_command_threshold = reward_config.get("moving_command_threshold", 0.05)
         self.standing_command_threshold = reward_config.get("standing_command_threshold", self.moving_command_threshold)
         self.standing_leg_joint_velocity_coeff = reward_config.get("standing_leg_joint_velocity_coeff", 0.0) * env.dt
@@ -92,6 +95,18 @@ class DefaultG1Reward(DefaultReward):
         self.right_feet_in_feet = jnp.array(np.where(np.isin(foot_geom_indices, np.array(env.right_foot_geom_indices)))[0])
         self.left_foot_body_ids = jnp.array([env.initial_mj_model.geom(int(geom_id)).bodyid[0] for geom_id in np.array(env.left_foot_geom_indices)])
         self.right_foot_body_ids = jnp.array([env.initial_mj_model.geom(int(geom_id)).bodyid[0] for geom_id in np.array(env.right_foot_geom_indices)])
+
+
+    def _clip_pre_reward(self, pre_clip_total):
+        if self.reward_clip_mode == "zero":
+            return jnp.maximum(pre_clip_total, 0.0)
+        if self.reward_clip_mode == "leaky":
+            return jnp.where(pre_clip_total >= 0.0, pre_clip_total, self.reward_clip_leaky_slope * pre_clip_total)
+        if self.reward_clip_mode == "floor":
+            return jnp.maximum(pre_clip_total, self.reward_clip_floor)
+        if self.reward_clip_mode == "none":
+            return pre_clip_total
+        raise ValueError(f"Unsupported reward_clip_mode: {self.reward_clip_mode}")
 
 
     def _scheduled_coeff(self, fixed_coeff, initial_coeff, final_coeff, curriculum_progress):
@@ -343,7 +358,8 @@ class DefaultG1Reward(DefaultReward):
             tracking_reward + penalty_total + gait_reward +
             extra_positive_reward + alive_clipped_reward + survival_reward + extra_alive_reward
         )
-        reward = jnp.maximum(pre_clip_total, 0.0) + alive_unclipped_reward
+        clipped_pre_reward = self._clip_pre_reward(pre_clip_total)
+        reward = clipped_pre_reward + alive_unclipped_reward
         reward = jnp.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
         info[f"reward/survival"] = survival_reward
@@ -400,6 +416,9 @@ class DefaultG1Reward(DefaultReward):
         info[f"reward/alive_total"] = alive_total
         info[f"reward/penalty_total"] = penalty_total
         info[f"reward/pre_clip_total"] = pre_clip_total
+        info[f"reward/clipped_pre_clip_total"] = clipped_pre_reward
+        info[f"reward/clip_delta"] = clipped_pre_reward - pre_clip_total
+        info[f"reward/pre_clip_positive"] = (pre_clip_total > 0.0) * 1.0
         info[f"reward/critical_penalty_total"] = critical_penalty
         info[f"reward/style_penalty_total"] = style_penalty
         info[f"reward/gait_penalty_total"] = gait_penalty
