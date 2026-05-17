@@ -241,17 +241,21 @@ class DefaultG1Reward(DefaultReward):
         )
         standing_xy_velocity_norm = np.sum(np.square(current_imu_linear_velocity[:2]))
         standing_yaw_velocity_norm = np.square(current_imu_angular_velocity[2])
-        standing_still_bonus_score = (
-            np.exp(-standing_xy_velocity_norm / self.standing_still_xy_velocity_temperature)
-            * np.exp(-standing_yaw_velocity_norm / self.standing_still_yaw_velocity_temperature)
-            * np.exp(-standing_leg_joint_velocity_norm / self.standing_still_joint_velocity_temperature)
-        )
-        standing_still_bonus_reward = (
-            self.standing_still_bonus_coeff
-            * standing_command_scale
-            * standing_still_bonus_score
-            * float(self.has_standing_leg_joint_velocity_reward)
-        )
+        if self.standing_still_bonus_coeff > 0.0:
+            standing_still_bonus_score = (
+                np.exp(-standing_xy_velocity_norm / max(self.standing_still_xy_velocity_temperature, 1.0e-8))
+                * np.exp(-standing_yaw_velocity_norm / max(self.standing_still_yaw_velocity_temperature, 1.0e-8))
+                * np.exp(-standing_leg_joint_velocity_norm / max(self.standing_still_joint_velocity_temperature, 1.0e-8))
+            )
+            standing_still_bonus_reward = (
+                self.standing_still_bonus_coeff
+                * standing_command_scale
+                * standing_still_bonus_score
+                * float(self.has_standing_leg_joint_velocity_reward)
+            )
+        else:
+            standing_still_bonus_score = 0.0
+            standing_still_bonus_reward = 0.0
         standing_nominal_joint_pos_norm = np.mean(
             np.square(data.qpos[self.nominal_joint_qpos_id] - self.nominal_joint_qpos[self.nominal_joint_qpos_id])
         )

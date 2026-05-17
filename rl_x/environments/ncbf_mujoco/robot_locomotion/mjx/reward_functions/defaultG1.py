@@ -234,17 +234,21 @@ class DefaultG1Reward(DefaultReward):
         )
         standing_xy_velocity_norm = jnp.sum(jnp.square(current_imu_linear_velocity[:2]))
         standing_yaw_velocity_norm = jnp.square(current_imu_angular_velocity[2])
-        standing_still_bonus_score = (
-            jnp.exp(-standing_xy_velocity_norm / self.standing_still_xy_velocity_temperature)
-            * jnp.exp(-standing_yaw_velocity_norm / self.standing_still_yaw_velocity_temperature)
-            * jnp.exp(-standing_leg_joint_velocity_norm / self.standing_still_joint_velocity_temperature)
-        )
-        standing_still_bonus_reward = (
-            self.standing_still_bonus_coeff
-            * standing_command_scale
-            * standing_still_bonus_score
-            * jnp.asarray(self.has_standing_leg_joint_velocity_reward, dtype=jnp.float32)
-        )
+        if self.standing_still_bonus_coeff > 0.0:
+            standing_still_bonus_score = (
+                jnp.exp(-standing_xy_velocity_norm / jnp.maximum(self.standing_still_xy_velocity_temperature, 1.0e-8))
+                * jnp.exp(-standing_yaw_velocity_norm / jnp.maximum(self.standing_still_yaw_velocity_temperature, 1.0e-8))
+                * jnp.exp(-standing_leg_joint_velocity_norm / jnp.maximum(self.standing_still_joint_velocity_temperature, 1.0e-8))
+            )
+            standing_still_bonus_reward = (
+                self.standing_still_bonus_coeff
+                * standing_command_scale
+                * standing_still_bonus_score
+                * jnp.asarray(self.has_standing_leg_joint_velocity_reward, dtype=jnp.float32)
+            )
+        else:
+            standing_still_bonus_score = jnp.asarray(0.0, dtype=jnp.float32)
+            standing_still_bonus_reward = jnp.asarray(0.0, dtype=jnp.float32)
         standing_nominal_joint_pos_norm = jnp.mean(
             jnp.square(data.qpos[self.nominal_joint_qpos_id] - self.nominal_joint_qpos[self.nominal_joint_qpos_id])
         )
