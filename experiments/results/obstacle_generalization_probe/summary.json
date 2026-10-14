@@ -1,0 +1,417 @@
+{
+  "args": {
+    "out_dir": "experiments/runs/generalization_probe",
+    "seed": 0,
+    "nr_envs": 128,
+    "nr_steps": 2500,
+    "test_nr_envs": 64,
+    "test_nr_steps": 1500,
+    "episode_seconds": 20,
+    "nr_obstacles": 2,
+    "aim_offset": 1.0,
+    "speed_range": [
+      0.5,
+      2.5
+    ],
+    "nr_rays": 64,
+    "max_range": 5.0,
+    "scan_noise": 0.02,
+    "horizon": 25,
+    "history": 10,
+    "ensemble": 3,
+    "train_steps": 3000,
+    "batch_size": 1024,
+    "learning_rate": 0.001,
+    "hidden": 256,
+    "val_fraction": 0.1,
+    "eval_every": 250,
+    "test_sets": [
+      "in_distribution",
+      "held_out_shape",
+      "held_out_motion",
+      "held_out_size",
+      "held_out_sensor"
+    ]
+  },
+  "train": {
+    "shapes": {
+      "weights": {
+        "circle": 1.0,
+        "box": 1.0,
+        "circles": 1.0,
+        "l_shape": 0.0
+      }
+    },
+    "motions": {
+      "weights": {
+        "constant": 1.0,
+        "turning": 1.0,
+        "stop_and_go": 1.0,
+        "accelerating": 1.0,
+        "random_walk": 0.0
+      }
+    },
+    "scan": {
+      "noise_range": [
+        0.0,
+        0.04
+      ],
+      "dropout_prob_range": [
+        0.0,
+        0.05
+      ],
+      "latency_steps_range": [
+        0,
+        1
+      ],
+      "angle_jitter": 0.01,
+      "spurious_prob": 0.002
+    }
+  },
+  "test_sets": {
+    "in_distribution": {},
+    "held_out_shape": {
+      "shapes": {
+        "weights": {
+          "circle": 0.0,
+          "box": 0.0,
+          "circles": 0.0,
+          "l_shape": 1.0
+        }
+      }
+    },
+    "held_out_motion": {
+      "motions": {
+        "weights": {
+          "constant": 0.0,
+          "turning": 0.0,
+          "stop_and_go": 0.0,
+          "accelerating": 0.0,
+          "random_walk": 1.0
+        }
+      }
+    },
+    "held_out_size": {
+      "radius_range": [
+        0.3,
+        0.45
+      ],
+      "shapes": {
+        "box_half_length_range": [
+          0.5,
+          0.8
+        ],
+        "box_half_width_range": [
+          0.3,
+          0.45
+        ]
+      }
+    },
+    "held_out_sensor": {
+      "scan": {
+        "noise_range": [
+          0.06,
+          0.08
+        ],
+        "dropout_prob_range": [
+          0.15,
+          0.2
+        ],
+        "latency_steps_range": [
+          2,
+          3
+        ],
+        "spurious_prob": 0.01
+      }
+    }
+  },
+  "training": {
+    "scan_1": {
+      "val_log_loss": 0.19815599918365479,
+      "best_step": 750,
+      "train_log_loss": 0.19920603930950165
+    },
+    "scanconv_1": {
+      "val_log_loss": 0.17750753462314606,
+      "best_step": 1500,
+      "train_log_loss": 0.19269129633903503
+    },
+    "scanconv_10_member0": {
+      "val_log_loss": 0.13258184492588043,
+      "best_step": 2750,
+      "train_log_loss": 0.12728986144065857
+    },
+    "scanconv_10_member1": {
+      "val_log_loss": 0.13467097282409668,
+      "best_step": 2500,
+      "train_log_loss": 0.1303016096353531
+    },
+    "scanconv_10_member2": {
+      "val_log_loss": 0.13230520486831665,
+      "best_step": 3000,
+      "train_log_loss": 0.1289646029472351
+    },
+    "state_full": {
+      "val_log_loss": 0.10660288482904434,
+      "best_step": 3000,
+      "train_log_loss": 0.08092404156923294
+    }
+  },
+  "metrics": {
+    "in_distribution": {
+      "nr_samples": 80358,
+      "unsafe_rate": 0.08188354969024658,
+      "models": {
+        "scan_1": {
+          "auroc": 0.8407621904570196,
+          "average_precision": 0.2649865813840513,
+          "log_loss": 0.22522196173667908,
+          "brier": 0.06628506630659103
+        },
+        "scanconv_1": {
+          "auroc": 0.8772489447311786,
+          "average_precision": 0.33372775731025506,
+          "log_loss": 0.20332980155944824,
+          "brier": 0.06222773343324661
+        },
+        "scanconv_10_member0": {
+          "auroc": 0.9508735151482542,
+          "average_precision": 0.6930142374698184,
+          "log_loss": 0.13840198516845703,
+          "brier": 0.04120677337050438
+        },
+        "scanconv_10_member1": {
+          "auroc": 0.9481244480999064,
+          "average_precision": 0.6700473434418321,
+          "log_loss": 0.1432914435863495,
+          "brier": 0.04270702600479126
+        },
+        "scanconv_10_member2": {
+          "auroc": 0.9497857533827144,
+          "average_precision": 0.6772837751056492,
+          "log_loss": 0.14262144267559052,
+          "brier": 0.042736440896987915
+        },
+        "state_full": {
+          "auroc": 0.9722839388122472,
+          "average_precision": 0.7829692998391492,
+          "log_loss": 0.11677657067775726,
+          "brier": 0.03476991876959801
+        },
+        "scanconv_10_ensemble": {
+          "auroc": 0.9534945055325346,
+          "average_precision": 0.6990868341065767,
+          "log_loss": 0.13645711541175842,
+          "brier": 0.04091789945960045
+        }
+      },
+      "ensemble_std_mean": 0.015542395412921906,
+      "ensemble_std_mean_unsafe": 0.06437026709318161
+    },
+    "held_out_shape": {
+      "nr_samples": 78133,
+      "unsafe_rate": 0.09930503368377686,
+      "models": {
+        "scan_1": {
+          "auroc": 0.8297134072391299,
+          "average_precision": 0.27785699068299,
+          "log_loss": 0.25630614161491394,
+          "brier": 0.07865673303604126
+        },
+        "scanconv_1": {
+          "auroc": 0.860749896234078,
+          "average_precision": 0.35189277998009494,
+          "log_loss": 0.23981139063835144,
+          "brier": 0.07445688545703888
+        },
+        "scanconv_10_member0": {
+          "auroc": 0.9437072817284989,
+          "average_precision": 0.670821980153082,
+          "log_loss": 0.1685379147529602,
+          "brier": 0.05124370753765106
+        },
+        "scanconv_10_member1": {
+          "auroc": 0.9398794611741579,
+          "average_precision": 0.6520251446153712,
+          "log_loss": 0.17364192008972168,
+          "brier": 0.05274882912635803
+        },
+        "scanconv_10_member2": {
+          "auroc": 0.9424071964327445,
+          "average_precision": 0.6661732243010594,
+          "log_loss": 0.1734769344329834,
+          "brier": 0.05257585272192955
+        },
+        "state_full": {
+          "auroc": 0.9590159853417786,
+          "average_precision": 0.7385935969850389,
+          "log_loss": 0.1573721468448639,
+          "brier": 0.04623149707913399
+        },
+        "scanconv_10_ensemble": {
+          "auroc": 0.9453993148451156,
+          "average_precision": 0.6773691370194358,
+          "log_loss": 0.1665777862071991,
+          "brier": 0.050806447863578796
+        }
+      },
+      "ensemble_std_mean": 0.016730548813939095,
+      "ensemble_std_mean_unsafe": 0.060378093272447586,
+      "ensemble_std_auroc_vs_in_distribution": 0.5179741791558442
+    },
+    "held_out_motion": {
+      "nr_samples": 88564,
+      "unsafe_rate": 0.03199946880340576,
+      "models": {
+        "scan_1": {
+          "auroc": 0.92405594083804,
+          "average_precision": 0.26255734141233866,
+          "log_loss": 0.09583938866853714,
+          "brier": 0.02639080584049225
+        },
+        "scanconv_1": {
+          "auroc": 0.9441989428496566,
+          "average_precision": 0.31016878018658145,
+          "log_loss": 0.08734673261642456,
+          "brier": 0.025417249649763107
+        },
+        "scanconv_10_member0": {
+          "auroc": 0.9780805693738552,
+          "average_precision": 0.6946348222251152,
+          "log_loss": 0.05683637410402298,
+          "brier": 0.01632087118923664
+        },
+        "scanconv_10_member1": {
+          "auroc": 0.9771600512383127,
+          "average_precision": 0.6776100061417716,
+          "log_loss": 0.058848343789577484,
+          "brier": 0.016893047839403152
+        },
+        "scanconv_10_member2": {
+          "auroc": 0.9783915356520089,
+          "average_precision": 0.6882061999943093,
+          "log_loss": 0.058224692940711975,
+          "brier": 0.016692157834768295
+        },
+        "state_full": {
+          "auroc": 0.9922452743226198,
+          "average_precision": 0.8286513498823603,
+          "log_loss": 0.04216502606868744,
+          "brier": 0.012522340752184391
+        },
+        "scanconv_10_ensemble": {
+          "auroc": 0.9797322731481821,
+          "average_precision": 0.7020590467063762,
+          "log_loss": 0.05600689724087715,
+          "brier": 0.016213227063417435
+        }
+      },
+      "ensemble_std_mean": 0.005480676423758268,
+      "ensemble_std_mean_unsafe": 0.056679703295230865,
+      "ensemble_std_auroc_vs_in_distribution": 0.3196284312876698
+    },
+    "held_out_size": {
+      "nr_samples": 72805,
+      "unsafe_rate": 0.1097726821899414,
+      "models": {
+        "scan_1": {
+          "auroc": 0.829429007796002,
+          "average_precision": 0.3132157492338271,
+          "log_loss": 0.2702551782131195,
+          "brier": 0.08414658159017563
+        },
+        "scanconv_1": {
+          "auroc": 0.8685961276413809,
+          "average_precision": 0.370524746233199,
+          "log_loss": 0.2481231391429901,
+          "brier": 0.07934864610433578
+        },
+        "scanconv_10_member0": {
+          "auroc": 0.9514348332255234,
+          "average_precision": 0.7316107645457004,
+          "log_loss": 0.16460469365119934,
+          "brier": 0.05046002194285393
+        },
+        "scanconv_10_member1": {
+          "auroc": 0.9506521703843229,
+          "average_precision": 0.7294314005976121,
+          "log_loss": 0.16560250520706177,
+          "brier": 0.0508539155125618
+        },
+        "scanconv_10_member2": {
+          "auroc": 0.9518200795336555,
+          "average_precision": 0.7298560335562176,
+          "log_loss": 0.16584379971027374,
+          "brier": 0.05089820921421051
+        },
+        "state_full": {
+          "auroc": 0.9599066688925205,
+          "average_precision": 0.7479591701764824,
+          "log_loss": 0.20722007751464844,
+          "brier": 0.05788809806108475
+        },
+        "scanconv_10_ensemble": {
+          "auroc": 0.9544986410198636,
+          "average_precision": 0.7446698554627224,
+          "log_loss": 0.1606302261352539,
+          "brier": 0.04929088056087494
+        }
+      },
+      "ensemble_std_mean": 0.017736252397298813,
+      "ensemble_std_mean_unsafe": 0.06035631522536278,
+      "ensemble_std_auroc_vs_in_distribution": 0.5304820616293696
+    },
+    "held_out_sensor": {
+      "nr_samples": 81525,
+      "unsafe_rate": 0.07790249586105347,
+      "models": {
+        "scan_1": {
+          "auroc": 0.8062801171591046,
+          "average_precision": 0.21551283981079,
+          "log_loss": 0.24397553503513336,
+          "brier": 0.06735296547412872
+        },
+        "scanconv_1": {
+          "auroc": 0.8382646963291215,
+          "average_precision": 0.23802420044800118,
+          "log_loss": 0.2240515500307083,
+          "brier": 0.06470592319965363
+        },
+        "scanconv_10_member0": {
+          "auroc": 0.880245059719468,
+          "average_precision": 0.45227739607262557,
+          "log_loss": 0.2186281830072403,
+          "brier": 0.05662890896201134
+        },
+        "scanconv_10_member1": {
+          "auroc": 0.8840636377674022,
+          "average_precision": 0.44104468123066065,
+          "log_loss": 0.215763658285141,
+          "brier": 0.05701986327767372
+        },
+        "scanconv_10_member2": {
+          "auroc": 0.8779649855069667,
+          "average_precision": 0.4382828265154052,
+          "log_loss": 0.2285669595003128,
+          "brier": 0.05792200192809105
+        },
+        "state_full": {
+          "auroc": 0.9736403660235279,
+          "average_precision": 0.7686100729656571,
+          "log_loss": 0.11142884194850922,
+          "brier": 0.03310514613986015
+        },
+        "scanconv_10_ensemble": {
+          "auroc": 0.8917021343737136,
+          "average_precision": 0.4719848664450784,
+          "log_loss": 0.20324109494686127,
+          "brier": 0.05460355430841446
+        }
+      },
+      "ensemble_std_mean": 0.02060999907553196,
+      "ensemble_std_mean_unsafe": 0.08490908890962601,
+      "ensemble_std_auroc_vs_in_distribution": 0.49756382827142925
+    }
+  },
+  "runtime_seconds": 1370.5253896713257
+}

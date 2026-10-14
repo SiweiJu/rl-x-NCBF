@@ -4,13 +4,16 @@ Usage:
     python ncbf_tools/collect_eval_summaries.py runs/<project>/<exp> [--out results.csv]
 
 Each run directory name becomes the `run` column; a trailing `_speed<v>` (as written by
-cluster_runner/eval_go2_obstacles_speed_sweep.sh) is parsed into an `obstacle_speed` column.
+cluster_runner/eval_go2_obstacles_speed_sweep.sh) is parsed into an `obstacle_speed` column, and a
+trailing obstacle preset (cluster_runner/eval_go2_obstacles_held_out.sh) into an `obstacle_preset` column.
 """
 import argparse
 import csv
 import json
 import re
 from pathlib import Path
+
+PRESETS = ("train", "held_out_shape", "held_out_motion", "held_out_size", "held_out_sensor")
 
 
 def main():
@@ -25,7 +28,8 @@ def main():
         run = summary_path.parent.name
         match = re.search(r"_speed(\d+)p?(\d*)$", run)
         speed = float(f"{match.group(1)}.{match.group(2) or 0}") if match else None
-        rows.append({"run": run, "obstacle_speed": speed, **summary})
+        preset = next((name for name in PRESETS if run.endswith(f"_{name}")), None)
+        rows.append({"run": run, "obstacle_speed": speed, "obstacle_preset": preset, **summary})
 
     if not rows:
         raise SystemExit(f"No eval_summary.json found under {args.root}")

@@ -123,12 +123,36 @@ def get_config(environment_name):
                 "nr_rays": 64,
                 "fov_degrees": 360.0,  # centred on the forward axis
                 "max_range": 5.0,  # m
-                "noise": 0.02,  # m, uniform range noise, scaled by the env curriculum
-                "dropout_prob": 0.0,  # probability that a ray returns max_range, scaled by the env curriculum
+                # Sensor randomization; all of it is scaled by the env curriculum (eval uses the full amount)
+                "noise_range": (0.02, 0.02),  # m, per-episode level of the uniform range noise
+                "dropout_prob_range": (0.0, 0.0),  # per-episode probability that a ray returns max_range
+                "latency_steps_range": (0, 0),  # per-episode delay of the scan in control steps (ints)
+                "angle_jitter": 0.0,  # rad, uniform per ray and step
+                "spurious_prob": 0.0,  # per ray and step, a spurious return at a uniformly random range
+            },
+            # Shapes, drawn per obstacle with these weights: "circle" (radius_range), "box" (oriented rectangle),
+            # "circles" (chain of 2-3 overlapping circles), "l_shape" (two boxes at a right angle)
+            "shapes": {
+                "weights": {"circle": 1.0, "box": 0.0, "circles": 0.0, "l_shape": 0.0},
+                "box_half_length_range": (0.15, 0.5),  # m
+                "box_half_width_range": (0.1, 0.3),  # m
+                "circles_count_range": (2, 3),
+                "l_shape_arm_half_length_range": (0.25, 0.5),  # m
+                "l_shape_arm_half_width_range": (0.05, 0.15),  # m
+            },
+            # Motion types, drawn per obstacle with these weights
+            "motions": {
+                "weights": {"constant": 1.0, "turning": 0.0, "stop_and_go": 0.0, "accelerating": 0.0, "random_walk": 0.0},
+                "turn_rate_range": (0.3, 1.5),  # rad/s, random sign ("turning")
+                "stop_and_go_period_range": (1.0, 3.0),  # s
+                "stop_and_go_duty_range": (0.3, 0.7),  # fraction of the period spent moving
+                "acceleration_range": (0.5, 2.0),  # m/s^2 ("accelerating": from the initial to a second random speed)
+                "random_walk_turn_noise": 2.0,  # rad/s per sqrt(s)
+                "random_walk_max_turn_rate": 2.0,  # rad/s
             },
             "terminate_on_collision": True,
             "collision_penalty": 0.0,  # subtracted from the reward on a collision step
-            "radius_range": (0.15, 0.3),  # m
+            "radius_range": (0.15, 0.3),  # m, circles (also each circle of "circles")
             "speed_range": (0.5, 2.5),  # m/s
             "speed_curriculum": True,  # upper speed grows from speed_range[0] with the env curriculum (eval uses the full range)
             "spawn_distance_range": (3.0, 5.0),  # m from the robot base

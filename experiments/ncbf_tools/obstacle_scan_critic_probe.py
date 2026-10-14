@@ -69,12 +69,21 @@ def parse_args():
 # Data collection
 # ---------------------------------------------------------------------------
 
-def make_env(args):
+def apply_overrides(node, overrides):
+    """Write a nested dict of overrides into a ConfigDict (e.g. {"shapes": {"weights": {"box": 1.0}}})."""
+    for key, value in overrides.items():
+        if isinstance(value, dict):
+            apply_overrides(node[key], value)
+        else:
+            node[key] = value
+
+
+def make_env(args, obstacle_overrides=None, nr_envs=None):
     from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.default_config import get_config
     from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.create_env import create_env
 
     env_config = get_config("ncbf_mujoco.robot_locomotion.mjx")
-    env_config.nr_envs = args.nr_envs
+    env_config.nr_envs = nr_envs or args.nr_envs
     env_config.device = "cpu"
     env_config.train_robot = "unitree_go2"
     env_config.terrain.type = "plane"
@@ -94,13 +103,14 @@ def make_env(args):
     obstacles.speed_range = tuple(args.speed_range)
     obstacles.scan.nr_rays = args.nr_rays
     obstacles.scan.max_range = args.max_range
-    obstacles.scan.noise = args.scan_noise
+    obstacles.scan.noise_range = (args.scan_noise, args.scan_noise)
+    apply_overrides(obstacles, obstacle_overrides or {})
     config = config_dict.ConfigDict({"environment": env_config, "runner": {"mode": "train"}})
     return create_env(config)
 
 
-def collect(env, args):
-    keys = jax.random.split(jax.random.PRNGKey(args.seed), env.nr_envs)
+def collect(env, args, nr_steps=None, seed=None):
+    keys = jax.random.split(jax.random.PRNGKey(args.seed if seed is None else seed), env.nr_envs)
     state = env.reset(keys, True)  # eval mode: full speed range and full sensor noise from the start
     action = jnp.zeros((env.nr_envs,) + env.single_action_space.shape)
     scan_idx, state_idx = env.obstacle_scan_obs_idx, env.obstacle_obs_idx
@@ -115,7 +125,7 @@ def collect(env, args):
         }
         return state, record
 
-    rollout = jax.jit(lambda s: jax.lax.scan(body, s, None, length=args.nr_steps))
+    rollout = jax.jit(lambda s: jax.lax.scan(body, s, None, length=nr_steps or args.nr_steps))
     _, records = rollout(state)
     return {name: np.asarray(value) for name, value in records.items()}  # [T, E, ...]
 

@@ -10,9 +10,9 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem-per-cpu=15G
 #SBATCH --time=9:59:59
-#SBATCH --array=0-32
+#SBATCH --array=0-38
 
-# Go2 with moving obstacles seen through a 2D range scan: 11 variants x 3 seeds (33 array tasks).
+# Go2 with moving obstacles seen through a 2D range scan: 13 variants x 3 seeds (39 array tasks).
 # Each variant changes one thing relative to "main" (scan for policy and safety critic, scan_conv history
 # encoder, history 10, H 25).
 # Submit with: sbatch cluster_runner/sweep_go2_obstacles_scan.sh
@@ -47,6 +47,8 @@ ALL_VARIANTS=(
     "ffnn_encoder|HISTORY_ENCODER_TYPE=FFNN"
     "oracle_state|OBSTACLES_POLICY_OBSERVATION=state OBSTACLES_VALUE_OBSERVATION=state HISTORY_ENCODER_TYPE=FFNN"
     "shield_off|USE_SAFETY_LAYER=False"
+    "randomized|OBSTACLES_PRESET=train"
+    "randomized_oracle_state|OBSTACLES_PRESET=train OBSTACLES_POLICY_OBSERVATION=state OBSTACLES_VALUE_OBSERVATION=state HISTORY_ENCODER_TYPE=FFNN"
 )
 VARIANTS=()
 for variant in "${ALL_VARIANTS[@]}"; do

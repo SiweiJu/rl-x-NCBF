@@ -40,11 +40,20 @@ Enable with `--environment.obstacles.enabled=True` (or `OBSTACLES_ENABLED=True` 
   if it keeps its velocity). They respawn when they recede beyond `despawn_distance`, or when they
   outlive their expected arrival time plus `lifetime_margin_seconds` (capped at `max_lifetime_seconds`).
 - Obstacles are kinematic: no contact forces. A collision is the safety event
-  "an obstacle centre comes within `radius + robot_radius` of the base".
+  "the base comes within `robot_radius` of an obstacle's outline" (signed distance to the shape).
+- Randomization (defaults: circles moving at constant velocity, as before):
+  - `shapes.weights` over `circle`, `box` (oriented rectangle), `circles` (chain of 2–3 overlapping
+    circles) and `l_shape` (two boxes at a right angle), with size ranges per shape;
+  - `motions.weights` over `constant`, `turning`, `stop_and_go`, `accelerating` (towards a second
+    random speed) and `random_walk` (random turn rate);
+  - `scan`: per-episode noise level, dropout probability and latency (`latency_steps_range`), per
+    step angle jitter and spurious returns. All of it is scaled by the env curriculum.
+  The cluster presets (`OBSTACLES_PRESET=train` and `held_out_*`) are in
+  `cluster_runner/obstacle_presets.sh`.
 - Observations, chosen per network with `policy_observation`, `ncbf_observation` and
   `value_observation`:
-  - `state`: per obstacle, relative position and velocity in the yaw frame and the radius
-    (5 values, privileged);
+  - `state`: per obstacle, relative position and velocity in the yaw frame and the bounding radius
+    (5 values, privileged; it does not describe non-circular shapes);
   - `scan`: a planar range scan from the base (`scan.nr_rays` rays over `scan.fov_degrees`, up to
     `scan.max_range`, with range noise and dropout), given as proximity 1 − range / max_range;
   - `none`; the value critic can also take `state_and_scan`; `policy` means "same as the policy".
@@ -176,13 +185,45 @@ counterfactual of the probe; σ_epistemic over time after an obstacle appears.
 Support criterion: with the shield on, history > 1 beats history 1 at high speeds and approaches
 the privileged-state run.
 
-**Next: shape and motion randomization.** The scan makes this natural, because shape only enters
-through the returns. Randomize size (0.1–1.0 m), shape (oriented boxes, composites of circles),
-motion (turning, stop-and-go, acceleration) and the sensor (ray count, field of view, noise,
-dropout, latency, spurious returns). Hold out shapes, sizes and motions for testing and report
-collision rate and σ_epistemic on them; generalization claims need these held-out sets. Keep
-size × speed combinations mostly avoidable, otherwise the failures are unavoidable rather than
-missed (A7). Ray–box intersection and point–box distance are closed form, so this is ~1–2 days.
+**Shape and motion randomization.** The scan makes this natural, because shape only enters
+through the returns, while the privileged state only knows a bounding circle. The training preset
+(`OBSTACLES_PRESET=train`) mixes circles, boxes and chains of circles with constant, turning,
+stop-and-go and accelerating motion and randomizes the sensor. Generalization is tested on
+held-out presets the critic never saw: L shapes, random-walk motion, larger sizes, and a worse
+sensor. Keep size × speed combinations mostly avoidable, otherwise failures are unavoidable rather
+than missed (A7).
+
+Offline probe (`ncbf_tools/obstacle_generalization_probe.py`, CPU ~25 min; results in
+`results/obstacle_generalization_probe/`): critics trained on the `train` distribution, H = 25,
+AUROC / average precision for "unsafe" on new environments:
+
+| test set | single scan, conv | 10 scans, conv (3-member ensemble) | privileged state (bounding circle) |
+|---|---|---|---|
+| in distribution | 0.88 / 0.33 | 0.95 / 0.70 | 0.97 / 0.78 |
+| held-out shape (L) | 0.86 / 0.35 | 0.95 / 0.68 | 0.96 / 0.74 |
+| held-out motion (random walk) | 0.94 / 0.31 | 0.98 / 0.70 | 0.99 / 0.83 |
+| held-out size (larger) | 0.87 / 0.37 | 0.95 / 0.74 | 0.96 / 0.75 |
+| held-out sensor (worse) | 0.84 / 0.24 | 0.89 / 0.47 | 0.97 / 0.77 |
+
+- With mixed shapes and motions, the scan history still adds most of what the single scan
+  misses (0.88 → 0.95).
+- Unseen shapes, sizes and motions cost little. A worse sensor costs the most (AP 0.70 → 0.47), so
+  sensor randomization matters more for transfer than shape randomization.
+- The bounding-circle privileged state stays ahead even on L shapes: at these sizes exact velocity
+  matters more than exact shape. The case for the scan is that it is deployable, not that it
+  describes shapes better.
+- Ensemble disagreement barely flags the held-out samples (per-sample AUROC against
+  in-distribution samples 0.50–0.53; mean disagreement up 8–33 % for shape, size and sensor).
+  Members differing only in initialization and minibatch order are a weak out-of-distribution
+  signal here; Step 4 should use bootstrapped members and check this before relying on it.
+
+Cluster: the sweep's `randomized` and `randomized_oracle_state` variants train with the `train`
+preset; evaluate every checkpoint with
+`CHECKPOINT=... RUN_NAME=... sbatch cluster_runner/eval_go2_obstacles_held_out.sh` (training
+preset and the four held-out presets; export the same observation variables as in training) and
+collect with `ncbf_tools/collect_eval_summaries.py` (it adds an `obstacle_preset` column). Report
+collision rate and `ncbf_safety_layer/residual_std_epistemic` per preset; the held-out presets are
+the natural test for Step 4.
 
 ### Step 4 — uncertainty rules (A6)
 Same task and seeds, vary only the shield:
@@ -203,8 +244,8 @@ under shift (log `ncbf_safety_layer/residual_std_epistemic`); if it does not, dr
   and with the shielded action and compare realized failure rates.
 - Multi-horizon safety heads (F1) and the critic-target comparison (A2: MC vs TD vs λ targets).
 - Command-level shielding for obstacles (G2) and whole-body dodging (G3).
-- Obstacle shape and motion randomization (boxes, composites, turning and stop-and-go motion) with
-  held-out shapes and motions for testing; see Step 3b.
+- Obstacles with contact forces, obstacles in the viewer, and a 3D point cloud (ground returns,
+  occlusion by the robot body) instead of the planar scan.
 
 ## 5. Compute estimate
 

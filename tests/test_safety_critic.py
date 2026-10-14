@@ -227,6 +227,13 @@ def _make_obstacle_env(**obstacle_overrides):
     for key, value in obstacle_overrides.items():
         if key.startswith("scan_"):
             env_config.obstacles.scan[key[len("scan_"):]] = value
+        elif isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, dict):
+                    for name, weight in sub_value.items():
+                        env_config.obstacles[key][sub_key][name] = weight
+                else:
+                    env_config.obstacles[key][sub_key] = sub_value
         else:
             env_config.obstacles[key] = value
     config = config_dict.ConfigDict({"environment": env_config, "runner": {"mode": "train"}})
@@ -239,7 +246,7 @@ def _as_set(indices):
 
 @pytest.fixture(scope="module")
 def scan_env():
-    return _make_obstacle_env(policy_observation="scan", value_observation="state_and_scan", scan_nr_rays=16, scan_noise=0.0)
+    return _make_obstacle_env(policy_observation="scan", value_observation="state_and_scan", scan_nr_rays=16, scan_noise_range=(0.0, 0.0))
 
 
 def test_scan_observation_routing(scan_env):
@@ -286,7 +293,9 @@ def test_scan_observation_in_env_and_lifetime(scan_env):
     robot_xy = np.asarray(state.data.qpos[env_index, :2])
     single_internal = jax.tree_util.tree_map(lambda x: x[env_index], internal_state)
     single_internal["obstacle_pos"] = jnp.asarray([robot_xy + 2.0 * np.array([np.cos(ray_heading), np.sin(ray_heading)]), robot_xy + 50.0])
-    single_internal["obstacle_radius"] = jnp.asarray([0.25, 0.25])
+    single_internal["obstacle_prim_kind"] = jnp.asarray([[1, 0, 0], [1, 0, 0]], dtype=jnp.int32)
+    single_internal["obstacle_prim_offset"] = jnp.zeros((2, 3, 2))
+    single_internal["obstacle_prim_half"] = jnp.zeros((2, 3, 2)).at[:, 0, 0].set(0.25)
     single_data = jax.tree_util.tree_map(lambda x: x[env_index], state.data)
     proximity = np.asarray(env.get_obstacle_scan_observation(single_data, single_internal, jax.random.PRNGKey(1)))
     np.testing.assert_allclose(proximity[forward], 1.0 - 1.75 / env.obstacle_scan_max_range, atol=1e-3)
@@ -327,3 +336,103 @@ def test_scan_conv_history_encoder():
     env.obstacle_scan_obs_idx = jnp.zeros(0, dtype=int)
     with pytest.raises(ValueError):
         get_history_encoder(config, env)
+
+
+
+# ---------------------------------------------------------------------------
+# Obstacle shapes, motions and sensor randomization
+# ---------------------------------------------------------------------------
+
+def test_primitive_geometry():
+    from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.obstacle_scan import (
+        PRIMITIVE_BOX, PRIMITIVE_CIRCLE, PRIMITIVE_NONE, primitive_range_scan, primitive_signed_distance, primitives_in_world)
+
+    angles = jnp.array([0.0, jnp.pi / 2, jnp.pi])
+
+    def scan(centres, box_angles, half, kinds):
+        return np.asarray(primitive_range_scan(jnp.zeros(2), 0.0, angles, jnp.asarray(centres, dtype=jnp.float32),
+                                               jnp.asarray(box_angles, dtype=jnp.float32), jnp.asarray(half, dtype=jnp.float32),
+                                               jnp.asarray(kinds), 5.0))
+
+    np.testing.assert_allclose(scan([[2.0, 0.0]], [0.0], [[0.5, 0.3]], [PRIMITIVE_BOX]), [1.5, 5.0, 5.0], atol=1e-5)
+    np.testing.assert_allclose(scan([[2.0, 0.0]], [np.pi / 2], [[0.5, 0.3]], [PRIMITIVE_BOX])[0], 1.7, atol=1e-5)
+    np.testing.assert_allclose(scan([[2.0, 0.0]], [np.pi / 4], [[0.5, 0.5]], [PRIMITIVE_BOX])[0], 2.0 - 0.5 * np.sqrt(2.0), atol=1e-5)
+    np.testing.assert_allclose(scan([[0.1, 0.0]], [0.3], [[0.5, 0.5]], [PRIMITIVE_BOX]), [0.0, 0.0, 0.0], atol=1e-5)
+    # Circles behave as before; unused slots are ignored.
+    np.testing.assert_allclose(scan([[2.0, 0.0], [1.0, 0.0]], [0.0, 0.0], [[0.5, 0.0], [0.5, 0.5]], [PRIMITIVE_CIRCLE, PRIMITIVE_NONE]),
+                               [1.5, 5.0, 5.0], atol=1e-5)
+
+    distance = np.asarray(primitive_signed_distance(
+        jnp.zeros(2), jnp.asarray([[2.0, 0.0], [0.1, 0.0], [2.0, 2.0], [0.0, 0.0]]), jnp.zeros(4),
+        jnp.asarray([[0.5, 0.3]] * 4), jnp.asarray([PRIMITIVE_BOX, PRIMITIVE_BOX, PRIMITIVE_BOX, PRIMITIVE_NONE])))
+    np.testing.assert_allclose(distance[:3], [1.5, -0.3, np.hypot(1.5, 1.7)], atol=1e-5)
+    assert np.isinf(distance[3])
+
+    centres, world_angles, _, _ = primitives_in_world(
+        jnp.asarray([[1.0, 1.0]]), jnp.asarray([np.pi / 2]), jnp.asarray([[[1.0, 0.0]]]), jnp.asarray([[[0.2, 0.1]]]),
+        jnp.asarray([[0.0]]), jnp.asarray([[PRIMITIVE_BOX]]))
+    np.testing.assert_allclose(np.asarray(centres), [[1.0, 2.0]], atol=1e-5)
+    np.testing.assert_allclose(np.asarray(world_angles), [np.pi / 2], atol=1e-6)
+
+
+@pytest.fixture(scope="module")
+def randomized_env():
+    from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.obstacle_scan import OBSTACLE_MOTIONS, OBSTACLE_SHAPES
+
+    env = _make_obstacle_env(
+        nr_obstacles=4, policy_observation="scan", scan_nr_rays=32, scan_noise_range=(0.0, 0.0),
+        scan_latency_steps_range=(2, 2), terminate_on_collision=False,
+        shapes={"weights": {name: 1.0 for name in OBSTACLE_SHAPES}},
+        motions={"weights": {name: 1.0 for name in OBSTACLE_MOTIONS}})
+    return env
+
+
+def test_randomized_shapes_motions_and_latency(randomized_env):
+    from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.obstacle_scan import (
+        OBSTACLE_MOTIONS, PRIMITIVE_NONE, primitive_range_scan, primitive_signed_distance)
+
+    env = randomized_env
+    state = env.reset(jax.random.split(jax.random.PRNGKey(3), env.nr_envs), True)
+    action = jnp.zeros((env.nr_envs,) + env.single_action_space.shape)
+    internal = state.internal_state
+    kinds = np.asarray(internal["obstacle_prim_kind"])
+    assert np.all((kinds != PRIMITIVE_NONE).sum(axis=-1) >= 1)
+    assert np.all(np.asarray(internal["obstacle_radius"]) > 0.0)
+    assert len(np.unique(np.asarray(internal["obstacle_shape"]))) > 1
+
+    def true_scan(state, env_index):
+        single = jax.tree_util.tree_map(lambda x: x[env_index], state.internal_state)
+        ranges = primitive_range_scan(state.data.qpos[env_index, :2], single["imu_orientation_euler"][2], env.obstacle_scan_angles,
+                                      *env._obstacle_primitives(single), env.obstacle_scan_max_range)
+        return np.clip(1.0 - np.asarray(ranges) / env.obstacle_scan_max_range, 0.0, 1.0)
+
+    states = [state]
+    for _ in range(3):
+        states.append(env.step(states[-1], action))
+    # The observed scan lags the true scan by exactly two control steps.
+    scan_idx = np.asarray(env.obstacle_scan_obs_idx)
+    for env_index in range(env.nr_envs):
+        observed = np.asarray(states[3].next_observation[env_index, scan_idx])
+        np.testing.assert_allclose(observed, true_scan(states[1], env_index), atol=1e-5)
+
+    # Turning obstacles change direction by turn_rate * dt per step (unless they respawned).
+    before, after = states[2].internal_state, states[3].internal_state
+    turning = np.asarray(after["obstacle_motion"]) == OBSTACLE_MOTIONS.index("turning")
+    kept = np.asarray(after["obstacle_age"]) > np.asarray(before["obstacle_age"])
+    expected = np.asarray(before["obstacle_move_dir"]) + np.asarray(after["obstacle_turn_rate"]) * env.dt
+    np.testing.assert_allclose(np.asarray(after["obstacle_move_dir"])[turning & kept], expected[turning & kept], atol=1e-5)
+
+    # Collision follows the signed distance to the shape: put obstacle 0 of every env on the robot.
+    internal = dict(states[3].internal_state)
+    internal["obstacle_pos"] = internal["obstacle_pos"].at[:, 0, :].set(states[3].data.qpos[:, :2])
+    internal["obstacle_turn_rate"] = internal["obstacle_turn_rate"].at[:, 0].set(0.0)
+    internal["obstacle_speed"] = internal["obstacle_speed"].at[:, 0].set(0.0)
+    internal["obstacle_target_speed"] = internal["obstacle_target_speed"].at[:, 0].set(0.0)
+    collided = env.step(states[3].replace(internal_state=internal), action)
+    signed = []
+    for env_index in range(env.nr_envs):
+        single = jax.tree_util.tree_map(lambda x: x[env_index], collided.internal_state)
+        signed.append(np.min(np.asarray(primitive_signed_distance(collided.data.qpos[env_index, :2], *env._obstacle_primitives(single)))))
+    clearance = np.asarray(signed) - env.obstacle_config["robot_radius"]
+    np.testing.assert_allclose(np.asarray(collided.internal_state["obstacle_min_clearance"]), clearance, atol=1e-4)
+    assert np.all(np.asarray(collided.internal_state["obstacle_collision"]))

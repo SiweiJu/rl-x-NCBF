@@ -17,7 +17,9 @@ from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.box_space import BoxSpac
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.viewer import MujocoViewer
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.control_functions.handler import get_control_function
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.command_functions.handler import get_command_function
-from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.obstacle_scan import obstacle_range_scan
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.obstacle_scan import (
+    OBSTACLE_MOTIONS, OBSTACLE_SHAPES, PRIMITIVE_BOX, PRIMITIVE_CIRCLE, PRIMITIVE_NONE,
+    primitive_range_scan, primitive_signed_distance, primitives_in_world)
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.domain_randomization.initial_state_functions.handler import get_initial_state_function
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.sampling_functions.handler import get_sampling_function
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.reward_functions.handler import get_reward_function
@@ -73,12 +75,24 @@ class LocomotionEnv:
         scan_config = self.obstacle_config.get("scan", {})
         self.obstacle_scan_nr_rays = int(scan_config.get("nr_rays", 64)) if self.use_obstacle_scan_observation else 0
         self.obstacle_scan_max_range = float(scan_config.get("max_range", 5.0))
-        self.obstacle_scan_noise = float(scan_config.get("noise", 0.0))
-        self.obstacle_scan_dropout_prob = float(scan_config.get("dropout_prob", 0.0))
         fov = jnp.deg2rad(float(scan_config.get("fov_degrees", 360.0)))
         nr_rays = max(self.obstacle_scan_nr_rays, 1)
         # Ray angles in the yaw frame, evenly spaced over the field of view and centred on the forward axis.
         self.obstacle_scan_angles = -fov / 2.0 + (jnp.arange(nr_rays) + 0.5) * fov / nr_rays
+        self.obstacle_scan_buffer_length = int(scan_config.get("latency_steps_range", (0, 0))[1]) + 1
+
+        def normalized_weights(weights, names, default, what):
+            weights = dict(default if weights is None else weights)
+            unknown = set(weights) - set(names)
+            if unknown:
+                raise ValueError(f"environment.obstacles.{what}.weights: unknown entries {sorted(unknown)}, expected {names}")
+            values = np.array([float(weights.get(name, 0.0)) for name in names])
+            if np.any(values < 0.0) or values.sum() <= 0.0:
+                raise ValueError(f"environment.obstacles.{what}.weights must be non-negative with a positive sum")
+            return jnp.asarray(values / values.sum())
+
+        self.obstacle_shape_probs = normalized_weights(self.obstacle_config.get("shapes", {}).get("weights"), OBSTACLE_SHAPES, {"circle": 1.0}, "shapes")
+        self.obstacle_motion_probs = normalized_weights(self.obstacle_config.get("motions", {}).get("weights"), OBSTACLE_MOTIONS, {"constant": 1.0}, "motions")
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
         safety_config = env_config.get("safety", {})
@@ -803,10 +817,99 @@ class LocomotionEnv:
         return post_drop_truncated
 
     
+    def _sample_obstacle_shapes(self, key, nr):
+        """Primitives of nr new obstacles, drawn from shapes.weights (see OBSTACLE_SHAPES)."""
+        cfg = self.obstacle_config
+        shape_cfg = cfg.get("shapes", {})
+        keys = jax.random.split(key, 9)
+        shape = jax.random.choice(keys[0], len(OBSTACLE_SHAPES), (nr,), p=self.obstacle_shape_probs)
+        zeros = jnp.zeros((nr,))
+
+        def uniform(k, value_range, shape=(nr,)):
+            return jax.random.uniform(k, shape, minval=value_range[0], maxval=value_range[1])
+
+        def slots(*columns):  # list of P per-obstacle arrays -> [nr, P]
+            return jnp.stack(columns, axis=-1)
+
+        # circle
+        radius = uniform(keys[1], cfg["radius_range"])
+        circle = {
+            "kind": slots(jnp.full((nr,), PRIMITIVE_CIRCLE), jnp.zeros((nr,), int), jnp.zeros((nr,), int)),
+            "offset": jnp.zeros((nr, 3, 2)),
+            "half": jnp.stack([slots(radius, zeros, zeros), jnp.zeros((nr, 3))], axis=-1),
+            "angle": jnp.zeros((nr, 3)),
+        }
+        # box
+        half_length = uniform(keys[2], shape_cfg.get("box_half_length_range", (0.15, 0.5)))
+        half_width = uniform(keys[3], shape_cfg.get("box_half_width_range", (0.1, 0.3)))
+        box = {
+            "kind": slots(jnp.full((nr,), PRIMITIVE_BOX), jnp.zeros((nr,), int), jnp.zeros((nr,), int)),
+            "offset": jnp.zeros((nr, 3, 2)),
+            "half": jnp.stack([slots(half_length, zeros, zeros), slots(half_width, zeros, zeros)], axis=-1),
+            "angle": jnp.zeros((nr, 3)),
+        }
+        # chain of 2-3 overlapping circles along the body axis (a person with a bag, a cart)
+        count_range = shape_cfg.get("circles_count_range", (2, 3))
+        count = jax.random.randint(keys[4], (nr,), count_range[0], count_range[1] + 1)
+        radii = uniform(keys[5], cfg["radius_range"], (nr, 3))
+        spacing = 1.6 * jnp.max(radii, axis=-1)
+        three = count >= 3
+        x_offsets = jnp.where(three[:, None], jnp.stack([-spacing, zeros, spacing], axis=-1),
+                              jnp.stack([-0.5 * spacing, 0.5 * spacing, zeros], axis=-1))
+        circles = {
+            "kind": slots(jnp.full((nr,), PRIMITIVE_CIRCLE), jnp.full((nr,), PRIMITIVE_CIRCLE),
+                          jnp.where(three, PRIMITIVE_CIRCLE, PRIMITIVE_NONE)),
+            "offset": jnp.stack([x_offsets, jnp.zeros((nr, 3))], axis=-1),
+            "half": jnp.stack([radii, jnp.zeros((nr, 3))], axis=-1),
+            "angle": jnp.zeros((nr, 3)),
+        }
+        # L shape: two boxes meeting at a right angle, centred on their bounding box
+        arm_a = uniform(keys[6], shape_cfg.get("l_shape_arm_half_length_range", (0.25, 0.5)))
+        arm_b = uniform(keys[7], shape_cfg.get("l_shape_arm_half_length_range", (0.25, 0.5)))
+        arm_width = uniform(keys[8], shape_cfg.get("l_shape_arm_half_width_range", (0.05, 0.15)))
+        centre_x, centre_y = 0.5 * (arm_a - arm_width), 0.5 * (arm_b - arm_width)
+        l_shape = {
+            "kind": slots(jnp.full((nr,), PRIMITIVE_BOX), jnp.full((nr,), PRIMITIVE_BOX), jnp.zeros((nr,), int)),
+            "offset": jnp.stack([slots(arm_a - arm_width - centre_x, -centre_x, zeros),
+                                 slots(-centre_y, arm_b - arm_width - centre_y, zeros)], axis=-1),
+            "half": jnp.stack([slots(arm_a, arm_width, zeros), slots(arm_width, arm_b, zeros)], axis=-1),
+            "angle": jnp.zeros((nr, 3)),
+        }
+
+        options = {"circle": circle, "box": box, "circles": circles, "l_shape": l_shape}
+        primitives = {}
+        for field in ("kind", "offset", "half", "angle"):
+            value = options[OBSTACLE_SHAPES[0]][field]
+            for index, name in enumerate(OBSTACLE_SHAPES[1:], start=1):
+                selected = (shape == index).reshape((nr,) + (1,) * (value.ndim - 1))
+                value = jnp.where(selected, options[name][field], value)
+            primitives[field] = value
+        primitives["kind"] = primitives["kind"].astype(jnp.int32)
+        extent = jnp.where(primitives["kind"] == PRIMITIVE_BOX, jnp.linalg.norm(primitives["half"], axis=-1),
+                           jnp.where(primitives["kind"] == PRIMITIVE_CIRCLE, primitives["half"][..., 0], 0.0))
+        primitives["bounding_radius"] = jnp.max(jnp.linalg.norm(primitives["offset"], axis=-1) + extent, axis=-1)
+        primitives["shape"] = shape.astype(jnp.int32)
+        return primitives
+
+
+    def _obstacle_speed(self, internal_state, age):
+        """Speed of each obstacle at a given age, following its motion type."""
+        motion = internal_state["obstacle_motion"]
+        speed = internal_state["obstacle_speed"]
+        moving_phase = jnp.mod(age + internal_state["obstacle_phase"], internal_state["obstacle_period"])
+        stop_and_go = jnp.where(moving_phase < internal_state["obstacle_duty"] * internal_state["obstacle_period"], speed, 0.0)
+        change = internal_state["obstacle_target_speed"] - speed
+        accelerating = speed + jnp.clip(change, -internal_state["obstacle_accel"] * age, internal_state["obstacle_accel"] * age)
+        speed = jnp.where(motion == OBSTACLE_MOTIONS.index("stop_and_go"), stop_and_go, speed)
+        return jnp.where(motion == OBSTACLE_MOTIONS.index("accelerating"), accelerating, speed)
+
+
     def _sample_obstacles(self, robot_xy, robot_vel_xy, internal_state, key, respawn_mask):
         """Respawn the obstacles selected by respawn_mask on a ring around the robot, heading at it."""
         cfg = self.obstacle_config
-        distance_key, angle_key, aim_key, speed_key, radius_key = jax.random.split(key, 5)
+        motion_cfg = cfg.get("motions", {})
+        (distance_key, angle_key, aim_key, speed_key, shape_key, heading_key, motion_key,
+         turn_key, turn_sign_key, accel_key, target_speed_key, period_key, duty_key, phase_key) = jax.random.split(key, 14)
         nr = self.nr_obstacles
 
         distance = jax.random.uniform(distance_key, (nr,), minval=cfg["spawn_distance_range"][0], maxval=cfg["spawn_distance_range"][1])
@@ -817,7 +920,8 @@ class LocomotionEnv:
         if cfg.get("speed_curriculum", True):
             max_speed = min_speed + internal_state["env_curriculum_coeff"] * (max_speed - min_speed)
         speed = min_speed + jax.random.uniform(speed_key, (nr,)) * (max_speed - min_speed)
-        radius = jax.random.uniform(radius_key, (nr,), minval=cfg["radius_range"][0], maxval=cfg["radius_range"][1])
+        target_speed = min_speed + jax.random.uniform(target_speed_key, (nr,)) * (max_speed - min_speed)
+        shapes = self._sample_obstacle_shapes(shape_key, nr)
 
         # Aim at the robot's current position, or with aim_lead at where it will be on arrival if it keeps its velocity.
         arrival_time = distance / jnp.maximum(speed, 1e-3)
@@ -829,21 +933,68 @@ class LocomotionEnv:
         lateral = jnp.stack([-to_target[:, 1], to_target[:, 0]], axis=-1)
         aim_offset = jax.random.uniform(aim_key, (nr,), minval=-cfg["aim_offset"], maxval=cfg["aim_offset"])
         heading = target + lateral * aim_offset[:, None] - spawn_pos
-        heading = heading / (jnp.linalg.norm(heading, axis=-1, keepdims=True) + 1e-6)
-        # Live long enough to pass the robot, so slow obstacles also arrive.
-        lifetime = jnp.minimum(arrival_time + cfg.get("lifetime_margin_seconds", 2.0), cfg["max_lifetime_seconds"])
+        move_dir = jnp.arctan2(heading[:, 1], heading[:, 0])
 
-        mask = respawn_mask[:, None]
-        internal_state["obstacle_pos"] = jnp.where(mask, spawn_pos, internal_state["obstacle_pos"])
-        internal_state["obstacle_vel"] = jnp.where(mask, heading * speed[:, None], internal_state["obstacle_vel"])
-        internal_state["obstacle_radius"] = jnp.where(respawn_mask, radius, internal_state["obstacle_radius"])
-        internal_state["obstacle_age"] = jnp.where(respawn_mask, 0.0, internal_state["obstacle_age"])
-        internal_state["obstacle_lifetime"] = jnp.where(respawn_mask, lifetime, internal_state["obstacle_lifetime"])
+        motion = jax.random.choice(motion_key, len(OBSTACLE_MOTIONS), (nr,), p=self.obstacle_motion_probs).astype(jnp.int32)
+        turn_range = motion_cfg.get("turn_rate_range", (0.3, 1.5))
+        turn_rate = jax.random.uniform(turn_key, (nr,), minval=turn_range[0], maxval=turn_range[1])
+        turn_rate = turn_rate * jnp.where(jax.random.bernoulli(turn_sign_key, 0.5, (nr,)), 1.0, -1.0)
+        turn_rate = jnp.where(motion == OBSTACLE_MOTIONS.index("turning"), turn_rate, 0.0)
+        accel_range = motion_cfg.get("acceleration_range", (0.5, 2.0))
+        accel = jax.random.uniform(accel_key, (nr,), minval=accel_range[0], maxval=accel_range[1])
+        accel = jnp.where(motion == OBSTACLE_MOTIONS.index("accelerating"), accel, 0.0)
+        period_range = motion_cfg.get("stop_and_go_period_range", (1.0, 3.0))
+        period = jax.random.uniform(period_key, (nr,), minval=period_range[0], maxval=period_range[1])
+        duty_range = motion_cfg.get("stop_and_go_duty_range", (0.3, 0.7))
+        duty = jax.random.uniform(duty_key, (nr,), minval=duty_range[0], maxval=duty_range[1])
+        duty = jnp.where(motion == OBSTACLE_MOTIONS.index("stop_and_go"), duty, 1.0)
+        phase = jax.random.uniform(phase_key, (nr,)) * period
+
+        # Live long enough to pass the robot, so slow obstacles also arrive.
+        effective_speed = jnp.where(motion == OBSTACLE_MOTIONS.index("stop_and_go"), speed * duty, speed)
+        effective_speed = jnp.where(motion == OBSTACLE_MOTIONS.index("accelerating"), jnp.minimum(speed, target_speed), effective_speed)
+        lifetime = distance / jnp.maximum(effective_speed, 0.3) + cfg.get("lifetime_margin_seconds", 2.0)
+        lifetime = jnp.minimum(lifetime, cfg["max_lifetime_seconds"])
+
+        new_values = {
+            "obstacle_pos": spawn_pos,
+            "obstacle_heading": jax.random.uniform(heading_key, (nr,), minval=0.0, maxval=2.0 * jnp.pi),
+            "obstacle_radius": shapes["bounding_radius"],
+            "obstacle_shape": shapes["shape"],
+            "obstacle_prim_kind": shapes["kind"],
+            "obstacle_prim_offset": shapes["offset"],
+            "obstacle_prim_half": shapes["half"],
+            "obstacle_prim_angle": shapes["angle"],
+            "obstacle_motion": motion,
+            "obstacle_speed": speed,
+            "obstacle_move_dir": move_dir,
+            "obstacle_turn_rate": turn_rate,
+            "obstacle_accel": accel,
+            "obstacle_target_speed": target_speed,
+            "obstacle_period": period,
+            "obstacle_duty": duty,
+            "obstacle_phase": phase,
+            "obstacle_age": jnp.zeros((nr,)),
+            "obstacle_lifetime": lifetime,
+        }
+        for name, value in new_values.items():
+            old = internal_state[name]
+            mask = respawn_mask.reshape((nr,) + (1,) * (old.ndim - 1))
+            internal_state[name] = jnp.where(mask, value.astype(old.dtype), old)
+        initial_speed = self._obstacle_speed(internal_state, internal_state["obstacle_age"])
+        initial_vel = initial_speed[:, None] * jnp.stack([jnp.cos(internal_state["obstacle_move_dir"]), jnp.sin(internal_state["obstacle_move_dir"])], axis=-1)
+        internal_state["obstacle_vel"] = jnp.where(respawn_mask[:, None], initial_vel, internal_state["obstacle_vel"])
+
+
+    def _obstacle_primitives(self, internal_state):
+        return primitives_in_world(
+            internal_state["obstacle_pos"], internal_state["obstacle_heading"], internal_state["obstacle_prim_offset"],
+            internal_state["obstacle_prim_half"], internal_state["obstacle_prim_angle"], internal_state["obstacle_prim_kind"])
 
 
     def _update_obstacle_collision(self, robot_xy, internal_state):
-        distance = jnp.linalg.norm(internal_state["obstacle_pos"] - robot_xy[None, :], axis=-1)
-        clearance = distance - internal_state["obstacle_radius"] - self.obstacle_config["robot_radius"]
+        signed_distance = primitive_signed_distance(robot_xy, *self._obstacle_primitives(internal_state))
+        clearance = jnp.min(signed_distance.reshape(self.nr_obstacles, -1), axis=-1) - self.obstacle_config["robot_radius"]
         internal_state["obstacle_min_clearance"] = jnp.min(clearance)
         internal_state["obstacle_collision"] = jnp.any(clearance < 0.0)
 
@@ -851,19 +1002,46 @@ class LocomotionEnv:
     def _reset_obstacles(self, data, internal_state, key):
         if not self.use_obstacles:
             return
+        spawn_key, noise_key, dropout_key, latency_key = jax.random.split(key, 4)
         robot_xy = data.qpos[:2]
-        self._sample_obstacles(robot_xy, data.qvel[:2], internal_state, key, jnp.ones(self.nr_obstacles, dtype=bool))
+        self._sample_obstacles(robot_xy, data.qvel[:2], internal_state, spawn_key, jnp.ones(self.nr_obstacles, dtype=bool))
         self._update_obstacle_collision(robot_xy, internal_state)
+        # Sensor parameters drawn once per episode
+        scan_cfg = self.obstacle_config.get("scan", {})
+        noise_range = scan_cfg.get("noise_range", (0.0, 0.0))
+        dropout_range = scan_cfg.get("dropout_prob_range", (0.0, 0.0))
+        latency_range = scan_cfg.get("latency_steps_range", (0, 0))
+        internal_state["obstacle_scan_noise"] = jax.random.uniform(noise_key, (), minval=noise_range[0], maxval=noise_range[1])
+        internal_state["obstacle_scan_dropout"] = jax.random.uniform(dropout_key, (), minval=dropout_range[0], maxval=dropout_range[1])
+        internal_state["obstacle_scan_latency"] = jax.random.randint(latency_key, (), latency_range[0], latency_range[1] + 1).astype(jnp.int32)
+        internal_state["obstacle_scan_buffer_valid"] = jnp.asarray(False)
 
 
     def _step_obstacles(self, data, internal_state, key):
         if not self.use_obstacles:
             return
         cfg = self.obstacle_config
+        motion_cfg = cfg.get("motions", {})
+        respawn_key, walk_key = jax.random.split(key)
         robot_xy = data.qpos[:2]
         robot_vel_xy = data.qvel[:2]
-        internal_state["obstacle_pos"] = internal_state["obstacle_pos"] + internal_state["obstacle_vel"] * self.dt
+
+        # Random-walk obstacles change their turn rate; turning and random-walk obstacles rotate with their path.
+        random_walk = internal_state["obstacle_motion"] == OBSTACLE_MOTIONS.index("random_walk")
+        max_turn = motion_cfg.get("random_walk_max_turn_rate", 2.0)
+        walked_turn_rate = jnp.clip(
+            internal_state["obstacle_turn_rate"]
+            + motion_cfg.get("random_walk_turn_noise", 2.0) * jnp.sqrt(self.dt) * jax.random.normal(walk_key, (self.nr_obstacles,)),
+            -max_turn, max_turn)
+        internal_state["obstacle_turn_rate"] = jnp.where(random_walk, walked_turn_rate, internal_state["obstacle_turn_rate"])
+        internal_state["obstacle_move_dir"] = internal_state["obstacle_move_dir"] + internal_state["obstacle_turn_rate"] * self.dt
+        internal_state["obstacle_heading"] = internal_state["obstacle_heading"] + internal_state["obstacle_turn_rate"] * self.dt
+
         internal_state["obstacle_age"] = internal_state["obstacle_age"] + self.dt
+        speed = self._obstacle_speed(internal_state, internal_state["obstacle_age"])
+        move_dir = internal_state["obstacle_move_dir"]
+        internal_state["obstacle_vel"] = speed[:, None] * jnp.stack([jnp.cos(move_dir), jnp.sin(move_dir)], axis=-1)
+        internal_state["obstacle_pos"] = internal_state["obstacle_pos"] + internal_state["obstacle_vel"] * self.dt
         # Collision is checked before respawning so an obstacle cannot disappear on the step it hits.
         self._update_obstacle_collision(robot_xy, internal_state)
 
@@ -872,7 +1050,7 @@ class LocomotionEnv:
         receding = jnp.sum(relative_pos * relative_vel, axis=-1) > 0.0
         far = jnp.linalg.norm(relative_pos, axis=-1) > cfg["despawn_distance"]
         too_old = internal_state["obstacle_age"] > internal_state["obstacle_lifetime"]
-        self._sample_obstacles(robot_xy, robot_vel_xy, internal_state, key, (receding & far) | too_old)
+        self._sample_obstacles(robot_xy, robot_vel_xy, internal_state, respawn_key, (receding & far) | too_old)
 
 
     def get_obstacle_observation(self, data, internal_state, key):
@@ -907,23 +1085,40 @@ class LocomotionEnv:
 
 
     def get_obstacle_scan_observation(self, data, internal_state, key):
-        """Planar range scan from the base in the yaw frame, as proximity 1 - range / max_range (0 = nothing in range)."""
+        """Planar range scan from the base in the yaw frame, as proximity 1 - range / max_range (0 = nothing in range).
+
+        Per-episode noise level, dropout and latency (drawn in _reset_obstacles) and per-step angle jitter and
+        spurious returns are all scaled by the env curriculum coefficient.
+        """
         if not self.use_obstacle_scan_observation:
             return jnp.zeros(0)
-        noise_key, dropout_key = jax.random.split(key)
-        ranges = obstacle_range_scan(
-            data.qpos[:2],
-            internal_state["imu_orientation_euler"][2],
-            self.obstacle_scan_angles,
-            internal_state["obstacle_pos"],
-            internal_state["obstacle_radius"],
-            self.obstacle_scan_max_range,
-        )
-        noise_scale = self.obstacle_scan_noise * internal_state["env_curriculum_coeff"]
-        ranges = ranges + jax.random.uniform(noise_key, ranges.shape, minval=-1.0, maxval=1.0) * noise_scale
-        dropped = jax.random.uniform(dropout_key, ranges.shape) < self.obstacle_scan_dropout_prob * internal_state["env_curriculum_coeff"]
-        ranges = jnp.where(dropped, self.obstacle_scan_max_range, ranges)
-        return jnp.clip(1.0 - ranges / self.obstacle_scan_max_range, 0.0, 1.0)
+        scan_cfg = self.obstacle_config.get("scan", {})
+        noise_key, dropout_key, jitter_key, spurious_key, spurious_range_key = jax.random.split(key, 5)
+        coeff = internal_state["env_curriculum_coeff"]
+        nr_rays = self.obstacle_scan_nr_rays
+        max_range = self.obstacle_scan_max_range
+
+        jitter = scan_cfg.get("angle_jitter", 0.0) * coeff
+        ray_angles = self.obstacle_scan_angles + jax.random.uniform(jitter_key, (nr_rays,), minval=-1.0, maxval=1.0) * jitter
+        ranges = primitive_range_scan(data.qpos[:2], internal_state["imu_orientation_euler"][2], ray_angles,
+                                      *self._obstacle_primitives(internal_state), max_range)
+        ranges = ranges + jax.random.uniform(noise_key, (nr_rays,), minval=-1.0, maxval=1.0) * internal_state["obstacle_scan_noise"] * coeff
+        spurious = jax.random.uniform(spurious_key, (nr_rays,)) < scan_cfg.get("spurious_prob", 0.0) * coeff
+        spurious_range = jax.random.uniform(spurious_range_key, (nr_rays,), minval=0.3, maxval=max_range)
+        ranges = jnp.where(spurious, jnp.minimum(ranges, spurious_range), ranges)
+        dropped = jax.random.uniform(dropout_key, (nr_rays,)) < internal_state["obstacle_scan_dropout"] * coeff
+        ranges = jnp.where(dropped, max_range, ranges)
+        proximity = jnp.clip(1.0 - ranges / max_range, 0.0, 1.0)
+
+        # Latency: keep the last scans, newest first, and return the delayed one.
+        buffer = internal_state["obstacle_scan_buffer"]
+        buffer = jnp.where(internal_state["obstacle_scan_buffer_valid"],
+                           jnp.concatenate([proximity[None, :], buffer[:-1]], axis=0),
+                           jnp.tile(proximity[None, :], (buffer.shape[0], 1)))
+        internal_state["obstacle_scan_buffer"] = buffer
+        internal_state["obstacle_scan_buffer_valid"] = jnp.asarray(True)
+        delay = jnp.clip(jnp.round(internal_state["obstacle_scan_latency"] * coeff), 0, buffer.shape[0] - 1).astype(jnp.int32)
+        return buffer[delay]
 
 
     def render(self, state):
@@ -1066,8 +1261,28 @@ class LocomotionEnv:
             "obstacle_radius": jnp.zeros(self.nr_obstacles),
             "obstacle_age": jnp.zeros(self.nr_obstacles),
             "obstacle_lifetime": jnp.zeros(self.nr_obstacles),
+            "obstacle_heading": jnp.zeros(self.nr_obstacles),
+            "obstacle_shape": jnp.zeros(self.nr_obstacles, dtype=jnp.int32),
+            "obstacle_prim_kind": jnp.zeros((self.nr_obstacles, 3), dtype=jnp.int32),
+            "obstacle_prim_offset": jnp.zeros((self.nr_obstacles, 3, 2)),
+            "obstacle_prim_half": jnp.zeros((self.nr_obstacles, 3, 2)),
+            "obstacle_prim_angle": jnp.zeros((self.nr_obstacles, 3)),
+            "obstacle_motion": jnp.zeros(self.nr_obstacles, dtype=jnp.int32),
+            "obstacle_speed": jnp.zeros(self.nr_obstacles),
+            "obstacle_move_dir": jnp.zeros(self.nr_obstacles),
+            "obstacle_turn_rate": jnp.zeros(self.nr_obstacles),
+            "obstacle_accel": jnp.zeros(self.nr_obstacles),
+            "obstacle_target_speed": jnp.zeros(self.nr_obstacles),
+            "obstacle_period": jnp.ones(self.nr_obstacles),
+            "obstacle_duty": jnp.ones(self.nr_obstacles),
+            "obstacle_phase": jnp.zeros(self.nr_obstacles),
             "obstacle_collision": False,
             "obstacle_min_clearance": 0.0,
+            "obstacle_scan_noise": 0.0,
+            "obstacle_scan_dropout": 0.0,
+            "obstacle_scan_latency": jnp.asarray(0, dtype=jnp.int32),
+            "obstacle_scan_buffer": jnp.zeros((self.obstacle_scan_buffer_length, self.obstacle_scan_nr_rays)),
+            "obstacle_scan_buffer_valid": jnp.asarray(False),
         }
         self.command_function.init(internal_state)
         self.reward_function.init(internal_state, mjx_model)
