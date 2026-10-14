@@ -62,6 +62,9 @@ fi
 if [[ -n "${EVALUATION_ACTIVE:-}" ]]; then
     extra_args+=(--algorithm.evaluation_active="${EVALUATION_ACTIVE}")
 fi
+# Moving obstacles (see environment.obstacles in the mjx default config).
+source "${SCRIPT_DIR}/obstacle_args.sh"
+
 if [[ "${BALL_PLATE_ENABLED}" == "True" ]]; then
     : "${BALL_PLATE_INCLUDE_OBSERVATIONS:?BALL_PLATE_INCLUDE_OBSERVATIONS must be set for ball experiments}"
     extra_args+=(

@@ -46,6 +46,11 @@ class LocomotionEnv:
         self.ball_plate_post_drop_truncation_seconds = float(self.ball_plate_config.get("post_drop_truncation_seconds"))
         self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand"))
         self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations"))
+        self.obstacle_config = env_config.get("obstacles", {})
+        self.use_obstacles = bool(self.obstacle_config.get("enabled", False))
+        self.nr_obstacles = int(self.obstacle_config.get("nr_obstacles", 0)) if self.use_obstacles else 0
+        self.include_obstacle_observations = self.use_obstacles and bool(self.obstacle_config.get("include_observations", True))
+        self.nr_obstacle_observations = 5 * self.nr_obstacles  # per obstacle: relative xy, relative velocity xy, radius
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
         safety_config = env_config.get("safety", {})
@@ -770,6 +775,92 @@ class LocomotionEnv:
         return post_drop_truncated
 
     
+    def _sample_obstacles(self, robot_xy, internal_state, key, respawn_mask):
+        """Respawn the obstacles selected by respawn_mask on a ring around the robot, heading at it."""
+        cfg = self.obstacle_config
+        distance_key, angle_key, aim_key, speed_key, radius_key = jax.random.split(key, 5)
+        nr = self.nr_obstacles
+
+        distance = jax.random.uniform(distance_key, (nr,), minval=cfg["spawn_distance_range"][0], maxval=cfg["spawn_distance_range"][1])
+        angle = jax.random.uniform(angle_key, (nr,), minval=0.0, maxval=2.0 * jnp.pi)
+        spawn_pos = robot_xy[None, :] + distance[:, None] * jnp.stack([jnp.cos(angle), jnp.sin(angle)], axis=-1)
+
+        to_robot = robot_xy[None, :] - spawn_pos
+        to_robot = to_robot / (jnp.linalg.norm(to_robot, axis=-1, keepdims=True) + 1e-6)
+        lateral = jnp.stack([-to_robot[:, 1], to_robot[:, 0]], axis=-1)
+        aim_offset = jax.random.uniform(aim_key, (nr,), minval=-cfg["aim_offset"], maxval=cfg["aim_offset"])
+        heading = robot_xy[None, :] + lateral * aim_offset[:, None] - spawn_pos
+        heading = heading / (jnp.linalg.norm(heading, axis=-1, keepdims=True) + 1e-6)
+
+        min_speed, max_speed = cfg["speed_range"]
+        if cfg.get("speed_curriculum", True):
+            max_speed = min_speed + internal_state["env_curriculum_coeff"] * (max_speed - min_speed)
+        speed = min_speed + jax.random.uniform(speed_key, (nr,)) * (max_speed - min_speed)
+        radius = jax.random.uniform(radius_key, (nr,), minval=cfg["radius_range"][0], maxval=cfg["radius_range"][1])
+
+        mask = respawn_mask[:, None]
+        internal_state["obstacle_pos"] = jnp.where(mask, spawn_pos, internal_state["obstacle_pos"])
+        internal_state["obstacle_vel"] = jnp.where(mask, heading * speed[:, None], internal_state["obstacle_vel"])
+        internal_state["obstacle_radius"] = jnp.where(respawn_mask, radius, internal_state["obstacle_radius"])
+        internal_state["obstacle_age"] = jnp.where(respawn_mask, 0.0, internal_state["obstacle_age"])
+
+
+    def _update_obstacle_collision(self, robot_xy, internal_state):
+        distance = jnp.linalg.norm(internal_state["obstacle_pos"] - robot_xy[None, :], axis=-1)
+        clearance = distance - internal_state["obstacle_radius"] - self.obstacle_config["robot_radius"]
+        internal_state["obstacle_min_clearance"] = jnp.min(clearance)
+        internal_state["obstacle_collision"] = jnp.any(clearance < 0.0)
+
+
+    def _reset_obstacles(self, data, internal_state, key):
+        if not self.use_obstacles:
+            return
+        robot_xy = data.qpos[:2]
+        self._sample_obstacles(robot_xy, internal_state, key, jnp.ones(self.nr_obstacles, dtype=bool))
+        self._update_obstacle_collision(robot_xy, internal_state)
+
+
+    def _step_obstacles(self, data, internal_state, key):
+        if not self.use_obstacles:
+            return
+        cfg = self.obstacle_config
+        robot_xy = data.qpos[:2]
+        robot_vel_xy = data.qvel[:2]
+        internal_state["obstacle_pos"] = internal_state["obstacle_pos"] + internal_state["obstacle_vel"] * self.dt
+        internal_state["obstacle_age"] = internal_state["obstacle_age"] + self.dt
+        # Collision is checked before respawning so an obstacle cannot disappear on the step it hits.
+        self._update_obstacle_collision(robot_xy, internal_state)
+
+        relative_pos = internal_state["obstacle_pos"] - robot_xy[None, :]
+        relative_vel = internal_state["obstacle_vel"] - robot_vel_xy[None, :]
+        receding = jnp.sum(relative_pos * relative_vel, axis=-1) > 0.0
+        far = jnp.linalg.norm(relative_pos, axis=-1) > cfg["despawn_distance"]
+        too_old = internal_state["obstacle_age"] > cfg["max_lifetime_seconds"]
+        self._sample_obstacles(robot_xy, internal_state, key, (receding & far) | too_old)
+
+
+    def get_obstacle_observation(self, data, internal_state, key):
+        """Per obstacle: position and velocity relative to the base in the yaw frame, and radius (normalized)."""
+        if not self.use_obstacles:
+            return jnp.zeros(0)
+        yaw = internal_state["imu_orientation_euler"][2]
+        cos_yaw, sin_yaw = jnp.cos(yaw), jnp.sin(yaw)
+
+        def to_yaw_frame(v):
+            return jnp.stack([cos_yaw * v[..., 0] + sin_yaw * v[..., 1], -sin_yaw * v[..., 0] + cos_yaw * v[..., 1]], axis=-1)
+
+        relative_pos = to_yaw_frame(internal_state["obstacle_pos"] - data.qpos[:2][None, :])
+        relative_vel = to_yaw_frame(internal_state["obstacle_vel"] - data.qvel[:2][None, :])
+        noise_scale = self.obstacle_config.get("observation_noise", 0.0) * internal_state["env_curriculum_coeff"]
+        relative_pos = relative_pos + jax.random.uniform(key, relative_pos.shape, minval=-1.0, maxval=1.0) * noise_scale
+        per_obstacle = jnp.concatenate([
+            relative_pos / 5.0,
+            relative_vel / 5.0,
+            internal_state["obstacle_radius"][:, None] / 0.5,
+        ], axis=-1)
+        return per_obstacle.reshape(-1)
+
+
     def render(self, state):
         mjx_model = state.mjx_model
         mj_model = self.viewer.model
@@ -905,6 +996,12 @@ class LocomotionEnv:
             "ball_plate_post_drop_truncated": False,
             "nr_collisions_in_nominal": 0,
             "history_stack": history_stack,
+            "obstacle_pos": jnp.zeros((self.nr_obstacles, 2)),
+            "obstacle_vel": jnp.zeros((self.nr_obstacles, 2)),
+            "obstacle_radius": jnp.zeros(self.nr_obstacles),
+            "obstacle_age": jnp.zeros(self.nr_obstacles),
+            "obstacle_collision": False,
+            "obstacle_min_clearance": 0.0,
         }
         self.command_function.init(internal_state)
         self.reward_function.init(internal_state, mjx_model)
@@ -944,7 +1041,7 @@ class LocomotionEnv:
 
     @partial(jax.jit, static_argnums=(0,))
     def _reset(self, state):
-        key, initial_state_key, terrain_key, domain_randomization_key, ball_plate_key, command_key, observation_key = jax.random.split(state.key, 7)
+        key, initial_state_key, terrain_key, domain_randomization_key, ball_plate_key, command_key, observation_key, obstacle_key = jax.random.split(state.key, 8)
         state = state.replace(key=key)
 
         mjx_model = self.terrain_function.sample(state.mjx_model, state.internal_state, terrain_key)
@@ -992,9 +1089,13 @@ class LocomotionEnv:
         should_sample_commands = self.command_sampling_function.setup(command_key)
         self.command_function.get_next_command(new_internal_state, should_sample_commands, command_key)
         self._apply_ball_plate_post_drop_command(new_internal_state)
+        self._reset_obstacles(data, new_internal_state, obstacle_key)
 
         next_observation = self.get_observation(data, mjx_model, new_internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
         new_info = dict(new_state.info)
+        if self.use_obstacles:
+            new_info["env_info/obstacle_collision"] = jnp.asarray(new_internal_state["obstacle_collision"], dtype=jnp.float32)
+            new_info["env_info/obstacle_min_clearance"] = jnp.asarray(new_internal_state["obstacle_min_clearance"], dtype=jnp.float32)
         if self.use_ball_plate:
             ball_plate_metrics = self.get_ball_plate_metrics(data, new_internal_state)
             new_info[f"env_info/ball_plate_radial_distance"] = ball_plate_metrics["radial_distance"]
@@ -1048,7 +1149,7 @@ class LocomotionEnv:
 
     @partial(jax.jit, static_argnums=(0,))
     def _step(self, state, action):
-        key, action_delay_key, domain_randomization_key, command_sampling_key, command_key, observation_key, terrain_key = jax.random.split(state.key, 7)
+        key, action_delay_key, domain_randomization_key, command_sampling_key, command_key, observation_key, terrain_key, obstacle_key = jax.random.split(state.key, 8)
         state = state.replace(key=key)
 
         chosen_action = action[:self.nr_actuator_joints]
@@ -1082,9 +1183,14 @@ class LocomotionEnv:
         should_sample_commands = self.command_sampling_function.step(command_sampling_key)
         self.command_function.get_next_command(state.internal_state, should_sample_commands, command_key)
         self._apply_ball_plate_post_drop_command(state.internal_state)
+        self._step_obstacles(data, state.internal_state, obstacle_key)
 
         next_observation = self.get_observation(data, mjx_model, state.internal_state, observation_key, chosen_action)
         constraint_terminated = self.termination_function.should_terminate(state.internal_state)
+        if self.use_obstacles:
+            if self.obstacle_config.get("terminate_on_collision", True):
+                constraint_terminated = constraint_terminated | state.internal_state["obstacle_collision"]
+            reward = reward - self.obstacle_config.get("collision_penalty", 0.0) * state.internal_state["obstacle_collision"].astype(jnp.float32)
         qvel_limit_terminated = jnp.any(jnp.abs(data.qvel[:3]) == 100.0)
         terminated = constraint_terminated | qvel_limit_terminated
         truncated = (state.info_episode_store["episode_step"] >= (self.horizon - 1)) | post_drop_truncated
@@ -1129,6 +1235,9 @@ class LocomotionEnv:
         new_info["constraint/terminated"] = constraint_terminated
         new_info["constraint/safe_time"] = new_info_episode_store["episode_safe_time"]
         new_info["constraint/episode_cost"] = new_info_episode_store["episode_cost"]
+        if self.use_obstacles:
+            new_info["env_info/obstacle_collision"] = jnp.asarray(state.internal_state["obstacle_collision"], dtype=jnp.float32)
+            new_info["env_info/obstacle_min_clearance"] = jnp.asarray(state.internal_state["obstacle_min_clearance"], dtype=jnp.float32)
         if self.use_ball_plate:
             new_info["env_info/ball_plate_drop_latched"] = jnp.asarray(state.internal_state["ball_plate_drop_latched"], dtype=jnp.float32)
             new_info["env_info/ball_plate_time_since_drop"] = state.internal_state["ball_plate_time_since_drop"]
@@ -1200,6 +1309,12 @@ class LocomotionEnv:
         else:
             ball_plate_safety_observation = jnp.array([], dtype=jnp.float32)
 
+        key, obstacle_noise_key = jax.random.split(key)
+        if self.use_obstacles:
+            obstacle_safety_observation = jnp.array([(~internal_state["obstacle_collision"]).astype(jnp.float32)])
+        else:
+            obstacle_safety_observation = jnp.array([], dtype=jnp.float32)
+
         observation = jnp.concatenate([
             data.qpos[self.actuator_joint_mask_qpos],
             data.qvel[self.actuator_joint_mask_qvel],
@@ -1212,6 +1327,7 @@ class LocomotionEnv:
             command_observation,
             internal_state["imu_orientation_rotation_inverse"].apply(jnp.array([0.0, 0.0, -1.0])),
             self.get_ball_plate_observation(data, internal_state),
+            self.get_obstacle_observation(data, internal_state, obstacle_noise_key),
             jnp.array([self.policy_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             jnp.array([self.critic_exteroceptive_observation_function.get_exteroceptive_observation(data, mjx_model, internal_state)]).reshape(-1),
             qpos, # qpos all not normalized, base pose can be dummy for deployment
@@ -1220,6 +1336,7 @@ class LocomotionEnv:
             jnp.array([robot_height_safe]),
             jnp.array([body_tilt_safe]),
             ball_plate_safety_observation,
+            obstacle_safety_observation,
         ])
 
         # Add noise
@@ -1703,6 +1820,8 @@ class LocomotionEnv:
         current_observation_idx += 3
         self.ball_plate_obs_idx = jnp.array([current_observation_idx + i for i in range(self.nr_ball_plate_observations)])
         current_observation_idx += self.nr_ball_plate_observations
+        self.obstacle_obs_idx = jnp.array([current_observation_idx + i for i in range(self.nr_obstacle_observations)], dtype=int)
+        current_observation_idx += self.nr_obstacle_observations
         self.policy_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.policy_exteroceptive_observation_function.nr_exteroceptive_observations)])
         current_observation_idx += self.policy_exteroceptive_observation_function.nr_exteroceptive_observations
         self.critic_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.critic_exteroceptive_observation_function.nr_exteroceptive_observations)])
@@ -1738,6 +1857,13 @@ class LocomotionEnv:
             self.plate_not_falling_obs_idx = jnp.array([], dtype=int)
             self.ball_plate_dropped_obs_idx = jnp.array([], dtype=int)
 
+        if self.use_obstacles:
+            self.obstacle_no_collision_obs_idx = jnp.array([current_observation_idx], dtype=int)
+            current_observation_idx += 1
+        else:
+            self.obstacle_no_collision_obs_idx = jnp.array([], dtype=int)
+        obstacle_policy_obs_idx = self.obstacle_obs_idx if self.include_obstacle_observations else jnp.array([], dtype=int)
+
         ball_plate_policy_obs_idx = self.ball_plate_obs_idx if self.include_ball_plate_observations else jnp.array([], dtype=int)
         ball_plate_policy_state_obs_idx = jnp.concatenate([
             ball_plate_policy_obs_idx,
@@ -1752,6 +1878,7 @@ class LocomotionEnv:
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
             ball_plate_policy_state_obs_idx,
+            obstacle_policy_obs_idx,
             self.policy_exteroception_obs_idx,
         ], dtype=int)
 
@@ -1768,6 +1895,7 @@ class LocomotionEnv:
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
             ball_plate_policy_state_obs_idx,
+            obstacle_policy_obs_idx,
             self.critic_exteroception_obs_idx,
         ], dtype=int)
 
@@ -1805,12 +1933,18 @@ class LocomotionEnv:
             self.body_height_obs_idx,
             self.body_tilt_obs_idx,
         ]
+        ncbf_target_names = ["height", "tilt"]
         if self.use_ball_plate:
             ncbf_target_indices.extend([
                 self.ball_not_falling_obs_idx,
                 self.plate_not_falling_obs_idx,
             ])
+            ncbf_target_names.extend(["ball_drop", "plate_drop"])
+        if self.use_obstacles:
+            ncbf_target_indices.append(self.obstacle_no_collision_obs_idx)
+            ncbf_target_names.append("collision")
         self.ncbf_target_indices = jnp.concatenate(ncbf_target_indices, dtype=int)
+        self.ncbf_target_names = ncbf_target_names
         return BoxSpace(low=-jnp.inf, high=jnp.inf, shape=(current_observation_idx,), dtype=jnp.float32)
 
 

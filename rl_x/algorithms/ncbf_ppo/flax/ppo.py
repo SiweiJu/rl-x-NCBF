@@ -1508,6 +1508,12 @@ class PPO:
     def test(self, episodes):
         # self.validate_dynamics_model_on_the_real_robot()
         # return
+        if self.config.algorithm.ncbf.use_safety_layer:
+            rlx_logger.warning(
+                "ncbf_ppo.flax test(): the safety layer is disabled in this test path, so actions are NOT shielded "
+                "even with use_safety_layer=True (and action noise is added before where the shield would be). "
+                "Use ncbf_ppo.flax_full_jit with runner.mode=test for shielded evaluation."
+            )
 
         # @jax.jit
         def get_action(policy_state: TrainState, state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray, history_latent: np.ndarray):

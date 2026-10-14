@@ -10,6 +10,8 @@ from jax.scipy.special import logsumexp
 
 Array = jnp.ndarray
 
+UNCERTAINTY_SOURCES = ("none", "total", "epistemic", "aleatoric")
+
 _LOGISTIC_NORMAL_GH_NODES, _LOGISTIC_NORMAL_GH_WEIGHTS = np.polynomial.hermite.hermgauss(9)
 _LOGISTIC_NORMAL_GH_PROB_WEIGHTS = _LOGISTIC_NORMAL_GH_WEIGHTS / np.sqrt(np.pi)
 
@@ -85,12 +87,23 @@ def get_ncbf(config, env):
     min_log_std = getattr(config.algorithm.ncbf, "min_log_std", -5.0)
     max_log_std = getattr(config.algorithm.ncbf, "max_log_std", 2.0)
     residual_mc_samples = getattr(config.algorithm.ncbf, "residual_mc_samples", 16)
+    # Paper form of the DT-CBF condition: h_next >= (1 - eta) h_current + eta * gamma_c.
+    # The legacy code used "+ gamma_c" (not scaled by eta); set False to reproduce old runs.
+    gamma_c_scaled_by_eta = bool(getattr(config.algorithm.ncbf, "gamma_c_scaled_by_eta", True))
+    # Which uncertainty tightens the constraint through beta * sigma ("total" is the legacy behavior).
+    tighten_uncertainty = getattr(config.algorithm.ncbf, "tighten_uncertainty", "total")
+    # Which uncertainty scales the QP slack as in the paper, a^T u + sigma * xi >= c ("none" is legacy: 1 / lambda_s).
+    slack_uncertainty = getattr(config.algorithm.ncbf, "slack_uncertainty", "none")
 
     if safety_layer_projection not in ("soft_slack", "hard_projection"):
         raise ValueError(
             "algorithm.ncbf.safety_layer_projection must be one of "
             "'soft_slack' or 'hard_projection'"
         )
+    if tighten_uncertainty not in UNCERTAINTY_SOURCES:
+        raise ValueError(f"algorithm.ncbf.tighten_uncertainty must be one of {UNCERTAINTY_SOURCES}")
+    if slack_uncertainty not in UNCERTAINTY_SOURCES:
+        raise ValueError(f"algorithm.ncbf.slack_uncertainty must be one of {UNCERTAINTY_SOURCES}")
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
@@ -102,6 +115,9 @@ def get_ncbf(config, env):
             "linearization_is_finite": one,
             "residual_mean": zero,
             "residual_std": zero,
+            "residual_std_epistemic": zero,
+            "residual_std_aleatoric": zero,
+            "slack_sigma": zero,
             "robust_residual": zero,
             "constraint_delta": zero,
             "post_linearized_margin": zero,
@@ -163,6 +179,9 @@ def get_ncbf(config, env):
             safety_layer_projection=safety_layer_projection,
             safety_layer_min_grad_norm=safety_layer_min_grad_norm,
             post_check_actual_residual=post_check_actual_residual,
+            gamma_c_scaled_by_eta=gamma_c_scaled_by_eta,
+            tighten_uncertainty=tighten_uncertainty,
+            slack_uncertainty=slack_uncertainty,
         )
 
     # dummy
@@ -342,17 +361,29 @@ def make_get_safe_action(
     safety_layer_projection: str,
     safety_layer_min_grad_norm: float,
     post_check_actual_residual: bool,
+    gamma_c_scaled_by_eta: bool = True,
+    tighten_uncertainty: str = "total",
+    slack_uncertainty: str = "none",
 ):
     """
     Returns a JIT-able safety layer.
 
     The safety layer uses residual-level MC uncertainty:
-        R = smin(h_next) - (1 - eta_cbf) smin(h_current) - gamma_c.
+        R = smin(h_next) - (1 - eta_cbf) smin(h_current) - eta_cbf * gamma_c
+    (or "- gamma_c" when gamma_c_scaled_by_eta is False, the legacy form).
+    h is a probability, so gamma_c is a probability threshold.
 
     The curriculum coefficient passed into get_safe_action is assumed to already
     be beta_k, not a probability. Your annealing from -2 to 1 can therefore be
-    passed directly.
+    passed directly. beta multiplies the uncertainty selected by tighten_uncertainty;
+    slack_uncertainty selects the sigma that scales the QP slack (paper eq. 12-13).
     """
+    gamma_c_term = eta_cbf * gamma_c if gamma_c_scaled_by_eta else gamma_c
+
+    def select_std(stds: Dict[str, Array], source: str) -> Array:
+        if source == "none":
+            return jnp.zeros_like(stds["total"])
+        return stds[source]
 
     def component_softmin(preds: Array) -> Array:
         beta = 10.0
@@ -379,13 +410,18 @@ def make_get_safe_action(
     def residual_mean_and_std(
         current_details: Dict[str, Array],
         next_details: Dict[str, Array],
-    ) -> Tuple[Array, Array]:
+    ) -> Tuple[Array, Dict[str, Array]]:
         """
         Estimate mean/std of the scalar CBF residual using MC samples.
 
         The std is computed after sampling the full safety vector, applying the
         component softmin, and forming the scalar CBF residual. This preserves
         the coupling among safety dimensions.
+
+        Returns the residual mean and a dict of stds:
+            total:     std over all [M, E] samples (legacy behavior),
+            epistemic: std over ensemble members of the per-member mean,
+            aleatoric: root mean over members of the within-member variance.
         """
         h_current_samples = prediction_details_to_samples(
             current_details,
@@ -399,7 +435,7 @@ def make_get_safe_action(
         residual_samples = (
             h_next_samples
             - (1.0 - eta_cbf) * h_current_samples
-            - gamma_c
+            - gamma_c_term
         )  # [M, E]
 
         residual_mean = jnp.mean(residual_samples)
@@ -409,7 +445,12 @@ def make_get_safe_action(
             / jnp.maximum(n_samples - 1.0, 1.0)
         )
         residual_std = jnp.sqrt(jnp.maximum(residual_var, 0.0) + 1e-8)
-        return residual_mean, residual_std
+
+        member_means = jnp.mean(residual_samples, axis=0)  # [E]
+        epistemic_std = jnp.sqrt(jnp.var(member_means) + 1e-8)
+        aleatoric_std = jnp.sqrt(jnp.mean(jnp.var(residual_samples, axis=0)) + 1e-8)
+        stds = {"total": residual_std, "epistemic": epistemic_std, "aleatoric": aleatoric_std}
+        return residual_mean, stds
 
     @jax.jit
     def a_and_c_from_linearization(
@@ -449,23 +490,24 @@ def make_get_safe_action(
                 phi,
                 jnp.concatenate([x_t, u, latent_z], axis=-1),
             )
-            residual_mean, residual_std = residual_mean_and_std(
+            residual_mean, residual_stds = residual_mean_and_std(
                 current_details,
                 next_details,
             )
-            return residual_mean, residual_std
+            return residual_mean, residual_stds
 
-        (residual_mean, residual_std), a = jax.value_and_grad(
+        (residual_mean, residual_stds), a = jax.value_and_grad(
             residual_mean_of_u,
             has_aux=True,
         )(u0)
 
         # Freeze the std in the affine QP; beta is your annealed coefficient, e.g. -2 -> 1.
-        residual_std_sg = jax.lax.stop_gradient(residual_std)
-        robust_residual = residual_mean - beta_coeff * residual_std_sg
-        c_lin = jnp.dot(a, u0) - residual_mean + beta_coeff * residual_std_sg
+        residual_stds = jax.tree_util.tree_map(jax.lax.stop_gradient, residual_stds)
+        tighten_std = select_std(residual_stds, tighten_uncertainty)
+        robust_residual = residual_mean - beta_coeff * tighten_std
+        c_lin = jnp.dot(a, u0) - residual_mean + beta_coeff * tighten_std
 
-        return a, c_lin, residual_mean, robust_residual, residual_std_sg
+        return a, c_lin, residual_mean, robust_residual, residual_stds
 
     def actual_robust_residual_for_action(
         obs_t: Array,
@@ -488,12 +530,12 @@ def make_get_safe_action(
             phi,
             jnp.concatenate([x_t, u, latent_z], axis=-1),
         )
-        residual_mean, residual_std = residual_mean_and_std(
+        residual_mean, residual_stds = residual_mean_and_std(
             current_details,
             next_details,
         )
-        robust_residual = residual_mean - beta_coeff * residual_std
-        return residual_mean, robust_residual, residual_std
+        robust_residual = residual_mean - beta_coeff * select_std(residual_stds, tighten_uncertainty)
+        return residual_mean, robust_residual, residual_stds["total"]
 
     @jax.jit
     def get_safe_action(
@@ -512,7 +554,7 @@ def make_get_safe_action(
             action_raw,
         )
 
-        a, c, residual_mean, robust_residual, residual_std = a_and_c_from_linearization(
+        a, c, residual_mean, robust_residual, residual_stds = a_and_c_from_linearization(
             obs_t,
             action_raw,
             last_obs,
@@ -527,7 +569,9 @@ def make_get_safe_action(
         c = jnp.where(jnp.isfinite(c), c, jnp.asarray(0.0, dtype=action_raw.dtype))
         residual_mean = jnp.nan_to_num(residual_mean, nan=0.0, posinf=0.0, neginf=0.0)
         robust_residual = jnp.nan_to_num(robust_residual, nan=0.0, posinf=0.0, neginf=0.0)
-        residual_std = jnp.nan_to_num(residual_std, nan=0.0, posinf=0.0, neginf=0.0)
+        residual_stds = jax.tree_util.tree_map(lambda x: jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), residual_stds)
+        residual_std = residual_stds["total"]
+        slack_sigma = select_std(residual_stds, slack_uncertainty)
 
         aTa = jnp.dot(a, a) + 1e-12
         grad_norm = jnp.sqrt(aTa)
@@ -548,7 +592,12 @@ def make_get_safe_action(
             jnp.asarray(lambda_s, dtype=action_raw.dtype),
             jnp.asarray(1e-12, dtype=action_raw.dtype),
         )
-        soft_gain = correction_delta / (aTa + (1.0 / lambda_s_safe))
+        if slack_uncertainty == "none":
+            slack_term = 1.0 / lambda_s_safe
+        else:
+            # Paper eq. (13): u* = u0 + [c - a^T u0]_+ / (||a||^2 + sigma^2 / lambda_s) a.
+            slack_term = jnp.square(slack_sigma) / lambda_s_safe
+        soft_gain = correction_delta / (aTa + slack_term)
         hard_gain = correction_delta / aTa
         gain = hard_gain if safety_layer_projection == "hard_projection" else soft_gain
         correction = gain * a
@@ -632,6 +681,9 @@ def make_get_safe_action(
             "linearization_is_finite": linearization_is_finite.astype(action_raw.dtype),
             "residual_mean": residual_mean,
             "residual_std": residual_std,
+            "residual_std_epistemic": residual_stds["epistemic"],
+            "residual_std_aleatoric": residual_stds["aleatoric"],
+            "slack_sigma": slack_sigma,
             "robust_residual": robust_residual,
             "constraint_delta": delta,
             "post_linearized_margin": post_linearized_margin,

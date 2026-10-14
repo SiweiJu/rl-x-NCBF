@@ -41,10 +41,17 @@ def get_config(algorithm_name):
     # ncbf config
     config.ncbf = config_dict.ConfigDict()
     config.ncbf.n_ensemble = 5  # number of networks to assemble for ncbf prediction
+    config.ncbf.independent_ensemble = True  # False = legacy: train one network and repeat it n_ensemble times
+    config.ncbf.ensemble_bootstrap_prob = 0.8  # per-member Bernoulli bootstrap mask on each sample; 1.0 disables
+    config.ncbf.critic_action_index = "current"  # "current": train h(s_t, a_t); "previous": legacy h(s_t, a_{t-1})
     config.ncbf.type = 'FFNN'
     config.ncbf.H = 25  # prediction horizon
     config.ncbf.lr = 1e-3
-    config.ncbf.gamma_c = 0.0     # raw-logit safety threshold for full-jit BCE training
+    config.ncbf.gamma_c = 0.5     # safety threshold on the predicted safe probability (h is a sigmoid output)
+    config.ncbf.gamma_c_scaled_by_eta = True  # paper form h_next >= (1-eta) h + eta*gamma_c; False = legacy "+ gamma_c"
+    config.ncbf.label_discount = False  # weight negative labels by coef_decay_lambda ** steps_to_failure (paper eq. 2)
+    config.ncbf.w_temporal = 0.0  # weight of the DT-CBF temporal consistency loss (paper eq. 4-6), on-policy samples only
+    config.ncbf.lipschitz_state_only = True  # Lipschitz penalty only on the state part of the input, not on the action
     config.ncbf.w_clf = 1.0    # weight for classification loss
     config.ncbf.w_cbf = 1.0    # weight for CBF loss
     config.ncbf.w_lip = 0.0    # weight for lipschitz loss
@@ -68,8 +75,11 @@ def get_config(algorithm_name):
     config.ncbf.safety_layer_projection = "soft_slack"  # soft_slack or hard_projection
     config.ncbf.safety_layer_min_grad_norm = 0.0  # <=0 disables low-gradient guard
     config.ncbf.post_check_actual_residual = False  # expensive safety-layer debug diagnostic
-    config.ncbf.safety_layer_std_coeff_start = -2.0
-    config.ncbf.safety_layer_std_coeff_final = 1.0
+    config.ncbf.safety_layer_std_coeff_start = -2.0  # beta at the start of training (negative = relax)
+    config.ncbf.safety_layer_std_coeff_final = 1.0  # beta at the end of training; evaluation uses beta = 1
+    config.ncbf.tighten_uncertainty = "total"  # sigma used in beta*sigma: none, total, epistemic, aleatoric
+    config.ncbf.slack_uncertainty = "none"  # sigma scaling the QP slack (paper eq. 13): none (legacy 1/lambda), total, epistemic, aleatoric
+    config.ncbf.anticipation_through_shield = False  # True: backprop the anticipation loss through the shield (paper); False: stop_gradient
 
     config.ncbf_buffer = config_dict.ConfigDict()
     # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions

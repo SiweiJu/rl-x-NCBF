@@ -26,7 +26,8 @@ NR_STEPS="${NR_STEPS:-128}"
 NR_EPOCHS="${NR_EPOCHS:-4}"
 NCBF_LR="${NCBF_LR:-3e-4}"
 NCBF_H="${NCBF_H:-25}"
-NCBF_GAMMA_C="${NCBF_GAMMA_C:-0}"
+# gamma_c is a threshold on the predicted safe probability; 0 made the shield almost never active.
+NCBF_GAMMA_C="${NCBF_GAMMA_C:-0.5}"
 NCBF_ETA_CBF="${NCBF_ETA_CBF:-1.0}"
 NCBF_OUTPUT_DISTRIBUTION="${NCBF_OUTPUT_DISTRIBUTION:-logistic_normal}"
 NCBF_ACTION_CLIPPING="${NCBF_ACTION_CLIPPING:-False}"
@@ -88,6 +89,33 @@ fi
 if [[ -n "${EVALUATION_ACTIVE:-}" ]]; then
     extra_args+=(--algorithm.evaluation_active="${EVALUATION_ACTIVE}")
 fi
+# Optional safety-critic switches (unset = algorithm default).
+optional_ncbf_flags=(
+    "NCBF_INDEPENDENT_ENSEMBLE:independent_ensemble"
+    "NCBF_ENSEMBLE_BOOTSTRAP_PROB:ensemble_bootstrap_prob"
+    "NCBF_CRITIC_ACTION_INDEX:critic_action_index"
+    "NCBF_GAMMA_C_SCALED_BY_ETA:gamma_c_scaled_by_eta"
+    "NCBF_LABEL_DISCOUNT:label_discount"
+    "NCBF_W_TEMPORAL:w_temporal"
+    "NCBF_W_LIP:w_lip"
+    "NCBF_TIGHTEN_UNCERTAINTY:tighten_uncertainty"
+    "NCBF_SLACK_UNCERTAINTY:slack_uncertainty"
+    "NCBF_ANTICIPATION_THROUGH_SHIELD:anticipation_through_shield"
+    "NCBF_POLICY_LOSS_COEF:policy_loss_coef"
+    "NCBF_STD_COEFF_START:safety_layer_std_coeff_start"
+    "NCBF_STD_COEFF_FINAL:safety_layer_std_coeff_final"
+)
+for entry in "${optional_ncbf_flags[@]}"; do
+    env_name="${entry%%:*}"
+    flag_name="${entry#*:}"
+    if [[ -n "${!env_name:-}" ]]; then
+        extra_args+=(--algorithm.ncbf."${flag_name}"="${!env_name}")
+    fi
+done
+
+# Moving obstacles (see environment.obstacles in the mjx default config).
+source "${SCRIPT_DIR}/obstacle_args.sh"
+
 if [[ "${BALL_PLATE_ENABLED}" == "True" ]]; then
     : "${BALL_PLATE_INCLUDE_OBSERVATIONS:?BALL_PLATE_INCLUDE_OBSERVATIONS must be set for ball experiments}"
     extra_args+=(

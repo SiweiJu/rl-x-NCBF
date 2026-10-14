@@ -106,6 +106,25 @@ def get_config(environment_name):
             "drop_margin": 0.0,
             "drop_height": 0.08,
         },
+        # Moving obstacles that approach the robot in the ground plane. They are kinematic (no contact forces):
+        # a collision is a safety event when an obstacle comes within (radius + robot_radius) of the base.
+        # Ranges are tuples so they can be overridden from the command line, e.g. --environment.obstacles.speed_range='(2.0, 2.0)'.
+        "obstacles": {
+            "enabled": False,
+            "nr_obstacles": 2,
+            "include_observations": True,  # privileged relative position / velocity / radius of each obstacle
+            "terminate_on_collision": True,
+            "collision_penalty": 0.0,  # subtracted from the reward on a collision step
+            "radius_range": (0.15, 0.3),  # m
+            "speed_range": (0.5, 2.5),  # m/s
+            "speed_curriculum": True,  # upper speed grows from speed_range[0] with the env curriculum (eval uses the full range)
+            "spawn_distance_range": (3.0, 5.0),  # m from the robot base
+            "aim_offset": 0.3,  # m, lateral offset of the aim point around the robot
+            "despawn_distance": 6.0,  # m; a receding obstacle farther than this respawns
+            "max_lifetime_seconds": 6.0,
+            "robot_radius": 0.3,  # m, horizontal collision radius around the base
+            "observation_noise": 0.02,  # m, uniform noise on relative positions, scaled by the env curriculum
+        },
         "control_type": "pd",
         "ncbf_use_policy_observations": True,
         "nr_history_steps": 10,
