@@ -89,7 +89,8 @@ def get_config(algorithm_name):
     config.next_step_predictor = config_dict.ConfigDict()
     config.next_step_predictor.lr = 1e-3
     config.next_step_predictor.nr_minibatches = 50
-    config.next_step_predictor.history_encoder_type = 'FFNN'  # 'FFNN' or 'GRU'
+    config.next_step_predictor.history_encoder_type = 'FFNN'  # 'FFNN', 'GRU', or 'scan_conv' (circular conv over the obstacle range scan)
+    config.next_step_predictor.scan_encoder_sectors = 8  # scan_conv: angular sectors kept after pooling over rays
     config.next_step_predictor.history_encoder_hidden_size = 64
     config.next_step_predictor.decoder_output_dim = None  # Will be set to observation_dim at runtime
     config.next_step_predictor.aux_loss_coef = 1.0

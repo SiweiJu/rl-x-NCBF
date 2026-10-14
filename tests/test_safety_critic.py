@@ -185,3 +185,145 @@ def test_obstacles_move_and_collisions_terminate(obstacle_env):
     assert np.all(np.asarray(state.info["env_info/obstacle_collision"]) == 1.0)
     final_obs = np.asarray(state.actual_next_observation)
     assert np.all(final_obs[:, int(env.obstacle_no_collision_obs_idx[0])] == 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Range-scan obstacle observation
+# ---------------------------------------------------------------------------
+
+def test_range_scan_geometry():
+    from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.obstacle_scan import obstacle_range_scan
+
+    angles = jnp.array([0.0, jnp.pi / 2, jnp.pi])
+    origin = jnp.zeros(2)
+
+    def scan(obstacle_pos, obstacle_radius, yaw=0.0, origin=origin):
+        return np.asarray(obstacle_range_scan(origin, yaw, angles, jnp.asarray(obstacle_pos, dtype=jnp.float32), jnp.asarray(obstacle_radius, dtype=jnp.float32), 5.0))
+
+    # Straight ahead: hit at distance 2 - 0.5; sideways and behind see nothing.
+    np.testing.assert_allclose(scan([[2.0, 0.0]], [0.5]), [1.5, 5.0, 5.0], atol=1e-5)
+    # Rays rotate with the yaw.
+    np.testing.assert_allclose(scan([[0.0, 2.0]], [0.5], yaw=jnp.pi / 2), [1.5, 5.0, 5.0], atol=1e-5)
+    # The nearer obstacle occludes the farther one on the same ray.
+    np.testing.assert_allclose(scan([[4.0, 0.0], [2.0, 0.0]], [0.5, 0.5])[0], 1.5, atol=1e-5)
+    # A ray passing beside the obstacle misses it; an obstacle beyond max_range is not seen.
+    np.testing.assert_allclose(scan([[2.0, 0.6]], [0.5])[0], 5.0, atol=1e-5)
+    np.testing.assert_allclose(scan([[7.0, 0.0]], [0.5])[0], 5.0, atol=1e-5)
+    # An origin inside an obstacle gives 0 on every ray.
+    np.testing.assert_allclose(scan([[0.1, 0.0]], [0.5]), [0.0, 0.0, 0.0], atol=1e-5)
+
+
+def _make_obstacle_env(**obstacle_overrides):
+    from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.default_config import get_config
+    from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.create_env import create_env
+
+    env_config = get_config("ncbf_mujoco.robot_locomotion.mjx")
+    env_config.nr_envs = 2
+    env_config.device = "cpu"
+    env_config.terrain.type = "plane"
+    env_config.episode_length_in_seconds = 2
+    env_config.obstacles.enabled = True
+    env_config.obstacles.nr_obstacles = 2
+    for key, value in obstacle_overrides.items():
+        if key.startswith("scan_"):
+            env_config.obstacles.scan[key[len("scan_"):]] = value
+        else:
+            env_config.obstacles[key] = value
+    config = config_dict.ConfigDict({"environment": env_config, "runner": {"mode": "train"}})
+    return create_env(config)
+
+
+def _as_set(indices):
+    return set(np.asarray(indices).tolist())
+
+
+@pytest.fixture(scope="module")
+def scan_env():
+    return _make_obstacle_env(policy_observation="scan", value_observation="state_and_scan", scan_nr_rays=16, scan_noise=0.0)
+
+
+def test_scan_observation_routing(scan_env):
+    env = scan_env
+    scan_idx, state_idx = _as_set(env.obstacle_scan_obs_idx), _as_set(env.obstacle_obs_idx)
+    assert len(scan_idx) == 16 and len(state_idx) == 10
+    policy, ncbf, value = _as_set(env.policy_observation_indices), _as_set(env.ncbf_observation_indices), _as_set(env.critic_observation_indices)
+    assert scan_idx <= policy and not (state_idx & policy)
+    assert scan_idx <= ncbf and not (state_idx & ncbf)
+    assert scan_idx <= value and state_idx <= value
+    np.testing.assert_array_equal(np.asarray(env.history_observation_indices), np.asarray(env.ncbf_observation_indices))
+
+    # Policy blind to obstacles, safety critic (and so the history encoder) sees the scan.
+    blind = _make_obstacle_env(policy_observation="none", ncbf_observation="scan", scan_nr_rays=16)
+    blind_obstacle_idx = _as_set(blind.obstacle_scan_obs_idx) | _as_set(blind.obstacle_obs_idx)
+    assert not (blind_obstacle_idx & _as_set(blind.policy_observation_indices))
+    assert _as_set(blind.obstacle_scan_obs_idx) <= _as_set(blind.ncbf_observation_indices)
+    assert _as_set(blind.obstacle_scan_obs_idx) <= _as_set(blind.history_observation_indices)
+    assert len(blind.obstacle_obs_idx) == 0
+
+
+def test_scan_observation_in_env_and_lifetime(scan_env):
+    env = scan_env
+    state = env.reset(jax.random.split(jax.random.PRNGKey(0), env.nr_envs), False)
+    internal_state = state.internal_state
+    obs = np.asarray(state.next_observation)
+    assert obs.shape[-1] == env.single_observation_space.shape[0]
+    scan = obs[:, np.asarray(env.obstacle_scan_obs_idx)]
+    assert np.all((scan >= 0.0) & (scan <= 1.0))
+
+    # Lifetime covers the expected arrival time (distance / speed) and respects the cap.
+    distance = np.linalg.norm(np.asarray(internal_state["obstacle_pos"]) - np.asarray(state.data.qpos[:, None, :2]), axis=-1)
+    speed = np.linalg.norm(np.asarray(internal_state["obstacle_vel"]), axis=-1)
+    lifetime = np.asarray(internal_state["obstacle_lifetime"])
+    assert np.all(lifetime <= env.obstacle_config["max_lifetime_seconds"] + 1e-5)
+    assert np.all(lifetime >= np.minimum(distance / speed, env.obstacle_config["max_lifetime_seconds"]) - 1e-4)
+
+    # Put obstacle 0 two metres away along the forward-most ray: that ray reads 1 - (2 - r) / max_range.
+    env_index = 0
+    angles = np.asarray(env.obstacle_scan_angles)
+    forward = int(np.argmin(np.abs(angles)))
+    behind = int(np.argmin(np.abs(np.abs(angles) - np.pi)))
+    ray_heading = float(internal_state["imu_orientation_euler"][env_index, 2]) + angles[forward]
+    robot_xy = np.asarray(state.data.qpos[env_index, :2])
+    single_internal = jax.tree_util.tree_map(lambda x: x[env_index], internal_state)
+    single_internal["obstacle_pos"] = jnp.asarray([robot_xy + 2.0 * np.array([np.cos(ray_heading), np.sin(ray_heading)]), robot_xy + 50.0])
+    single_internal["obstacle_radius"] = jnp.asarray([0.25, 0.25])
+    single_data = jax.tree_util.tree_map(lambda x: x[env_index], state.data)
+    proximity = np.asarray(env.get_obstacle_scan_observation(single_data, single_internal, jax.random.PRNGKey(1)))
+    np.testing.assert_allclose(proximity[forward], 1.0 - 1.75 / env.obstacle_scan_max_range, atol=1e-3)
+    assert proximity[behind] == 0.0
+
+
+def test_gru_history_encoder_only_reads_selected_observations():
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.history_encoder import GRU_encoder
+
+    encoder = GRU_encoder(hidden_size=8, observation_indices=jnp.array([0, 2]))
+    x = jax.random.normal(jax.random.PRNGKey(0), (3, 4, 5))
+    params = encoder.init(jax.random.PRNGKey(1), x)
+    z = encoder.apply(params, x)
+    assert z.shape == (3, 8)
+    # Changing an unselected dimension (e.g. a safety label) must not change the latent.
+    np.testing.assert_allclose(encoder.apply(params, x.at[..., 1].set(100.0)), z, atol=1e-6)
+    assert not np.allclose(encoder.apply(params, x.at[..., 2].add(1.0)), z)
+
+
+def test_scan_conv_history_encoder():
+    from types import SimpleNamespace
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.history_encoder import get_history_encoder
+
+    # Observation layout: 3 proprioceptive dims, 16 scan rays, 2 dims the encoder must ignore.
+    env = SimpleNamespace(history_observation_indices=jnp.arange(19), obstacle_scan_obs_idx=jnp.arange(3, 19), nr_history_steps=4)
+    config = config_dict.ConfigDict({"algorithm": {"next_step_predictor": {
+        "history_encoder_type": "scan_conv", "history_encoder_hidden_size": 8, "scan_encoder_sectors": 4}}})
+    encoder = get_history_encoder(config, env)
+    x = jax.random.uniform(jax.random.PRNGKey(0), (5, 4, 21))
+    params = encoder.init(jax.random.PRNGKey(1), x)
+    z = encoder.apply(params, x)
+    assert z.shape == (5, 8)
+    np.testing.assert_allclose(encoder.apply(params, x.at[..., 19:].set(7.0)), z, atol=1e-6)
+    assert not np.allclose(encoder.apply(params, x.at[:, -1, 3].add(1.0)), z)
+    # Extra leading batch dimensions are kept.
+    assert encoder.apply(params, x[None]).shape == (1, 5, 8)
+
+    env.obstacle_scan_obs_idx = jnp.zeros(0, dtype=int)
+    with pytest.raises(ValueError):
+        get_history_encoder(config, env)

@@ -112,7 +112,20 @@ def get_config(environment_name):
         "obstacles": {
             "enabled": False,
             "nr_obstacles": 2,
-            "include_observations": True,  # privileged relative position / velocity / radius of each obstacle
+            # Obstacle information per network: "state" (privileged relative position / velocity / radius),
+            # "scan" (2D range scan around the base), "none"; ncbf and value can also be "policy" (same as the policy)
+            # and value can be "state_and_scan". The history encoder sees what the safety critic sees.
+            "policy_observation": "state",
+            "ncbf_observation": "policy",
+            "value_observation": "policy",
+            "predict_next_observation": False,  # add the safety critic's obstacle observation to the next-step predictor targets
+            "scan": {
+                "nr_rays": 64,
+                "fov_degrees": 360.0,  # centred on the forward axis
+                "max_range": 5.0,  # m
+                "noise": 0.02,  # m, uniform range noise, scaled by the env curriculum
+                "dropout_prob": 0.0,  # probability that a ray returns max_range, scaled by the env curriculum
+            },
             "terminate_on_collision": True,
             "collision_penalty": 0.0,  # subtracted from the reward on a collision step
             "radius_range": (0.15, 0.3),  # m
@@ -120,10 +133,12 @@ def get_config(environment_name):
             "speed_curriculum": True,  # upper speed grows from speed_range[0] with the env curriculum (eval uses the full range)
             "spawn_distance_range": (3.0, 5.0),  # m from the robot base
             "aim_offset": 0.3,  # m, lateral offset of the aim point around the robot
+            "aim_lead": False,  # aim at the robot's position at arrival, extrapolated with its current velocity
             "despawn_distance": 6.0,  # m; a receding obstacle farther than this respawns
-            "max_lifetime_seconds": 6.0,
+            "lifetime_margin_seconds": 2.0,  # an obstacle lives for its expected arrival time plus this margin
+            "max_lifetime_seconds": 12.0,
             "robot_radius": 0.3,  # m, horizontal collision radius around the base
-            "observation_noise": 0.02,  # m, uniform noise on relative positions, scaled by the env curriculum
+            "observation_noise": 0.02,  # m, uniform noise on relative positions in the state observation, scaled by the env curriculum
         },
         "control_type": "pd",
         "ncbf_use_policy_observations": True,

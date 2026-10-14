@@ -17,6 +17,7 @@ from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.box_space import BoxSpac
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.viewer import MujocoViewer
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.control_functions.handler import get_control_function
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.command_functions.handler import get_command_function
+from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.obstacle_scan import obstacle_range_scan
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.domain_randomization.initial_state_functions.handler import get_initial_state_function
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.sampling_functions.handler import get_sampling_function
 from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.reward_functions.handler import get_reward_function
@@ -49,8 +50,35 @@ class LocomotionEnv:
         self.obstacle_config = env_config.get("obstacles", {})
         self.use_obstacles = bool(self.obstacle_config.get("enabled", False))
         self.nr_obstacles = int(self.obstacle_config.get("nr_obstacles", 0)) if self.use_obstacles else 0
-        self.include_obstacle_observations = self.use_obstacles and bool(self.obstacle_config.get("include_observations", True))
-        self.nr_obstacle_observations = 5 * self.nr_obstacles  # per obstacle: relative xy, relative velocity xy, radius
+        # Which obstacle information each network sees: "state" (privileged relative position, velocity
+        # and radius), "scan" (2D range scan around the base), or "none".
+        self.obstacle_policy_observation = self.obstacle_config.get("policy_observation", "state") if self.use_obstacles else "none"
+        self.obstacle_ncbf_observation = self.obstacle_config.get("ncbf_observation", "policy") if self.use_obstacles else "none"
+        self.obstacle_value_observation = self.obstacle_config.get("value_observation", "policy") if self.use_obstacles else "none"
+        if self.obstacle_ncbf_observation == "policy":
+            self.obstacle_ncbf_observation = self.obstacle_policy_observation
+        if self.obstacle_value_observation == "policy":
+            self.obstacle_value_observation = self.obstacle_policy_observation
+        for name, value, allowed in (
+            ("policy_observation", self.obstacle_policy_observation, ("state", "scan", "none")),
+            ("ncbf_observation", self.obstacle_ncbf_observation, ("state", "scan", "none")),
+            ("value_observation", self.obstacle_value_observation, ("state", "scan", "state_and_scan", "none")),
+        ):
+            if value not in allowed:
+                raise ValueError(f"environment.obstacles.{name} must be one of {allowed} (or 'policy'), got {value!r}")
+        obstacle_observation_users = (self.obstacle_policy_observation, self.obstacle_ncbf_observation, self.obstacle_value_observation)
+        self.use_obstacle_state_observation = any("state" in user for user in obstacle_observation_users)
+        self.use_obstacle_scan_observation = any("scan" in user for user in obstacle_observation_users)
+        self.nr_obstacle_observations = 5 * self.nr_obstacles if self.use_obstacle_state_observation else 0  # per obstacle: relative xy, relative velocity xy, radius
+        scan_config = self.obstacle_config.get("scan", {})
+        self.obstacle_scan_nr_rays = int(scan_config.get("nr_rays", 64)) if self.use_obstacle_scan_observation else 0
+        self.obstacle_scan_max_range = float(scan_config.get("max_range", 5.0))
+        self.obstacle_scan_noise = float(scan_config.get("noise", 0.0))
+        self.obstacle_scan_dropout_prob = float(scan_config.get("dropout_prob", 0.0))
+        fov = jnp.deg2rad(float(scan_config.get("fov_degrees", 360.0)))
+        nr_rays = max(self.obstacle_scan_nr_rays, 1)
+        # Ray angles in the yaw frame, evenly spaced over the field of view and centred on the forward axis.
+        self.obstacle_scan_angles = -fov / 2.0 + (jnp.arange(nr_rays) + 0.5) * fov / nr_rays
         self.nr_envs = nr_envs
         self.nr_history_steps = env_config["nr_history_steps"]
         safety_config = env_config.get("safety", {})
@@ -775,7 +803,7 @@ class LocomotionEnv:
         return post_drop_truncated
 
     
-    def _sample_obstacles(self, robot_xy, internal_state, key, respawn_mask):
+    def _sample_obstacles(self, robot_xy, robot_vel_xy, internal_state, key, respawn_mask):
         """Respawn the obstacles selected by respawn_mask on a ring around the robot, heading at it."""
         cfg = self.obstacle_config
         distance_key, angle_key, aim_key, speed_key, radius_key = jax.random.split(key, 5)
@@ -785,24 +813,32 @@ class LocomotionEnv:
         angle = jax.random.uniform(angle_key, (nr,), minval=0.0, maxval=2.0 * jnp.pi)
         spawn_pos = robot_xy[None, :] + distance[:, None] * jnp.stack([jnp.cos(angle), jnp.sin(angle)], axis=-1)
 
-        to_robot = robot_xy[None, :] - spawn_pos
-        to_robot = to_robot / (jnp.linalg.norm(to_robot, axis=-1, keepdims=True) + 1e-6)
-        lateral = jnp.stack([-to_robot[:, 1], to_robot[:, 0]], axis=-1)
-        aim_offset = jax.random.uniform(aim_key, (nr,), minval=-cfg["aim_offset"], maxval=cfg["aim_offset"])
-        heading = robot_xy[None, :] + lateral * aim_offset[:, None] - spawn_pos
-        heading = heading / (jnp.linalg.norm(heading, axis=-1, keepdims=True) + 1e-6)
-
         min_speed, max_speed = cfg["speed_range"]
         if cfg.get("speed_curriculum", True):
             max_speed = min_speed + internal_state["env_curriculum_coeff"] * (max_speed - min_speed)
         speed = min_speed + jax.random.uniform(speed_key, (nr,)) * (max_speed - min_speed)
         radius = jax.random.uniform(radius_key, (nr,), minval=cfg["radius_range"][0], maxval=cfg["radius_range"][1])
 
+        # Aim at the robot's current position, or with aim_lead at where it will be on arrival if it keeps its velocity.
+        arrival_time = distance / jnp.maximum(speed, 1e-3)
+        target = robot_xy[None, :]
+        if cfg.get("aim_lead", False):
+            target = target + robot_vel_xy[None, :] * arrival_time[:, None]
+        to_target = target - spawn_pos
+        to_target = to_target / (jnp.linalg.norm(to_target, axis=-1, keepdims=True) + 1e-6)
+        lateral = jnp.stack([-to_target[:, 1], to_target[:, 0]], axis=-1)
+        aim_offset = jax.random.uniform(aim_key, (nr,), minval=-cfg["aim_offset"], maxval=cfg["aim_offset"])
+        heading = target + lateral * aim_offset[:, None] - spawn_pos
+        heading = heading / (jnp.linalg.norm(heading, axis=-1, keepdims=True) + 1e-6)
+        # Live long enough to pass the robot, so slow obstacles also arrive.
+        lifetime = jnp.minimum(arrival_time + cfg.get("lifetime_margin_seconds", 2.0), cfg["max_lifetime_seconds"])
+
         mask = respawn_mask[:, None]
         internal_state["obstacle_pos"] = jnp.where(mask, spawn_pos, internal_state["obstacle_pos"])
         internal_state["obstacle_vel"] = jnp.where(mask, heading * speed[:, None], internal_state["obstacle_vel"])
         internal_state["obstacle_radius"] = jnp.where(respawn_mask, radius, internal_state["obstacle_radius"])
         internal_state["obstacle_age"] = jnp.where(respawn_mask, 0.0, internal_state["obstacle_age"])
+        internal_state["obstacle_lifetime"] = jnp.where(respawn_mask, lifetime, internal_state["obstacle_lifetime"])
 
 
     def _update_obstacle_collision(self, robot_xy, internal_state):
@@ -816,7 +852,7 @@ class LocomotionEnv:
         if not self.use_obstacles:
             return
         robot_xy = data.qpos[:2]
-        self._sample_obstacles(robot_xy, internal_state, key, jnp.ones(self.nr_obstacles, dtype=bool))
+        self._sample_obstacles(robot_xy, data.qvel[:2], internal_state, key, jnp.ones(self.nr_obstacles, dtype=bool))
         self._update_obstacle_collision(robot_xy, internal_state)
 
 
@@ -835,13 +871,22 @@ class LocomotionEnv:
         relative_vel = internal_state["obstacle_vel"] - robot_vel_xy[None, :]
         receding = jnp.sum(relative_pos * relative_vel, axis=-1) > 0.0
         far = jnp.linalg.norm(relative_pos, axis=-1) > cfg["despawn_distance"]
-        too_old = internal_state["obstacle_age"] > cfg["max_lifetime_seconds"]
-        self._sample_obstacles(robot_xy, internal_state, key, (receding & far) | too_old)
+        too_old = internal_state["obstacle_age"] > internal_state["obstacle_lifetime"]
+        self._sample_obstacles(robot_xy, robot_vel_xy, internal_state, key, (receding & far) | too_old)
 
 
     def get_obstacle_observation(self, data, internal_state, key):
+        """Privileged block (if any network uses it), then the range-scan block (if any network uses it)."""
+        state_key, scan_key = jax.random.split(key)
+        return jnp.concatenate([
+            self.get_obstacle_state_observation(data, internal_state, state_key),
+            self.get_obstacle_scan_observation(data, internal_state, scan_key),
+        ])
+
+
+    def get_obstacle_state_observation(self, data, internal_state, key):
         """Per obstacle: position and velocity relative to the base in the yaw frame, and radius (normalized)."""
-        if not self.use_obstacles:
+        if not self.use_obstacle_state_observation:
             return jnp.zeros(0)
         yaw = internal_state["imu_orientation_euler"][2]
         cos_yaw, sin_yaw = jnp.cos(yaw), jnp.sin(yaw)
@@ -859,6 +904,26 @@ class LocomotionEnv:
             internal_state["obstacle_radius"][:, None] / 0.5,
         ], axis=-1)
         return per_obstacle.reshape(-1)
+
+
+    def get_obstacle_scan_observation(self, data, internal_state, key):
+        """Planar range scan from the base in the yaw frame, as proximity 1 - range / max_range (0 = nothing in range)."""
+        if not self.use_obstacle_scan_observation:
+            return jnp.zeros(0)
+        noise_key, dropout_key = jax.random.split(key)
+        ranges = obstacle_range_scan(
+            data.qpos[:2],
+            internal_state["imu_orientation_euler"][2],
+            self.obstacle_scan_angles,
+            internal_state["obstacle_pos"],
+            internal_state["obstacle_radius"],
+            self.obstacle_scan_max_range,
+        )
+        noise_scale = self.obstacle_scan_noise * internal_state["env_curriculum_coeff"]
+        ranges = ranges + jax.random.uniform(noise_key, ranges.shape, minval=-1.0, maxval=1.0) * noise_scale
+        dropped = jax.random.uniform(dropout_key, ranges.shape) < self.obstacle_scan_dropout_prob * internal_state["env_curriculum_coeff"]
+        ranges = jnp.where(dropped, self.obstacle_scan_max_range, ranges)
+        return jnp.clip(1.0 - ranges / self.obstacle_scan_max_range, 0.0, 1.0)
 
 
     def render(self, state):
@@ -1000,6 +1065,7 @@ class LocomotionEnv:
             "obstacle_vel": jnp.zeros((self.nr_obstacles, 2)),
             "obstacle_radius": jnp.zeros(self.nr_obstacles),
             "obstacle_age": jnp.zeros(self.nr_obstacles),
+            "obstacle_lifetime": jnp.zeros(self.nr_obstacles),
             "obstacle_collision": False,
             "obstacle_min_clearance": 0.0,
         }
@@ -1822,6 +1888,8 @@ class LocomotionEnv:
         current_observation_idx += self.nr_ball_plate_observations
         self.obstacle_obs_idx = jnp.array([current_observation_idx + i for i in range(self.nr_obstacle_observations)], dtype=int)
         current_observation_idx += self.nr_obstacle_observations
+        self.obstacle_scan_obs_idx = jnp.array([current_observation_idx + i for i in range(self.obstacle_scan_nr_rays)], dtype=int)
+        current_observation_idx += self.obstacle_scan_nr_rays
         self.policy_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.policy_exteroceptive_observation_function.nr_exteroceptive_observations)])
         current_observation_idx += self.policy_exteroceptive_observation_function.nr_exteroceptive_observations
         self.critic_exteroception_obs_idx = jnp.array([current_observation_idx + i for i in range(self.critic_exteroceptive_observation_function.nr_exteroceptive_observations)])
@@ -1862,7 +1930,17 @@ class LocomotionEnv:
             current_observation_idx += 1
         else:
             self.obstacle_no_collision_obs_idx = jnp.array([], dtype=int)
-        obstacle_policy_obs_idx = self.obstacle_obs_idx if self.include_obstacle_observations else jnp.array([], dtype=int)
+        def obstacle_idx_for(observation_type):
+            blocks = []
+            if "state" in observation_type:
+                blocks.append(self.obstacle_obs_idx)
+            if "scan" in observation_type:
+                blocks.append(self.obstacle_scan_obs_idx)
+            return jnp.concatenate(blocks, dtype=int) if blocks else jnp.array([], dtype=int)
+
+        obstacle_policy_obs_idx = obstacle_idx_for(self.obstacle_policy_observation)
+        obstacle_ncbf_obs_idx = obstacle_idx_for(self.obstacle_ncbf_observation)
+        obstacle_value_obs_idx = obstacle_idx_for(self.obstacle_value_observation)
 
         ball_plate_policy_obs_idx = self.ball_plate_obs_idx if self.include_ball_plate_observations else jnp.array([], dtype=int)
         ball_plate_policy_state_obs_idx = jnp.concatenate([
@@ -1870,17 +1948,20 @@ class LocomotionEnv:
             self.ball_plate_dropped_obs_idx,
         ], dtype=int) if self.use_ball_plate else jnp.array([], dtype=int)
 
-        self.policy_observation_indices = jnp.concatenate([
-            self.joint_positions_obs_idx,
-            self.joint_velocities_obs_idx,
-            self.joint_previous_actions_obs_idx,
-            self.imu_angular_vel_obs_idx,
-            self.goal_velocities_obs_idx,
-            self.gravity_vector_obs_idx,
-            ball_plate_policy_state_obs_idx,
-            obstacle_policy_obs_idx,
-            self.policy_exteroception_obs_idx,
-        ], dtype=int)
+        def policy_indices_with(obstacle_idx):
+            return jnp.concatenate([
+                self.joint_positions_obs_idx,
+                self.joint_velocities_obs_idx,
+                self.joint_previous_actions_obs_idx,
+                self.imu_angular_vel_obs_idx,
+                self.goal_velocities_obs_idx,
+                self.gravity_vector_obs_idx,
+                ball_plate_policy_state_obs_idx,
+                obstacle_idx,
+                self.policy_exteroception_obs_idx,
+            ], dtype=int)
+
+        self.policy_observation_indices = policy_indices_with(obstacle_policy_obs_idx)
 
 
         self.critic_observation_indices = jnp.concatenate([
@@ -1895,7 +1976,7 @@ class LocomotionEnv:
             self.goal_velocities_obs_idx,
             self.gravity_vector_obs_idx,
             ball_plate_policy_state_obs_idx,
-            obstacle_policy_obs_idx,
+            obstacle_value_obs_idx,
             self.critic_exteroception_obs_idx,
         ], dtype=int)
 
@@ -1905,11 +1986,15 @@ class LocomotionEnv:
 
         if self.env_config["ncbf_use_policy_observations"]:
             # this is for the state and action model used in ncbf, which uses the same obs as the policy
-            self.ncbf_observation_indices = self.policy_observation_indices
+            # (with the obstacle part chosen by obstacles.ncbf_observation)
+            self.ncbf_observation_indices = policy_indices_with(obstacle_ncbf_obs_idx)
+            # The history encoder feeds the safety critic, so it sees the same observations
+            self.history_observation_indices = self.ncbf_observation_indices
         else:
             actuator_qpos_idx = self.qpos_observation_idx[7:]
             actuator_qvel_idx = self.qvel_observation_idx[6:]
             self.ncbf_observation_indices = jnp.concatenate([actuator_qpos_idx, actuator_qvel_idx], dtype=int)
+            self.history_observation_indices = self.policy_observation_indices
 
             # note all obs here is not normalized or clipped to pass into the forward step function for dynamics models
         # TODO get rid of htis after updating safety layer function based on q
@@ -1920,11 +2005,15 @@ class LocomotionEnv:
         )
         self.act_in_ncbf_obs_idx = jnp.where(jnp.isin(self.ncbf_observation_indices, self.joint_previous_actions_obs_idx))[0]
 
+        # Optionally also predict the next obstacle observation of the safety critic, so the history
+        # encoder has a direct signal to encode obstacle motion
+        obstacle_prediction_idx = obstacle_ncbf_obs_idx if self.obstacle_config.get("predict_next_observation", False) else jnp.array([], dtype=int)
         self.next_state_indices = jnp.concatenate([
             self.qvel_observation_idx[:3],
             self.joint_positions_obs_idx,
             self.joint_velocities_obs_idx,
             self.ball_plate_obs_idx,
+            obstacle_prediction_idx,
         ], dtype=int
         )
 

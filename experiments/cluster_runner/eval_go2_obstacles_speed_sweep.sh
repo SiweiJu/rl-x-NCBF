@@ -15,6 +15,8 @@
 # Writes runs/<PROJECT_NAME>/<EXP_NAME>/<RUN_NAME>_speed<v>/eval_summary.json for every speed.
 #   CHECKPOINT=/path/to/models/latest.model RUN_NAME=go2_obstacles_sl_on_H25_seed0 sbatch cluster_runner/eval_go2_obstacles_speed_sweep.sh
 # Collect the results with: python ncbf_tools/collect_eval_summaries.py runs/<PROJECT_NAME>/<EXP_NAME>
+# The observation settings must match training: export the same OBSTACLES_* observation variables
+# (e.g. OBSTACLES_POLICY_OBSERVATION=scan OBSTACLES_VALUE_OBSERVATION=state_and_scan) and NR_HISTORY_STEPS.
 set -euo pipefail
 
 : "${CHECKPOINT:?CHECKPOINT must point to a latest.model file}"
@@ -40,6 +42,16 @@ EPISODE_SECONDS="${EPISODE_SECONDS:-20}"
 USE_SAFETY_LAYER="${USE_SAFETY_LAYER:-True}"
 read -r -a SPEEDS <<< "${SPEEDS:-0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0}"
 
+# Obstacle observation flags shared with training; the speed is set per evaluation below.
+extra_args=()
+export OBSTACLES_ENABLED="True"
+export OBSTACLES_NR="${OBSTACLES_NR:-2}"
+unset OBSTACLES_SPEED_RANGE OBSTACLES_SPEED_CURRICULUM
+source "${EXPERIMENTS_DIR}/cluster_runner/obstacle_args.sh"
+if [[ -n "${NR_HISTORY_STEPS:-}" ]]; then
+    extra_args+=(--environment.nr_history_steps="${NR_HISTORY_STEPS}")
+fi
+
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 cd "${EXPERIMENTS_DIR}"
@@ -56,8 +68,7 @@ for speed in "${SPEEDS[@]}"; do
         --environment.terrain.type="${TERRAIN_TYPE:-plane}" \
         --environment.ncbf_use_policy_observations=True \
         --environment.episode_length_in_seconds="${EPISODE_SECONDS}" \
-        --environment.obstacles.enabled=True \
-        --environment.obstacles.nr_obstacles="${OBSTACLES_NR:-2}" \
+        "${extra_args[@]}" \
         --environment.obstacles.speed_curriculum=False \
         --environment.obstacles.speed_range="(${speed}, ${speed})" \
         --runner.mode=test \

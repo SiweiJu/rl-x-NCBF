@@ -6,7 +6,17 @@ if [[ "${OBSTACLES_ENABLED:-False}" == "True" ]]; then
     extra_args+=(--environment.obstacles.enabled=True)
     optional_obstacle_flags=(
         "OBSTACLES_NR:nr_obstacles"
-        "OBSTACLES_INCLUDE_OBSERVATIONS:include_observations"
+        "OBSTACLES_POLICY_OBSERVATION:policy_observation"
+        "OBSTACLES_NCBF_OBSERVATION:ncbf_observation"
+        "OBSTACLES_VALUE_OBSERVATION:value_observation"
+        "OBSTACLES_PREDICT_NEXT_OBSERVATION:predict_next_observation"
+        "OBSTACLES_SCAN_NR_RAYS:scan.nr_rays"
+        "OBSTACLES_SCAN_FOV_DEGREES:scan.fov_degrees"
+        "OBSTACLES_SCAN_MAX_RANGE:scan.max_range"
+        "OBSTACLES_SCAN_NOISE:scan.noise"
+        "OBSTACLES_SCAN_DROPOUT_PROB:scan.dropout_prob"
+        "OBSTACLES_AIM_OFFSET:aim_offset"
+        "OBSTACLES_AIM_LEAD:aim_lead"
         "OBSTACLES_TERMINATE_ON_COLLISION:terminate_on_collision"
         "OBSTACLES_COLLISION_PENALTY:collision_penalty"
         "OBSTACLES_SPEED_RANGE:speed_range"

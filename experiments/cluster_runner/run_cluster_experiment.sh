@@ -112,6 +112,13 @@ for entry in "${optional_ncbf_flags[@]}"; do
         extra_args+=(--algorithm.ncbf."${flag_name}"="${!env_name}")
     fi
 done
+# History given to the encoder that feeds the safety critic.
+if [[ -n "${NR_HISTORY_STEPS:-}" ]]; then
+    extra_args+=(--environment.nr_history_steps="${NR_HISTORY_STEPS}")
+fi
+if [[ -n "${HISTORY_ENCODER_TYPE:-}" ]]; then
+    extra_args+=(--algorithm.next_step_predictor.history_encoder_type="${HISTORY_ENCODER_TYPE}")
+fi
 
 # Moving obstacles (see environment.obstacles in the mjx default config).
 source "${SCRIPT_DIR}/obstacle_args.sh"
