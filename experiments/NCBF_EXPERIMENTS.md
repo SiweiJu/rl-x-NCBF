@@ -36,13 +36,22 @@ in `test()`); it now logs a warning. Use the full-jit path for all experiments.
 Enable with `--environment.obstacles.enabled=True` (or `OBSTACLES_ENABLED=True` in the cluster scripts).
 
 - `nr_obstacles` obstacles spawn 3–5 m from the base and move toward it in the ground plane at
-  `speed_range` m/s (lateral aim noise `aim_offset`). They respawn when they recede beyond
-  `despawn_distance` or after `max_lifetime_seconds`.
+  `speed_range` m/s (lateral aim noise `aim_offset`; `aim_lead=True` aims at where the robot will be
+  if it keeps its velocity). They respawn when they recede beyond `despawn_distance`, or when they
+  outlive their expected arrival time plus `lifetime_margin_seconds` (capped at `max_lifetime_seconds`).
 - Obstacles are kinematic: no contact forces. A collision is the safety event
   "an obstacle centre comes within `radius + robot_radius` of the base".
-- Observations (policy, value critic and safety critic): per obstacle, relative position and
-  velocity in the yaw frame and the radius (5 values). Set `include_observations=False` for an
-  obstacle-unaware policy.
+- Observations, chosen per network with `policy_observation`, `ncbf_observation` and
+  `value_observation`:
+  - `state`: per obstacle, relative position and velocity in the yaw frame and the radius
+    (5 values, privileged);
+  - `scan`: a planar range scan from the base (`scan.nr_rays` rays over `scan.fov_degrees`, up to
+    `scan.max_range`, with range noise and dropout), given as proximity 1 − range / max_range;
+  - `none`; the value critic can also take `state_and_scan`; `policy` means "same as the policy".
+  The history encoder sees what the safety critic sees, so with `policy_observation=none` and
+  `ncbf_observation=scan` only the safety critic (through the latent) knows about obstacles.
+  `predict_next_observation=True` adds the safety critic's obstacle observation to the next-step
+  predictor targets.
 - Safety target: a `no_collision` indicator is appended to `ncbf_target_indices`
   (head name `collision`); `terminate_on_collision=True` by default, and collisions count as
   constraint cost for PPO-Lagrangian and CPO.
@@ -54,10 +63,13 @@ plain MuJoCo environment yet.
 
 ## 3. Checks done in the cloud session (CPU, no GPU)
 
-- `tests/test_safety_critic.py` (7 tests): residual with γ_c·η, linearized constraint restored by the
+- `tests/test_safety_critic.py` (11 tests): residual with γ_c·η, linearized constraint restored by the
   projection, epistemic std zero for identical members and positive for distinct ones, σ-scaled
-  slack equals the closed form, tightening grows the correction, obstacle observation layout, and
-  collision → termination with the `no_collision` indicator at 0.
+  slack equals the closed form, tightening grows the correction, obstacle observation layout,
+  collision → termination with the `no_collision` indicator at 0, range-scan geometry (hit
+  distance, yaw, occlusion, miss, out of range, inside), per-network observation routing, the scan
+  inside the environment and the obstacle lifetime, and the GRU history encoder reading only its
+  selected observations.
   Run: `JAX_PLATFORMS=cpu python -m pytest tests/test_safety_critic.py -q`.
 - Tiny training runs (16 envs, 2 PPO updates) for the old code, the fixed code with every new loss
   term enabled, and the fixed code with obstacles; a checkpoint save → load → batch evaluation at a
@@ -65,9 +77,12 @@ plain MuJoCo environment yet.
   (`eta_cbf=0.5`, `gamma_c=0.6`, `slack_uncertainty=epistemic`). Both wrote `eval_summary.json`.
   The untrained critic makes the shield intervene on every step at the `max_delta_u` cap, so the
   numbers say nothing about performance.
+- A tiny training run with the scan (`policy_observation=scan`, `value_observation=state_and_scan`,
+  `predict_next_observation=True`).
+- The offline scan-critic probe of Step 3b (a supervised experiment, see there).
 
-These only show that the code runs and the pieces behave as intended. No result in this note is a
-learning result; all learning experiments below need the cluster.
+Apart from the offline probe, these only show that the code runs and the pieces behave as
+intended. All closed-loop learning experiments below need the cluster.
 
 ## 4. Experiments to run on the cluster
 
@@ -98,6 +113,77 @@ shield with H=1, shield with H=25, plus the uncertainty rules below. Existing sc
   horizons should grow with speed. If it does not, the "look further ahead" story is not supported
   on this task.
 
+### Step 3b — obstacles seen only through a range scan
+Question: from a history of range scans, can the H-step critic infer how obstacles move? A single
+scan only gives positions, so any one-step barrier built on it (e.g. nearest return − margin) is
+blind to obstacle velocity. If the critic recovers velocity from the history, a one-step CBF is
+short-sighted in two ways (one step of time, one frame of perception), and the critic's
+uncertainty should be high right after an obstacle appears, which links to Step 4.
+
+Configuration (`train_go2_obstacles_scan_sl_on.sh`): `OBSTACLES_POLICY_OBSERVATION=scan` (the
+safety critic and the history encoder get the same), `OBSTACLES_VALUE_OBSERVATION=state_and_scan`
+(privileged state only in the value critic, which is not deployed), 64 rays over 360°, range
+5 m, ±2 cm noise, `NR_HISTORY_STEPS=10`, `HISTORY_ENCODER_TYPE=scan_conv`.
+
+**Offline probe (done on CPU).** `ncbf_tools/obstacle_scan_critic_probe.py`: the robot does not
+move (zero action, it falls and lies on the ground), obstacles move past it, and small critics are
+trained by supervised learning on H-step collision labels from different inputs, with early
+stopping and envs split into train / validation / test. Full tables and figures:
+`results/obstacle_scan_probe/` (CPU, ~35 min).
+
+Results (128 envs × 2500 steps, 2 obstacles at 0.5–2.5 m/s, aim offset ±1 m; one seed, test on
+held-out envs; AUROC / average precision for "unsafe"):
+
+| input | H = 25 (0.5 s) | H = 50 (1.0 s) |
+|---|---|---|
+| nearest scan return, no training (one-step distance barrier) | 0.84 / 0.36 | 0.71 / 0.37 |
+| single scan, MLP / circular conv | 0.81 / 0.30, 0.84 / 0.35 | 0.70 / 0.35, 0.72 / 0.37 |
+| privileged position only | 0.82 / 0.32 | 0.71 / 0.37 |
+| 10 scans, MLP / circular conv | 0.89 / 0.54, 0.96 / 0.81 | 0.79 / 0.55, 0.91 / 0.77 |
+| 25 scans, MLP / circular conv | 0.90 / 0.61, 0.96 / 0.82 | 0.82 / 0.61, 0.92 / 0.83 |
+| privileged position + velocity | 0.99 / 0.93 | 0.96 / 0.86 |
+
+- A single scan is as good as the privileged position and no better than the nearest return: no
+  velocity information, as expected.
+- With a history, the convolutional critic gets most of the way to the privileged-velocity
+  critic. Its AUROC stays at 0.96–0.97 across obstacle speeds, while the single-scan critic
+  drops from 0.90 (0.5–1 m/s) to 0.76 (2–2.5 m/s).
+- A linear probe of the last hidden layer recovers the closing speed of the nearest obstacle with
+  R² 0.68–0.70 from the convolutional history critics, about 0 from single-scan critics, and
+  0.21 from the raw stacked scans.
+- Counterfactual (same current scan, different past): the history critics' P(safe) falls
+  monotonically with the past approach speed. At 1.2 m the 25-scan critic drops near the true
+  threshold (1.3 m/s); at 1.6 m it is too optimistic (0.75 at the 2.1 m/s threshold).
+- Architecture matters: flattening the history into an MLP (what the FFNN encoder does) overfits
+  and barely uses the history in the counterfactual. The cluster runs therefore use the
+  `scan_conv` history encoder, with FFNN as a variant.
+
+Caveats: the robot does not move, so there is no ego-motion; the probe's convolutional critic
+pools over all rays, which makes it rotation invariant (right for a static round robot, while the
+`scan_conv` encoder in PPO keeps 8 angular sectors); one seed; supervised labels from a fixed data
+distribution rather than closed-loop training.
+
+**Cluster sweep.** `sbatch cluster_runner/sweep_go2_obstacles_scan.sh` (11 variants × 3 seeds; run a
+subset with `VARIANT_FILTER`): main; history 1 / 5 / 25; H 1 / 50; policy blind to obstacles with
+only the safety critic seeing the scan; next-scan prediction; FFNN encoder instead of `scan_conv`;
+privileged state for every network (upper bound); shield off. Evaluate each checkpoint with the speed sweep,
+exporting the same `OBSTACLES_*` observation variables and `NR_HISTORY_STEPS` as in training.
+Re-run the probe on the cluster with more data (`--nr_envs 1024`) and, once a walking policy
+exists, with ego-motion.
+
+Figures: collision rate vs. obstacle speed for main, history 1 and privileged state; the
+counterfactual of the probe; σ_epistemic over time after an obstacle appears.
+Support criterion: with the shield on, history > 1 beats history 1 at high speeds and approaches
+the privileged-state run.
+
+**Next: shape and motion randomization.** The scan makes this natural, because shape only enters
+through the returns. Randomize size (0.1–1.0 m), shape (oriented boxes, composites of circles),
+motion (turning, stop-and-go, acceleration) and the sensor (ray count, field of view, noise,
+dropout, latency, spurious returns). Hold out shapes, sizes and motions for testing and report
+collision rate and σ_epistemic on them; generalization claims need these held-out sets. Keep
+size × speed combinations mostly avoidable, otherwise the failures are unavoidable rather than
+missed (A7). Ray–box intersection and point–box distance are closed form, so this is ~1–2 days.
+
 ### Step 4 — uncertainty rules (A6)
 Same task and seeds, vary only the shield:
 - `NCBF_TIGHTEN_UNCERTAINTY` ∈ {none, total, epistemic, aleatoric}
@@ -117,6 +203,8 @@ under shift (log `ncbf_safety_layer/residual_std_epistemic`); if it does not, dr
   and with the shielded action and compare realized failure rates.
 - Multi-horizon safety heads (F1) and the critic-target comparison (A2: MC vs TD vs λ targets).
 - Command-level shielding for obstacles (G2) and whole-body dodging (G3).
+- Obstacle shape and motion randomization (boxes, composites, turning and stop-and-go motion) with
+  held-out shapes and motions for testing; see Step 3b.
 
 ## 5. Compute estimate
 

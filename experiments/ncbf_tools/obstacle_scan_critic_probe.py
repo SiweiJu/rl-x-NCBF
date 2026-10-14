@@ -203,8 +203,9 @@ def train_critic(model, make_input, train, val, args, key):
         logits, _ = model.apply(params, make_input(t_b, e_b))
         return jnp.mean(optax.sigmoid_binary_cross_entropy(logits, y_b))
 
+    # A Python loop over a jitted step: on the XLA CPU backend, convolutions inside lax.scan run ~30x slower.
     @jax.jit
-    def step(carry, _):
+    def step(carry):
         params, opt_state, key = carry
         key, sample_key = jax.random.split(key)
         batch = jax.random.randint(sample_key, (args.batch_size,), 0, t_train.shape[0])
@@ -212,7 +213,12 @@ def train_critic(model, make_input, train, val, args, key):
         updates, opt_state = optimizer.update(grads, opt_state, params)
         return (optax.apply_updates(params, updates), opt_state, key), loss
 
-    run_chunk = jax.jit(lambda carry: jax.lax.scan(step, carry, None, length=args.eval_every))
+    def run_chunk(carry):
+        losses = []
+        for _ in range(args.eval_every):
+            carry, loss = step(carry)
+            losses.append(loss)
+        return carry, jnp.stack(losses)
     val_subset = np.random.default_rng(0).permutation(len(t_val))[:30000]
     t_val, e_val, y_val = jnp.asarray(t_val[val_subset]), jnp.asarray(e_val[val_subset]), jnp.asarray(y_val[val_subset])
     val_loss_fn = jax.jit(loss_fn)

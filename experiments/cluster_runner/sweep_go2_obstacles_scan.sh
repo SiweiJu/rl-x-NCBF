@@ -13,7 +13,8 @@
 #SBATCH --array=0-32
 
 # Go2 with moving obstacles seen through a 2D range scan: 11 variants x 3 seeds (33 array tasks).
-# Each variant changes one thing relative to "main" (scan for policy and safety critic, history 10, H 25).
+# Each variant changes one thing relative to "main" (scan for policy and safety critic, scan_conv history
+# encoder, history 10, H 25).
 # Submit with: sbatch cluster_runner/sweep_go2_obstacles_scan.sh
 # Run a subset with e.g. VARIANT_FILTER="main hist" (substring match on the variant name); the array
 # index then counts over the filtered list.
@@ -43,8 +44,8 @@ ALL_VARIANTS=(
     "H50|NCBF_H=50"
     "policy_blind|OBSTACLES_POLICY_OBSERVATION=none OBSTACLES_NCBF_OBSERVATION=scan"
     "predict_scan|OBSTACLES_PREDICT_NEXT_OBSERVATION=True"
-    "scan_conv_encoder|HISTORY_ENCODER_TYPE=scan_conv"
-    "oracle_state|OBSTACLES_POLICY_OBSERVATION=state OBSTACLES_VALUE_OBSERVATION=state"
+    "ffnn_encoder|HISTORY_ENCODER_TYPE=FFNN"
+    "oracle_state|OBSTACLES_POLICY_OBSERVATION=state OBSTACLES_VALUE_OBSERVATION=state HISTORY_ENCODER_TYPE=FFNN"
     "shield_off|USE_SAFETY_LAYER=False"
 )
 VARIANTS=()
@@ -77,6 +78,7 @@ variant_settings="${variant#*|}"
 export USE_SAFETY_LAYER="True"
 export NCBF_H="25"
 export NR_HISTORY_STEPS="10"
+export HISTORY_ENCODER_TYPE="scan_conv"
 export OBSTACLES_POLICY_OBSERVATION="scan"
 export OBSTACLES_NCBF_OBSERVATION="policy"
 export OBSTACLES_VALUE_OBSERVATION="state_and_scan"

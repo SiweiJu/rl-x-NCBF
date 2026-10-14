@@ -12,7 +12,8 @@
 #SBATCH --time=9:59:59
 
 # Go2 velocity tracking with moving obstacles seen only through a 2D range scan (policy and safety critic);
-# the value critic also gets the privileged obstacle state. The shield is on.
+# the value critic also gets the privileged obstacle state. The history encoder convolves over the scan rays
+# (see the offline probe in NCBF_EXPERIMENTS.md, Step 3b). The shield is on.
 set -euo pipefail
 
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
@@ -36,5 +37,6 @@ export OBSTACLES_POLICY_OBSERVATION="${OBSTACLES_POLICY_OBSERVATION:-scan}"
 export OBSTACLES_NCBF_OBSERVATION="${OBSTACLES_NCBF_OBSERVATION:-policy}"
 export OBSTACLES_VALUE_OBSERVATION="${OBSTACLES_VALUE_OBSERVATION:-state_and_scan}"
 export NR_HISTORY_STEPS="${NR_HISTORY_STEPS:-10}"
+export HISTORY_ENCODER_TYPE="${HISTORY_ENCODER_TYPE:-scan_conv}"
 
 "${CLUSTER_RUNNER_DIR}/run_cluster_experiment.sh"
