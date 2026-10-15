@@ -72,6 +72,112 @@ def _adapt_learning_rate_from_kl(
     return jnp.clip(next_lr, lr_min, lr_max)
 
 
+def _nan_to_none(value):
+    """Replace NaN floats (empty groups) by None so the summary is valid JSON."""
+    if isinstance(value, dict):
+        return {key: _nan_to_none(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_nan_to_none(item) for item in value]
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    return value
+
+
+def _binary_auroc(score, positive):
+    """AUROC of score for the positive class (Mann-Whitney with average ranks); nan if one class is missing."""
+    positive = positive.astype(bool)
+    nr_positive, nr_negative = int(positive.sum()), int((~positive).sum())
+    if nr_positive == 0 or nr_negative == 0:
+        return float("nan")
+    order = np.argsort(score, kind="stable")
+    ranks = np.empty(len(score))
+    ranks[order] = np.arange(1, len(score) + 1)
+    sorted_score = score[order]
+    # average ranks over ties
+    unique, start_index, counts = np.unique(sorted_score, return_index=True, return_counts=True)
+    for first, count in zip(start_index, counts):
+        if count > 1:
+            ranks[order[first:first + count]] = first + (count + 1) / 2.0
+    return float((ranks[positive].sum() - nr_positive * (nr_positive + 1) / 2.0) / (nr_positive * nr_negative))
+
+
+def summarize_counterfactual(records, head_names, nr_calibration_bins=5):
+    """Turn the per-decision records of PPO.counterfactual_check into rates.
+
+    records: active / delta_u / p_* with shape [D, N] (or [D, N, K] per head), and *_raw / *_safe outcomes with
+    shape [D, R, N] (or [D, R, N, K]); D decision points, R repeats, N envs.
+    """
+    nr_repeats = records["failed_raw"].shape[1]
+
+    def per_outcome(name):  # [D, N] -> [D, R, N]
+        return np.repeat(records[name][:, None], nr_repeats, axis=1)
+
+    active = per_outcome("active").astype(bool)
+    valid = ~(records["censored_raw"] | records["censored_safe"])
+    fail_raw, fail_safe = records["failed_raw"].astype(bool), records["failed_safe"].astype(bool)
+
+    def rate(numerator, denominator):
+        count = int(denominator.sum())
+        return float((numerator & denominator).sum() / count) if count > 0 else float("nan")
+
+    on, off = valid & active, valid & ~active
+    summary = {
+        "nr_outcomes": int(valid.sum()),
+        "censored_fraction": float(1.0 - valid.mean()),
+        "intervention_rate": float(active[valid].mean()) if valid.any() else float("nan"),
+        "mean_delta_u_when_active": float(per_outcome("delta_u")[on].mean()) if on.any() else float("nan"),
+        # Interventions: was the raw action going to fail, and did the shielded action avoid it?
+        "active": {
+            "count": int(on.sum()),
+            "fail_rate_raw": rate(fail_raw, on),
+            "fail_rate_shielded": rate(fail_safe, on),
+            "necessary_and_effective": rate(fail_raw & ~fail_safe, on),  # raw fails, shielded does not
+            "unnecessary": rate(~fail_raw & ~fail_safe, on),  # neither fails
+            "ineffective": rate(fail_raw & fail_safe, on),  # both fail
+            "harmful": rate(~fail_raw & fail_safe, on),  # only the shielded action fails
+        },
+        # No intervention: failures the shield did not act on (both branches take the same first action).
+        "inactive": {
+            "count": int(off.sum()),
+            "fail_rate": rate(fail_raw, off),
+            "branch_mismatch_rate": rate(fail_raw != fail_safe, off),  # should be 0: the branches are identical
+        },
+    }
+    raw_failures = int((fail_raw & valid).sum())
+    flagged = int((fail_raw & on).sum())
+    summary["recall"] = float(flagged / raw_failures) if raw_failures > 0 else float("nan")  # upcoming raw failures the shield acted on
+    summary["precision"] = summary["active"]["fail_rate_raw"]  # interventions where the raw action would have failed
+
+    # Critic calibration: predicted P(safe) for the first action against the realized outcome.
+    calibration = {}
+    for branch, predicted, failed in (("raw", per_outcome("p_raw"), fail_raw), ("shielded", per_outcome("p_safe"), fail_safe)):
+        p, safe = predicted[valid], (~failed)[valid].astype(np.float64)
+        bins = []
+        edges = np.linspace(0.0, 1.0, nr_calibration_bins + 1)
+        for low, high in zip(edges[:-1], edges[1:]):
+            in_bin = (p >= low) & ((p < high) if high < 1.0 else (p <= high))
+            bins.append({"range": [float(low), float(high)], "count": int(in_bin.sum()),
+                         "mean_predicted": float(p[in_bin].mean()) if in_bin.any() else float("nan"),
+                         "realized_safe_rate": float(safe[in_bin].mean()) if in_bin.any() else float("nan")})
+        calibration[branch] = {
+            "auroc_failure": _binary_auroc(1.0 - p, 1.0 - safe),
+            "brier": float(np.mean(np.square(p - safe))) if len(p) else float("nan"),
+            "mean_predicted_safe": float(p.mean()) if len(p) else float("nan"),
+            "realized_safe_rate": float(safe.mean()) if len(p) else float("nan"),
+            "bins": bins,
+        }
+    summary["calibration"] = calibration
+
+    # Per safety head: realized failure rates of the two branches when the shield is active.
+    heads_raw, heads_safe = records["failed_heads_raw"].astype(bool), records["failed_heads_safe"].astype(bool)
+    summary["heads"] = {
+        name: {"fail_rate_raw_when_active": rate(heads_raw[..., k], on), "fail_rate_shielded_when_active": rate(heads_safe[..., k], on),
+               "fail_rate_when_inactive": rate(heads_raw[..., k], off)}
+        for k, name in enumerate(head_names)
+    }
+    return summary
+
+
 class PPO:
     def __init__(self, config, env, run_path, writer):
         self.config = config
@@ -199,6 +305,15 @@ class PPO:
         self.os_shape = env.single_observation_space.shape
         self.as_shape = env.single_action_space.shape
         self.horizon = env.horizon
+        counterfactual_config = config.algorithm.get("counterfactual", None) or {}
+        self.counterfactual_enabled = bool(counterfactual_config.get("enabled", False))
+        self.counterfactual_nr_decision_points = int(counterfactual_config.get("nr_decision_points", 8))
+        self.counterfactual_interval = int(counterfactual_config.get("interval", 50))
+        self.counterfactual_horizon = int(counterfactual_config.get("horizon", 0))
+        self.counterfactual_continuation = counterfactual_config.get("continuation", "shielded")
+        self.counterfactual_nr_repeats = int(counterfactual_config.get("nr_repeats", 1))
+        if self.counterfactual_continuation not in ("shielded", "raw"):
+            raise ValueError("algorithm.counterfactual.continuation must be 'shielded' or 'raw'")
         self.nr_history_steps = env.nr_history_steps
 
         if self.evaluation_and_save_frequency % self.batch_size != 0:
@@ -1650,8 +1765,8 @@ class PPO:
         return model
 
 
-    def _shielded_action(self, env_state):
-        """Deterministic policy action passed through the safety shield (evaluation, beta = 1)."""
+    def _policy_and_shield(self, env_state):
+        """Deterministic policy action before and after the safety shield (evaluation, beta = 1)."""
         latent_z = self.encoder_state.apply_fn(self.encoder_state.params, env_state.history_stack)
         policy_decoder_output = self._get_policy_decoder_output(
             self.decoder_state.params,
@@ -1680,7 +1795,124 @@ class PPO:
             {},
             env_state.next_observation,
         )
+        return raw_processed_action, processed_action, constraint_active, delta_u, latent_z
+
+
+    def _shielded_action(self, env_state):
+        """Deterministic policy action passed through the safety shield (evaluation, beta = 1)."""
+        _, processed_action, constraint_active, delta_u, _ = self._policy_and_shield(env_state)
         return processed_action, constraint_active, delta_u
+
+
+    def _safety_prediction(self, observation, action, latent_z):
+        """Critic prediction for (s, a): per-head safe probability [B, K] (ensemble mean), and the mean and std
+        over ensemble members of the probability that every head stays safe (min over heads) [B]."""
+        inputs = jnp.concatenate([observation[..., self.ncbf_observation_indices], action, latent_z], axis=-1)
+        probabilities = self._ncbf_probabilities(self._ncbf_apply_members(self.ncbf_state.params, inputs))  # [E, B, K]
+        all_heads = jnp.min(probabilities, axis=-1)  # [E, B]
+        return jnp.mean(probabilities, axis=0), jnp.mean(all_heads, axis=0), jnp.std(all_heads, axis=0)
+
+
+    def _branch_outcome(self, env_state, first_action, horizon):
+        """Take first_action, then follow the continuation policy for horizon - 1 steps. Returns, per env,
+        whether a safety target dropped below 0.5 within the episode (overall and per head), the step of the
+        first failure (horizon if none), and whether the episode was truncated first (censored)."""
+        target_indices = jnp.asarray(self.env.ncbf_target_indices)
+        nr_heads = target_indices.shape[0]
+        batch = first_action.shape[0]
+
+        def record(env_state, flags, step_index):
+            failed, failed_heads, first_failure, alive, censored = flags
+            unsafe_heads = (env_state.actual_next_observation[..., target_indices] < 0.5) & alive[:, None]
+            unsafe = jnp.any(unsafe_heads, axis=-1)
+            first_failure = jnp.where(unsafe & ~failed, step_index, first_failure)
+            failed = failed | unsafe
+            failed_heads = failed_heads | unsafe_heads
+            truncated_only = env_state.truncated & ~env_state.terminated & ~failed
+            censored = censored | (alive & truncated_only & (step_index < horizon - 1))
+            alive = alive & ~(env_state.terminated | env_state.truncated)
+            return failed, failed_heads, first_failure, alive, censored
+
+        flags = (jnp.zeros(batch, dtype=bool), jnp.zeros((batch, nr_heads), dtype=bool),
+                 jnp.full(batch, horizon, dtype=jnp.int32), jnp.ones(batch, dtype=bool), jnp.zeros(batch, dtype=bool))
+        env_state = self.env.step(env_state, first_action)
+        flags = record(env_state, flags, 0)
+
+        def continue_step(carry, step_index):
+            env_state, flags = carry
+            raw_action, safe_action, _, _, _ = self._policy_and_shield(env_state)
+            action = safe_action if self.counterfactual_continuation == "shielded" else raw_action
+            env_state = self.env.step(env_state, action)
+            return (env_state, record(env_state, flags, step_index)), None
+
+        (_, flags), _ = jax.lax.scan(continue_step, (env_state, flags), jnp.arange(1, horizon))
+        failed, failed_heads, first_failure, _, censored = flags
+        return {"failed": failed, "failed_heads": failed_heads, "first_failure_step": first_failure, "censored": censored}
+
+
+    def counterfactual_check(self):
+        """E1: is each intervention of the shield necessary and effective, and does the critic predict the outcome?
+
+        Along a shielded rollout, every `interval` steps, branch from the same state (same env randomness) with the
+        raw policy action and with the shielded action, continue with the continuation policy, and record failures
+        within `horizon` steps. Writes counterfactual_summary.json and counterfactual_records.npz next to the models.
+        """
+        horizon = self.counterfactual_horizon if self.counterfactual_horizon > 0 else self.ncbf_H
+        nr_decisions, interval, nr_repeats = self.counterfactual_nr_decision_points, self.counterfactual_interval, self.counterfactual_nr_repeats
+        rlx_logger.info(f"Counterfactual check: {self.nr_envs} envs x {nr_decisions} decision points, interval {interval}, "
+                        f"horizon {horizon}, {nr_repeats} repeat(s), continuation {self.counterfactual_continuation}, "
+                        f"use_safety_layer={self.ncbf_use_safety_layer}.")
+        self.key, subkey = jax.random.split(self.key)
+        env_state = self.env.reset(jax.random.split(subkey, self.nr_envs), True)
+
+        def shielded_step(env_state, _):
+            _, safe_action, _, _, _ = self._policy_and_shield(env_state)
+            return self.env.step(env_state, safe_action), None
+
+        def with_repeat_key(env_state, repeat_index):
+            return env_state.replace(key=jax.vmap(lambda k: jax.random.fold_in(k, repeat_index))(env_state.key))
+
+        def decision_point(env_state, _):
+            env_state, _ = jax.lax.scan(shielded_step, env_state, None, length=interval)
+            raw_action, safe_action, active, delta_u, latent_z = self._policy_and_shield(env_state)
+            heads_raw, p_raw, p_raw_std = self._safety_prediction(env_state.next_observation, raw_action, latent_z)
+            heads_safe, p_safe, p_safe_std = self._safety_prediction(env_state.next_observation, safe_action, latent_z)
+
+            def repeat(_, repeat_index):
+                branch_state = with_repeat_key(env_state, repeat_index)
+                return None, (self._branch_outcome(branch_state, raw_action, horizon), self._branch_outcome(branch_state, safe_action, horizon))
+
+            _, (outcome_raw, outcome_safe) = jax.lax.scan(repeat, None, jnp.arange(nr_repeats))
+            record = {
+                "active": active, "delta_u": delta_u,
+                "p_raw": p_raw, "p_raw_std": p_raw_std, "p_heads_raw": heads_raw,
+                "p_safe": p_safe, "p_safe_std": p_safe_std, "p_heads_safe": heads_safe,
+                **{f"{name}_raw": value for name, value in outcome_raw.items()},
+                **{f"{name}_safe": value for name, value in outcome_safe.items()},
+            }
+            return env_state, record
+
+        @jax.jit
+        def run(env_state):
+            _, records = jax.lax.scan(decision_point, env_state, None, length=nr_decisions)
+            return records
+
+        records = {name: np.asarray(value) for name, value in jax.device_get(run(env_state)).items()}
+        summary = summarize_counterfactual(records, self.ncbf_target_names)
+        summary.update({
+            "nr_envs": self.nr_envs, "nr_decision_points": nr_decisions, "interval": interval, "horizon": horizon,
+            "nr_repeats": nr_repeats, "continuation": self.counterfactual_continuation,
+            "use_safety_layer": self.ncbf_use_safety_layer,
+            "gamma_c": float(self.config.algorithm.ncbf.gamma_c), "eta_cbf": float(self.config.algorithm.ncbf.eta_cbf),
+        })
+        summary = _nan_to_none(summary)
+        rlx_logger.info("Counterfactual summary: " + json.dumps(summary))
+        run_path = os.path.dirname(self.save_path)
+        os.makedirs(run_path, exist_ok=True)
+        with open(os.path.join(run_path, "counterfactual_summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+        np.savez_compressed(os.path.join(run_path, "counterfactual_records.npz"), **records)
+        return summary
 
 
     def test(self, episodes):
@@ -1699,6 +1931,9 @@ class PPO:
             while True:
                 env_state = rollout(env_state)
                 env_state = self.env.render(env_state)
+
+        if self.counterfactual_enabled:
+            return self.counterfactual_check()
 
         # Batch evaluation: run episodes * horizon steps on all parallel envs and write a summary.
         nr_eval_steps = int(max(1, episodes)) * self.horizon

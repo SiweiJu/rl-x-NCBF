@@ -104,6 +104,50 @@ Run in this order; each step has a check before spending compute on the next.
 - Re-run the existing η × γ_c sweep (`test_locomotion_safety_shield.sh`) with the fixes; note that
   with `gamma_c_scaled_by_eta=True` the γ_c values mean what the paper says.
 
+### E1 — counterfactual check of the shield
+Does each intervention prevent a failure, and does the critic predict the outcome? Implemented as
+`PPO.counterfactual_check` (`runner.mode=test` with `algorithm.counterfactual.enabled=True`):
+
+- Along a shielded rollout (deterministic policy, eval mode), every `interval` steps the state is
+  branched. Both branches start from the same MJX state with the same environment randomness; one
+  takes the raw policy action u0, the other the shielded action u_s. Both then follow the
+  `continuation` policy for H − 1 more steps: `shielded` matches what the critic predicts,
+  h(s, a) = P(no failure | a now, shielded policy afterwards); `raw` removes the shield afterwards.
+- Failure means any safety target drops below 0.5 within the episode, the same event as the
+  critic's label. Windows cut short by a time-limit truncation are censored and left out.
+- `nr_repeats` re-runs both branches with other environment randomness (shared by the two
+  branches), so outcomes are paired.
+
+Outputs per run: `counterfactual_summary.json` and `counterfactual_records.npz` (per decision point:
+h(s, u0), h(s, u_s), ensemble std, per-head probabilities and outcomes). The summary reports:
+- the intervention rate;
+- for interventions, the shares that are necessary and effective (u0 fails, u_s does not),
+  unnecessary (neither fails), ineffective (both fail) and harmful (only u_s fails);
+- the failure rate without intervention (misses), precision and recall;
+- the critic's AUROC, Brier score and reliability bins for both first actions, and per-head rates;
+- `inactive/branch_mismatch_rate`, which must be 0 (without intervention the two branches are
+  identical).
+
+Run on the Step 1 checkpoints and on the obstacle checkpoints:
+`CHECKPOINT=... RUN_NAME=... sbatch cluster_runner/eval_counterfactual.sh`, with the same
+environment variables as the training job. By default it runs both continuations;
+`GAMMA_C_VALUES="0.3 0.5 0.7 0.9"` traces precision against recall over the threshold (the figure
+asked for in A6). Collect with
+`python ncbf_tools/collect_eval_summaries.py runs/202605_ncbf/counterfactual --file counterfactual_summary.json`.
+
+Reading the result:
+- many unnecessary interventions mean the shield is too conservative;
+- many ineffective ones mean the correction is too small (the `max_delta_u` cap, one-step
+  linearization) or the failure was already unavoidable (A7);
+- a high failure rate without intervention means the threshold is too low or the critic misses
+  the danger;
+- the reliability bins show whether h can be read as a probability.
+
+Checked on CPU with a tiny checkpoint: both continuations run, the branches are identical without
+intervention (mismatch 0), and repeats differ. Cost: about
+`nr_decision_points × (interval + 2 × nr_repeats × H)` environment steps per env (2000 with the
+defaults).
+
 ### Step 2 — main comparisons (G1, ~140 runs)
 Locomotion (Go2 and one humanoid) and ball-on-plate, 5 seeds each: PPO+DR, PPO-Lagrangian, CPO,
 shield with H=1, shield with H=25, plus the uncertainty rules below. Existing scripts:
@@ -240,8 +284,6 @@ under shift (log `ncbf_safety_layer/residual_std_epistemic`); if it does not, dr
 `USE_SAFETY_LAYER=False`, evaluate with `USE_SAFETY_LAYER=True`), and `NCBF_INDEPENDENT_ENSEMBLE=False`.
 
 ### Not implemented yet
-- Counterfactual rollout check (E1): from saved MJX states, roll out H steps with the raw action
-  and with the shielded action and compare realized failure rates.
 - Multi-horizon safety heads (F1) and the critic-target comparison (A2: MC vs TD vs λ targets).
 - Command-level shielding for obstacles (G2) and whole-body dodging (G3).
 - Obstacles with contact forces, obstacles in the viewer, and a 3D point cloud (ground returns,

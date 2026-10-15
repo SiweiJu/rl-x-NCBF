@@ -95,6 +95,16 @@ def get_config(algorithm_name):
     config.next_step_predictor.decoder_output_dim = None  # Will be set to observation_dim at runtime
     config.next_step_predictor.aux_loss_coef = 1.0
 
+    # Counterfactual check of the shield (runner.mode=test): at decision points along a shielded rollout,
+    # branch from the same state with the raw and the shielded action and compare the outcomes over H steps.
+    config.counterfactual = config_dict.ConfigDict()
+    config.counterfactual.enabled = False  # True: test() runs the counterfactual check instead of the batch evaluation
+    config.counterfactual.nr_decision_points = 8  # per env
+    config.counterfactual.interval = 50  # control steps of the shielded rollout between decision points
+    config.counterfactual.horizon = 0  # steps to roll out after the branch; <= 0 uses ncbf.H
+    config.counterfactual.continuation = "shielded"  # policy after the first step: "shielded" (the critic's semantics) or "raw"
+    config.counterfactual.nr_repeats = 1  # rollouts per branch with different env randomness (shared by both branches)
+
     if "booster" in algorithm_name.lower():
         apply_booster_defaults(config)
     return config

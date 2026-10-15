@@ -436,3 +436,41 @@ def test_randomized_shapes_motions_and_latency(randomized_env):
     clearance = np.asarray(signed) - env.obstacle_config["robot_radius"]
     np.testing.assert_allclose(np.asarray(collided.internal_state["obstacle_min_clearance"]), clearance, atol=1e-4)
     assert np.all(np.asarray(collided.internal_state["obstacle_collision"]))
+
+
+# ---------------------------------------------------------------------------
+# E1 counterfactual check
+# ---------------------------------------------------------------------------
+
+def test_counterfactual_summary_counts():
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.ppo import _binary_auroc, summarize_counterfactual
+
+    # One decision point, one repeat, eight envs. Envs 0-4 are active, 5-7 inactive; env 7 is censored.
+    active = np.array([[1, 1, 1, 1, 1, 0, 0, 0]], dtype=bool)
+    fail_raw = np.array([[[1, 1, 0, 1, 0, 1, 0, 0]]], dtype=bool)
+    fail_safe = np.array([[[0, 1, 0, 0, 1, 1, 0, 0]]], dtype=bool)
+    censored = np.array([[[0, 0, 0, 0, 0, 0, 0, 1]]], dtype=bool)
+    p_raw = np.array([[0.1, 0.2, 0.9, 0.3, 0.8, 0.4, 0.95, 0.5]])
+    records = {
+        "active": active, "delta_u": np.where(active, 0.2, 0.0),
+        "p_raw": p_raw, "p_safe": np.clip(p_raw + 0.1, 0, 1),
+        "failed_raw": fail_raw, "failed_safe": fail_safe,
+        "censored_raw": censored, "censored_safe": censored,
+        "failed_heads_raw": fail_raw[..., None], "failed_heads_safe": fail_safe[..., None],
+    }
+    summary = summarize_counterfactual(records, ["collision"])
+    assert summary["nr_outcomes"] == 7
+    assert summary["active"]["count"] == 5
+    np.testing.assert_allclose(summary["active"]["necessary_and_effective"], 2 / 5)  # envs 0, 3
+    np.testing.assert_allclose(summary["active"]["ineffective"], 1 / 5)  # env 1
+    np.testing.assert_allclose(summary["active"]["unnecessary"], 1 / 5)  # env 2
+    np.testing.assert_allclose(summary["active"]["harmful"], 1 / 5)  # env 4
+    assert summary["inactive"]["count"] == 2
+    np.testing.assert_allclose(summary["inactive"]["fail_rate"], 1 / 2)  # env 5; env 7 is censored
+    assert summary["inactive"]["branch_mismatch_rate"] == 0.0
+    np.testing.assert_allclose(summary["recall"], 3 / 4)  # raw failures: envs 0, 1, 3 active and env 5 inactive
+    np.testing.assert_allclose(summary["precision"], 3 / 5)
+    # The critic ranks the failures correctly: low P(safe) for envs 0, 1, 3, 5.
+    np.testing.assert_allclose(summary["calibration"]["raw"]["auroc_failure"], 1.0)
+    np.testing.assert_allclose(_binary_auroc(np.array([0.1, 0.4, 0.35, 0.8]), np.array([0, 0, 1, 1])), 0.75)
+    np.testing.assert_allclose(_binary_auroc(np.array([0.5, 0.5, 0.5]), np.array([0, 1, 1])), 0.5)
