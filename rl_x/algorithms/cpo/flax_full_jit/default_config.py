@@ -9,32 +9,43 @@ def get_config(algorithm_name):
     config.device = "gpu"  # cpu, gpu
     config.nr_parallel_seeds = 1
     config.total_timesteps = 2e9
-    config.learning_rate = 4e-4
-    config.anneal_learning_rate = True
     config.nr_steps = 128
-    config.nr_epochs = 10
-    config.minibatch_size = 32768
     config.gamma = 0.99
     config.gae_lambda = 0.9
-    config.clip_range = 0.1
-    config.entropy_coef = 0.0
-    config.critic_coef = 1.0
-    config.cost_critic_coef = 1.0
-    config.max_grad_norm = 5.0
     config.std_dev = 1.0
     config.action_clipping_and_rescaling = False
     config.evaluation_and_save_frequency = 17301504  # -1 to disable
     config.evaluation_active = True
 
-    # Constraint policy optimization settings. The cost comes from
-    # env_state.info["constraint/cost"], with termination as a fallback.
+    # Critics (reward and cost), trained by MSE regression with Adam after the policy step.
+    config.learning_rate = 4e-4
+    config.anneal_learning_rate = True
+    config.nr_epochs = 10
+    config.minibatch_size = 32768
+    config.max_grad_norm = 5.0
+
+    # Policy step: CPO trust region (Achiam et al. 2017), defaults from OmniSafe cpo.yaml.
+    config.target_kl = 0.01  # trust region size delta
+    config.cg_iterations = 15
+    config.cg_damping = 0.1
+    config.line_search_steps = 15
+    config.line_search_decay = 0.8
+    config.fvp_sample_freq = 1  # use every k-th sample for the Fisher-vector products
+    config.standardize_reward_advantages = True
+    config.cost_advantage_normalization = "center"  # center (OmniSafe), standardize, none
+
+    # Constraint. The cost comes from env_state.info["constraint/cost"] (terminated as fallback);
+    # on the locomotion envs it is 1 on the failure step and 0 otherwise.
     config.cost_gamma = 0.99
     config.cost_gae_lambda = 0.9
+    # cost_measure: episode -> J_c = expected cost per episode (failures per episode), cost_limit in the same unit.
+    #               rollout -> J_c = summed cost of one nr_steps rollout (the old ppo_lagrangian measure).
+    config.cost_measure = "episode"
     config.cost_limit = 0.0
-    config.cost_lambda_init = 0.0
-    config.cost_lambda_lr = 0.05
-    config.cost_lambda_max = 100.0
-    config.normalize_cost_advantages = True
-    config.scale_lagrangian_objective = True
+    # cost_violation_normalization: per_step -> c = (J_c - d) / T with T the mean episode length (or nr_steps for
+    #   cost_measure=rollout), i.e. in the per-step units of the surrogate E[ratio A_c] (performance-difference
+    #   lemma: Delta J_c ~= T * Delta E_t[ratio A_c]).
+    #   none -> c = J_c - d as in OmniSafe (mixes episode units with the per-step surrogate).
+    config.cost_violation_normalization = "per_step"
 
     return config
