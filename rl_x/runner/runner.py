@@ -320,6 +320,7 @@ class Runner:
                 monitor_gym=True,
                 save_code=True,
                 settings=wandb.Settings(init_timeout=self._config.runner.wandb_init_timeout),
+                tags=[tag.strip() for tag in str(self._config.runner.get("wandb_tags", "")).split(",") if tag.strip()] or None,
                 **wandb_resume_kwargs,
             )
             run_info = {"git_commit": _git_commit(), "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),

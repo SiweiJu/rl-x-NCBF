@@ -15,6 +15,7 @@ def get_config(runner_mode):
     config.exp_name = "placeholder"
     config.run_name = f"{int(time.time())}"
     config.notes = "placeholder"
+    config.wandb_tags = ""  # comma-separated wandb tags, e.g. "phase/P0,method/pncbf,robot/go2"
     config.wandb_init_timeout = 600
 
     config.save_model = False
