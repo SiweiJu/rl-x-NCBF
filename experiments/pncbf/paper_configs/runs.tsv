@@ -1,0 +1,60 @@
+group	id	name	state	tags	commit	created	runtime_h
+ncbf	6r5bglx3	ncbf-seed_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_eta_.5_gamma_0_plc_0.0_seed_142	finished		78d9f1c0e1	2026-02-04T11:22:30Z	43.6
+ncbf	b76fjubv	ncbf-seed_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_eta_.5_gamma_0_plc_0.0_seed_343	finished		0d21d1c386	2026-02-04T15:36:09Z	43.4
+ncbf	flclqegy	ncbf-seed_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_eta_.5_gamma_0_plc_0.0_seed_42	finished		78d9f1c0e1	2026-02-04T11:22:30Z	43.7
+ncbf	hfg5gt43	ncbf-seed_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_eta_.5_gamma_0_plc_0.0_seed_242	finished		78d9f1c0e1	2026-02-04T11:22:30Z	25.8
+ncbf	tlufhugo	ncbf-seed_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_eta_.5_gamma_0_plc_0.0_seed_442	finished		312e49bd91	2026-02-05T12:45:32Z	25.3
+ncbf-q	26bykbai	testq_no_safe_seed_42	finished		614c6b912a	2026-01-27T11:12:46Z	17.1
+ncbf-q	2mljioq3	testq_no_safe_seed_342	finished		614c6b912a	2026-01-27T11:12:47Z	17.2
+ncbf-q	55a6jg8s	testq_no_safe_seed_442	finished		614c6b912a	2026-01-27T11:15:59Z	17.6
+ncbf-q	ojsp7jft	testq_no_safe_seed_142	finished		614c6b912a	2026-01-27T11:12:47Z	17.2
+ncbf-q	usvlk3eo	no_safe_seed_42	finished		614c6b912a	2026-01-27T13:03:29Z	15.9
+ncbf-q	z3s0aomy	testq_no_safe_seed_242	finished		614c6b912a	2026-01-27T11:12:47Z	17.3
+ncbf-q-no-safe	2k30xlgc	no_safe_seed_1342	finished		614c6b912a	2026-01-28T10:46:56Z	16.6
+ncbf-q-no-safe	g3vqg0f8	no_safe_seed_1142	finished		614c6b912a	2026-01-28T10:46:53Z	15.9
+ncbf-q-no-safe	p37kpgcs	no_safe_seed_1242	finished		614c6b912a	2026-01-28T10:46:53Z	15.7
+ncbf-q-no-safe	wcofn9cv	no_safe_seed_1442	finished		614c6b912a	2026-01-28T10:46:57Z	15.7
+ncbf-q-no-safe	ym84duai	no_safe_seed_1042	finished		614c6b912a	2026-01-28T10:46:53Z	16.0
+ncbf-q-safe	27cfbtby	q-safe-H-gamma_0.405_seed_245_H_25	finished		cacffe7a2f	2026-01-29T12:10:23Z	17.6
+ncbf-q-safe	5wpajwko	q-safe-H-gamma_0.405_seed_42_H_25	finished	ours	cacffe7a2f	2026-01-28T13:49:00Z	17.6
+ncbf-q-safe	5xsqhdr5	q-safe-H-gamma_0.405_seed_44_H_1	finished	H1	cacffe7a2f	2026-01-28T20:32:10Z	17.0
+ncbf-q-safe	62wimvf8	q-safe-gamma_1.386_seed_42	finished		cacffe7a2f	2026-01-28T13:49:02Z	17.4
+ncbf-q-safe	7596c1fl	q-safe-H-gamma_0.405_seed_43_H_10	finished		cacffe7a2f	2026-01-28T20:26:51Z	17.2
+ncbf-q-safe	ag5rwgy3	q-safe-gamma_0.405_seed_42	finished	ours	cacffe7a2f	2026-01-28T13:49:02Z	17.9
+ncbf-q-safe	cazxxpqv	q-safe-H-gamma_0.405_seed_43_H_50	finished		cacffe7a2f	2026-01-28T20:26:53Z	18.2
+ncbf-q-safe	e1oolmdg	q-safe-H-gamma_0.405_seed_43_H_1	finished	H1	cacffe7a2f	2026-01-28T20:26:51Z	17.5
+ncbf-q-safe	f3s2gzet	q-safe-H-gamma_0.405_seed_245_H_1	finished		cacffe7a2f	2026-01-29T12:06:23Z	17.1
+ncbf-q-safe	fzhmn9ai	q-safe-H-gamma_0.405_seed_44_H_50	finished		cacffe7a2f	2026-01-28T21:22:40Z	17.3
+ncbf-q-safe	ixnfwras	q-safe-H-gamma_0.405_seed_245_H_10	finished		cacffe7a2f	2026-01-29T12:06:23Z	17.3
+ncbf-q-safe	ksaqa0ay	q-safe-H-gamma_0.405_seed_42_H_1	finished	H1	cacffe7a2f	2026-01-28T13:49:00Z	17.6
+ncbf-q-safe	lpukb0yz	q-safe-H-gamma_0.405_seed_145_H_25	finished		cacffe7a2f	2026-01-29T12:06:23Z	17.4
+ncbf-q-safe	m37s9i3z	q-safe-H-gamma_0.405_seed_145_H_50	finished		cacffe7a2f	2026-01-29T12:06:23Z	17.2
+ncbf-q-safe	m9j107v4	q-safe-H-gamma_0.405_seed_42_H_10	finished		cacffe7a2f	2026-01-28T13:49:00Z	17.3
+ncbf-q-safe	mwffgzup	debug_original_gamma_0_seed_42	finished		cacffe7a2f	2026-01-28T13:48:59Z	15.8
+ncbf-q-safe	pa7gv3f0	q-safe-H-gamma_0.405_seed_42_H_50	finished		cacffe7a2f	2026-01-28T13:49:00Z	17.4
+ncbf-q-safe	pp5vk279	q-safe-gamma_0_seed_42	finished	ours	cacffe7a2f	2026-01-28T13:48:59Z	17.3
+ncbf-q-safe	ptkx5nwh	q-safe-H-gamma_0.405_seed_245_H_50	finished		cacffe7a2f	2026-01-29T12:12:41Z	17.4
+ncbf-q-safe	qzw1xfas	q-safe-gamma_4.595_seed_42	finished		cacffe7a2f	2026-01-28T13:49:00Z	17.3
+ncbf-q-safe	rvc4q1sa	q-safe-H-gamma_0.405_seed_145_H_10	finished		cacffe7a2f	2026-01-29T12:06:23Z	17.4
+ncbf-q-safe	wr9r03p2	q-safe-H-gamma_0.405_seed_44_H_25	finished	ours	cacffe7a2f	2026-01-28T21:06:57Z	17.3
+ncbf-q-safe	xxn6cuqz	q-safe-H-gamma_0.405_seed_44_H_10	finished		cacffe7a2f	2026-01-28T20:55:31Z	17.4
+ncbf-q-safe	z84dphij	q-safe-H-gamma_0.405_seed_145_H_1	finished		cacffe7a2f	2026-01-29T12:06:16Z	17.2
+ncbf-q-safe	zdqj50w0	q-safe-H-gamma_0.405_seed_43_H_25	finished	ours	cacffe7a2f	2026-01-28T20:26:51Z	17.7
+ncbf-q-safe-fall	1kgldart	safe_fall_safety_seed_22142	finished		804c7a5cd4	2026-02-06T07:30:05Z	12.8
+ncbf-q-safe-fall	6x0xfgyy	safe_fall_safety_seed_24442	finished		804c7a5cd4	2026-02-06T07:30:05Z	10.0
+ncbf-q-safe-fall	b0xzdofb	safe_fall_safety_seed_22342	finished		804c7a5cd4	2026-02-06T07:30:05Z	12.8
+ncbf-q-safe-fall	cr77zxxi	safe_fall_safety_seed_12142	finished		804c7a5cd4	2026-02-06T07:30:05Z	10.2
+ncbf-q-safe-fall	u8vt9x0t	safe_fall_safety_seed_22242	finished		804c7a5cd4	2026-02-06T07:30:05Z	10.2
+ncbf-q-safety	14toci4v	ncbf-q-safety_wcbf0d1_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_0_h_25_seed_42	finished	ours	cacffe7a2f	2026-01-28T13:59:44Z	13.1
+ncbf-q-safety	3lyiu904	ncbf-q-safety_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_5_h_1_seed_42	finished	H1	614c6b912a	2026-01-27T22:23:30Z	17.0
+ncbf-q-safety	bmfjios3	ncbf-q-safety_wcbf0d1_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_0_h_25_seed_42	finished	ours	cacffe7a2f	2026-01-28T21:42:32Z	12.7
+ncbf-q-safety	ftwndawf	ncbf-q-safety_wcbf0d01_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_0_h_25_seed_42	finished	ours	cacffe7a2f	2026-01-28T21:42:32Z	12.9
+ncbf-q-safety	io2ocjkw	ncbf-q-safety_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_5_h_50_seed_42	finished		614c6b912a	2026-01-27T22:21:40Z	13.0
+ncbf-q-safety	jfpsea5v	ncbf-q-safety_wcbf0d1_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_5_h_25_seed_42	finished		cacffe7a2f	2026-01-28T13:59:44Z	13.1
+ncbf-q-safety	vslqsk41	ncbf-q-safety_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_5_h_10_seed_42	finished		614c6b912a	2026-01-27T22:23:30Z	16.9
+ncbf-q-safety	xits93to	ncbf-q-safety_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_5_h_25_seed_42	finished		614c6b912a	2026-01-27T22:21:40Z	12.8
+no_safety_H_sweep	3jxh6ppb	no_safety_H_sweep_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_0.5_h_50_seed_42	finished		78d9f1c0e1	2026-01-25T19:25:03Z	13.2
+no_safety_H_sweep	kn8h2mmb	no_safety_H_sweep_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_0.5_h_1_seed_42	finished		78d9f1c0e1	2026-01-25T19:22:42Z	13.3
+no_safety_H_sweep	mig6s2af	no_safety_H_sweep_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_0.5_h_5_seed_42	finished		78d9f1c0e1	2026-01-25T19:22:42Z	13.2
+no_safety_H_sweep	uoizsfor	no_safety_H_sweep_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_0.5_h_10_seed_42	finished		78d9f1c0e1	2026-01-25T19:22:44Z	12.9
+no_safety_H_sweep	usrktjj7	no_safety_H_sweep_wd_0_lip_0_mb_64_lr_0.001_buf_50_20_gc_0.5_h_25_seed_42	finished		78d9f1c0e1	2026-01-25T19:22:44Z	13.0
