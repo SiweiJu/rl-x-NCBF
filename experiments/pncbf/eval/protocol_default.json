@@ -1,0 +1,25 @@
+{
+  "_comment": "Perturbation-sweep protocol (T04, project plan 6.3). Values marked TODO_WANDB in experiments/pncbf/reports/T04.md are not yet confirmed from the paper runs; override them here or on the run_eval_sweep.py command line.",
+  "nr_envs": 1024,
+  "episode_length_in_seconds": 10,
+  "terrains": {"flat": "plane", "hfield": "hfield_diverse"},
+  "modes": ["A"],
+  "perturbations": ["action_noise", "push"],
+  "sampling_probs": {
+    "action_noise": [0.0, 0.002, 0.004, 0.008, 0.016],
+    "push": [0.0, 0.002, 0.004, 0.008, 0.016]
+  },
+  "eval_seeds": [0],
+  "noise_std": 1.0,
+  "noise_std_mode": "absolute",
+  "noise_point": "pre_shield",
+  "push_scale": 2.0,
+  "push_scale_joints": false,
+  "push_impl": "env",
+  "background_push_prob": -1.0,
+  "success_threshold_steps": 250,
+  "env_args": [
+    "--environment.train_robot=unitree_go2"
+  ],
+  "algo_args": []
+}
