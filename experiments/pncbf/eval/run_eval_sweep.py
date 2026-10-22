@@ -25,8 +25,10 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -70,6 +72,8 @@ def load_protocol(args):
         "modes": args.modes, "perturbations": args.perturbations, "eval_seeds": args.eval_seeds,
         "noise_std": args.noise_std, "noise_std_mode": args.noise_std_mode, "noise_point": args.noise_point,
         "push_scale": args.push_scale, "push_impl": args.push_impl, "background_push_prob": args.background_push_prob,
+        "initial_command_zero_prob": args.initial_command_zero_prob,
+        "paper_shield": args.paper_shield,
     }
     protocol.update({k: v for k, v in overrides.items() if v is not None})
     if args.sampling_probs is not None:
@@ -103,6 +107,7 @@ def job_command(job, protocol, out_dir, python):
         "--environment.name=ncbf_mujoco.robot_locomotion.mjx",
         "--runner.mode=test",
         f"--runner.load_model={entry['path']}",
+        f"--algorithm.eval_sweep.checkpoint_source={entry.get('source_path', entry['path'])}",
         "--runner.track_console=False", "--runner.track_tb=False", "--runner.track_wandb=False", "--runner.save_model=False",
         "--runner.project_name=pncbf_eval", "--runner.exp_name=eval_sweep",
         f"--runner.run_name={entry['label']}_{job['terrain_label']}_mode{job['mode']}",
@@ -127,10 +132,12 @@ def job_command(job, protocol, out_dir, python):
         f"--algorithm.eval_sweep.noise_std_mode={protocol['noise_std_mode']}",
         f"--algorithm.eval_sweep.noise_point={protocol['noise_point']}",
         f"--algorithm.eval_sweep.push_scale={protocol['push_scale']}",
-        f"--algorithm.eval_sweep.push_scale_joints={bool(protocol.get('push_scale_joints', False))}",
         f"--algorithm.eval_sweep.push_impl={protocol['push_impl']}",
         f"--algorithm.eval_sweep.background_push_prob={protocol['background_push_prob']}",
         f"--algorithm.eval_sweep.success_threshold_steps={int(protocol['success_threshold_steps'])}",
+        f"--algorithm.eval_sweep.paper_shield={protocol.get('paper_shield', 'train')}",
+        f"--algorithm.eval_sweep.initial_command_zero_prob={float(protocol.get('initial_command_zero_prob', 1.0))}",
+        f"--algorithm.eval_sweep.push_scale_joints={bool(protocol.get('push_scale_joints', False))}",
     ]
     return cmd
 
@@ -154,6 +161,8 @@ def main():
     ap.add_argument("--push_scale", type=float, default=None)
     ap.add_argument("--push_impl", default=None, choices=["env", "eval_loop"])
     ap.add_argument("--background_push_prob", type=float, default=None)
+    ap.add_argument("--initial_command_zero_prob", type=float, default=None)
+    ap.add_argument("--paper_shield", default=None, choices=["train", "cpu_test"], help="paper-code checkpoints only")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--task_index", type=int, default=None, help="run only this job (slurm array index)")
     ap.add_argument("--list_jobs", action="store_true", help="print the job list (for --array=0-<n-1>) and exit")
@@ -181,6 +190,14 @@ def main():
 
     failed = []
     for index, job in selected:
+        private = None
+        if not args.dry_run:
+            # PPO.load unpacks into <checkpoint dir>/tmp and deletes it: give every job a private copy so that array
+            # tasks sharing a checkpoint directory (e.g. paper_models/ours/*.model) do not collide.
+            private = tempfile.mkdtemp(prefix=f"pncbf_eval_{job['checkpoint']['label']}_")
+            os.makedirs(os.path.join(private, "models"))
+            shutil.copy(job["checkpoint"]["path"], os.path.join(private, "models", "latest.model"))
+            job = dict(job, checkpoint=dict(job["checkpoint"], source_path=job["checkpoint"]["path"], path=os.path.join(private, "models", "latest.model")))
         cmd = job_command(job, protocol, out_dir, args.python)
         print(f"[job {index}/{len(jobs)}] {job['checkpoint']['label']} {job['terrain_label']} mode {job['mode']}\n  cd {EXPERIMENTS_DIR} && "
               + " ".join(shlex.quote(c) for c in cmd), flush=True)
@@ -191,6 +208,7 @@ def main():
         env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(REPO_DIR)] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]))
         result = subprocess.run(cmd, cwd=EXPERIMENTS_DIR, env=env)
         print(f"[job {index}] exit {result.returncode} after {time.time() - start:.0f} s", flush=True)
+        shutil.rmtree(private, ignore_errors=True)
         if result.returncode != 0:
             failed.append(index)
     if failed:

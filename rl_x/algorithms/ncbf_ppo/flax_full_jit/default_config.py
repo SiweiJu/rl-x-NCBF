@@ -60,6 +60,7 @@ def get_config(algorithm_name):
     config.eval_sweep.enabled = False
     config.eval_sweep.out_dir = ""
     config.eval_sweep.checkpoint_label = ""
+    config.eval_sweep.checkpoint_source = ""
     config.eval_sweep.method = ""
     config.eval_sweep.train_seed = -1
     config.eval_sweep.terrain_label = ""
@@ -78,4 +79,6 @@ def get_config(algorithm_name):
     config.eval_sweep.background_push_prob = -1.0
     config.eval_sweep.success_threshold_steps = 250
     config.eval_sweep.save_episodes = True
+    config.eval_sweep.paper_shield = "train"
+    config.eval_sweep.initial_command_zero_prob = 1.0
     return config

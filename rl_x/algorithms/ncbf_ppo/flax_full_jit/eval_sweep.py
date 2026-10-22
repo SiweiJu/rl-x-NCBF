@@ -117,11 +117,28 @@ class MultistepAgent:
 
 
 class PaperAgent:
-    """Paper code (`ncbf-q` branch): policy(obs); shield as in its training rollout (ppo.py:189-192 there):
-    `batched_ncbf_safety_layer(u, obs, last_action, last_state, stacked params of the list of ensemble states)`."""
+    """Paper code (`ncbf-q` branch): policy(obs) and one of two shields.
 
-    def __init__(self, model):
+    shield="train": the full-jit shield used during training (ppo.py:189-192 there):
+        `batched_ncbf_safety_layer(u, obs, last_action, last_state, stacked ensemble params)`, last_state = previous obs.
+    shield="cpu_test": the shield of the paper's evaluation, i.e. the non-jit `ncbf_ppo/flax` test() on the CPU env:
+        `flax/ncbf.py:make_get_safe_action_q` (CVaR over k=2 of 5 members instead of 3, slack scaled by the std of h(x)
+        instead of clip(std h(u), 1, 10), shield off while last_action == 0), called with last_state = the *current*
+        observation (`flax/ppo.py:1001-1002`: last_state = state after env.step).
+    """
+
+    def __init__(self, model, shield="train"):
         self.model = model
+        self.shield_mode = shield
+        if shield == "cpu_test":
+            from ml_collections import config_dict
+            from rl_x.algorithms.ncbf_ppo.flax.ncbf import get_ncbf as get_flax_ncbf
+            config = config_dict.ConfigDict(model.config.to_dict())
+            config.algorithm.ncbf.n_enssemble = config.algorithm.ncbf.n_ensemble
+            config.algorithm.ncbf.use_robust_safety_layer = False
+            _, _, self._cpu_test_shield, _ = get_flax_ncbf(config, model.env)
+        elif shield != "train":
+            raise ValueError("eval_sweep.paper_shield must be train or cpu_test")
 
     @property
     def use_safety_layer(self):
@@ -136,13 +153,18 @@ class PaperAgent:
         m = self.model
         states = m.ncbf_state if isinstance(m.ncbf_state, (list, tuple)) else [m.ncbf_state]
         params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in states])
+        if self.shield_mode == "cpu_test":
+            obs = env_state.next_observation
+            safe_action, delta, delta_u, _, _ = self._cpu_test_shield(action, obs, env_state.last_action, obs, params_stack)
+            last_action_zero = jnp.all(env_state.last_action == 0.0, axis=-1)
+            return safe_action, (delta > 0.0) & ~last_action_zero, delta_u
         safe_action, constraint_active, delta_u = m.batched_ncbf_safety_layer(
             action, env_state.next_observation, env_state.last_action, env_state.last_state, params_stack)
         return safe_action, constraint_active, delta_u
 
 
-def make_agent(model):
-    return MultistepAgent(model) if hasattr(model, "encoder_state") else PaperAgent(model)
+def make_agent(model, paper_shield="train"):
+    return MultistepAgent(model) if hasattr(model, "encoder_state") else PaperAgent(model, paper_shield)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -175,6 +197,9 @@ def read_sweep_config(config):
         "push_impl": get("push_impl", "env"),
         "background_push_prob": float(get("background_push_prob", -1.0)),
         "success_threshold_steps": int(get("success_threshold_steps", 250)),
+        "initial_command_zero_prob": float(get("initial_command_zero_prob", 1.0)),
+        "paper_shield": get("paper_shield", "train"),
+        "checkpoint_source": get("checkpoint_source", ""),
         "save_episodes": bool(get("save_episodes", True)),
     }
     for name in sweep["perturbations"]:
@@ -212,6 +237,25 @@ def _scaled_perturbation_function(perturbation_function, scale, scale_joints):
         scaled.max_joint_velocity = perturbation_function.max_joint_velocity * scale
         scaled.max_joint_position = perturbation_function.max_joint_position * scale
     return scaled
+
+
+def apply_initial_commands(env, env_state, key, zero_prob):
+    """The env starts every episode with the command of the previous one (0 after the first reset) and resamples it
+    with a small per-step probability. The paper's CPU eval ran its episodes in sequence, so most of them started with
+    a random command, whereas a batched reset starts every env at 0. Keep 0 with probability `zero_prob`, otherwise
+    draw the command from the env's own command distribution (1.0 = env default, nothing changes)."""
+    if zero_prob >= 1.0:
+        return env_state
+    nr_envs = env_state.next_observation.shape[0]
+    keep_key, command_key = jax.random.split(key)
+    resample = jax.random.uniform(keep_key, (nr_envs,)) >= zero_prob
+
+    def one(state, flag, k):
+        internal_state = dict(state.internal_state)
+        env.command_function.get_next_command(internal_state, flag, k)
+        return state.replace(internal_state=internal_state)
+
+    return jax.jit(jax.vmap(one))(env_state, resample, jax.random.split(command_key, nr_envs))
 
 
 def make_episode_runner(env, agent, deployment_mode, noise_point="pre_shield", loop_pushes=False,
@@ -399,11 +443,15 @@ def eval_keys(seed):
     return jax.random.fold_in(base, 0), jax.random.fold_in(base, 1), jax.random.fold_in(base, 2)
 
 
+def command_key(seed):
+    return jax.random.fold_in(jax.random.PRNGKey(int(seed)), 3)
+
+
 def run_eval_sweep(model, sweep=None):
     """Run the sweep for a loaded model (PPO of this branch or of the paper code). Returns the list of summaries."""
     env, config = model.env, model.config
     sweep = sweep or read_sweep_config(config)
-    agent = make_agent(model)
+    agent = make_agent(model, sweep["paper_shield"])
     if sweep["deployment_mode"] == "B" and not agent.use_safety_layer:
         raise ValueError("deployment_mode=B needs algorithm.ncbf.use_safety_layer=True (the shield is a no-op otherwise).")
     if not sweep["out_dir"]:
@@ -463,6 +511,7 @@ def run_eval_sweep(model, sweep=None):
             reset_key, noise_key, push_key = eval_keys(seed)
             start = time.time()
             env_state = env.reset(jax.random.split(reset_key, env.nr_envs), True)
+            env_state = apply_initial_commands(env, env_state, command_key(seed), sweep["initial_command_zero_prob"])
             episodes = run(env_state, noise_key, push_key, noise_prob, noise_std if noise_prob > 0 else zero_std, push_prob, push_scale)
             episodes = {name: np.asarray(value) for name, value in jax.device_get(episodes).items()}
             wall_time = time.time() - start
@@ -473,7 +522,7 @@ def run_eval_sweep(model, sweep=None):
             summary["push_events_per_episode"] = None  # env-internal pushes are not counted
         ncbf_config = config.algorithm.ncbf
         summary.update({
-            "checkpoint": config.runner.get("load_model", None),
+            "checkpoint": sweep["checkpoint_source"] or config.runner.get("load_model", None),
             "checkpoint_label": sweep["checkpoint_label"],
             "method": sweep["method"],
             "train_seed": sweep["train_seed"],
@@ -503,6 +552,8 @@ def run_eval_sweep(model, sweep=None):
                 "eval_mode": True,
                 "deterministic_policy": True,
                 "episodes_per_env": 1,
+                "initial_command_zero_prob": sweep["initial_command_zero_prob"],
+                "paper_shield": sweep["paper_shield"] if isinstance(agent, PaperAgent) else None,
             },
             "git_commit": commit,
             "rl_x_path": RL_X_PATH,
