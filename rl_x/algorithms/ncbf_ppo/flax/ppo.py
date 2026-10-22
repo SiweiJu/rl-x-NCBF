@@ -82,6 +82,8 @@ class PPO:
 
         self.action_noise_sampling_ratio = config.algorithm.action_noise_sampling_ratio
         self.rollout_save_name = config.algorithm.rollout_save_name
+        self.action_noise_std = config.algorithm.action_noise_std
+        self.action_noise_std_mode = config.algorithm.action_noise_std_mode
 
         # assert ncbf nr_steps * nr_envs must be a multiple of ncbf batchsize
         if (self.nr_steps * self.nr_envs) % self.ncbf_minibatch_size != 0:
@@ -937,6 +939,14 @@ class PPO:
         # self.validate_dynamics_model_on_the_real_robot()
         # return
 
+        if self.action_noise_std_mode == "absolute":
+            noise_scale = self.action_noise_std
+        elif self.action_noise_std_mode == "range_fraction":
+            noise_scale = self.action_noise_std * jnp.asarray(self.env.single_action_space.high - self.env.single_action_space.low)
+        else:
+            raise ValueError(f"unknown action_noise_std_mode {self.action_noise_std_mode}")
+        rlx_logger.info(f"test(): action noise ratio {self.action_noise_sampling_ratio}, std {noise_scale}")
+
         # @jax.jit
         def get_action(policy_state: TrainState, state: np.ndarray, last_state: np.ndarray, last_action: np.ndarray):
             action_mean, action_logstd = self.policy.apply(policy_state.params, state)
@@ -949,7 +959,7 @@ class PPO:
             # add action noise
 
             raw_processed_action = raw_processed_action + jax.random.normal(action_offset_key,
-                                                                    raw_processed_action.shape) * 1 * if_sampling
+                                                                    raw_processed_action.shape) * noise_scale * if_sampling
 
             if last_action is not None:
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in self.ncbf_state])

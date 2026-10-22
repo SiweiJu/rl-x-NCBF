@@ -61,4 +61,8 @@ def get_config(algorithm_name):
 
     config.action_noise_sampling_ratio = 0.0  # ratio of sampling actions for ncbf evaluation
     config.rollout_save_name = "rollouts"       #  default name for rollout saving
+    # eval-only (test()): std of the Gaussian action noise. "absolute": std in policy-action units (old
+    # behaviour, std 1.0); "range_fraction": std = action_noise_std * (action_space.high - action_space.low)
+    config.action_noise_std = 1.0
+    config.action_noise_std_mode = "absolute"
     return config
