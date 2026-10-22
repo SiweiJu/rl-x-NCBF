@@ -17,6 +17,7 @@
 # settings: action_noise_2 action_noise_hfield perturbation perturbation_hfield  (default: all four)
 # Env overrides: GAMMAS (default: gamma_c stored in the checkpoint), SEEDS (default "1"),
 #   NR_EPISODES (default 10), EP_SECONDS (default 10), AN_PROBS, PERT_PROBS, PERT_SCALE (default 2),
+#   CMD_CLIP/CMD_FACTOR (command limits, default 2.0/2.0 as in training),
 #   SAFETY (default: use_safety_layer stored in the checkpoint), DRY_RUN=1 prints the commands only.
 #
 # --algorithm.minibatch_size=128: PPO.__init__ asserts (nr_steps*nr_envs) % minibatch_size == 0; with the
@@ -40,6 +41,8 @@ OUT=${OUT:-/home/ju/repo/pncbf/paper_eval}
 SEEDS=${SEEDS:-1}
 NR_EPISODES=${NR_EPISODES:-10}
 EP_SECONDS=${EP_SECONDS:-10}
+CMD_CLIP=${CMD_CLIP:-2.0}        # training value; CPU-env default is 1.0
+CMD_FACTOR=${CMD_FACTOR:-2.0}
 AN_PROBS=${AN_PROBS:-"0.0 0.2 0.4 0.6 0.8 1.0"}
 PERT_PROBS=${PERT_PROBS:-"0.002 0.005 0.01 0.015 0.02"}
 PERT_SCALE=${PERT_SCALE:-2}
@@ -109,8 +112,8 @@ for SETTING in $SETTINGS; do
       --environment.episode_length_in_seconds="$EP_SECONDS"
       --environment.ncbf_use_policy_observations=True
       --environment.env_curriculum_level_success_episode_return=8
-      --environment.command.max_velocity_per_m_factor=2.0
-      --environment.command.clip_max_velocity=2.0)
+      --environment.command.max_velocity_per_m_factor="$CMD_FACTOR"
+      --environment.command.clip_max_velocity="$CMD_CLIP")
     echo "[run] $PKL"
     if [[ -n "${DRY_RUN:-}" ]]; then printf '%q ' "${CMD[@]}"; echo; continue; fi
     t0=$(date +%s); "${CMD[@]}"; echo "[done] $PKL in $(( $(date +%s) - t0 )) s"

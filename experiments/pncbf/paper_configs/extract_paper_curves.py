@@ -5,8 +5,9 @@ The eval pkls / CSVs behind Fig. 2 (exps.pdf), Fig. 4 (exps_H.pdf) and the appen
 figures are not on IAS, so this reads the matplotlib PDFs directly:
   - every axes = one clip rectangle; y tick marks + labels give the y mapping,
   - x positions of the data points are mapped to the x tick labels of the same column,
-  - each stroked line (lw 1.4) is a method mean; the filled band around it is mean +- SE
-    (plot scripts: fill_between(mean - se, mean + se), se = std/sqrt(n_seeds)),
+  - each stroked line (lw 1.4) is a method mean over entries (models); the filled band is
+    mean +- std/2.236 (plot_line_plot_one_figure.py hard-codes sqrt(5), std over entries with ddof=1,
+    whatever the number of entries is). Column `se_band_half_width` = std/2.236.
   - the legend maps stroke colours to method names.
 
 Usage: python3 -I extract_paper_curves.py <fig.pdf> [...] > paper_curves.csv

@@ -12,13 +12,13 @@ How the mapping was made: the plot scripts (`origin/plots:misc/rss/plot_line_plo
 Checkpoints were pulled from wandb with `download_tagged_model_from_wandb.py` (default `--tag ours`) and
 `download_model_from_wandb.py` (default regex `safe_fall_safety`). The run ids below come from those
 tags/regexes, the run names, the configs, and the number of entries per curve that the figures' SE
-bands imply (`extract_paper_curves.py` + a brute-force fit: 10 episodes per pkl, SE with ddof=1).
+bands imply (`extract_paper_curves.py` + a brute-force fit; the band is std(ddof=1)/2.236, sqrt(5) hard-coded in the plot script).
 
 | figure / curve | run_root | wandb group | run ids (seed) | commit | confidence |
 |---|---|---|---|---|---|
 | Fig. 2 PPO-RL; App. H-full PPO-RL | `no_safety` | `ncbf-q-no-safe` | ym84duai (1042), g3vqg0f8 (1142), p37kpgcs (1242), 2k30xlgc (1342), wcofn9cv (1442) | 614c6b9 | high (`write_evaluation_to_csv.py` docstring example path `runs/no_safety/action_noise_hfield/no_safe_seed_1042`). The curve pools 8 (action noise) / 7 (perturbation) pkls per model, i.e. a γ_c list was also looped for PPO |
 | Fig. 2 ours; Fig. 4 "best (H=25)"; App. H=25, SafeFall-"ours", state-action critic | `ours` | `ncbf-q-safe` | 5wpajwko (42), zdqj50w0 (43), wr9r03p2 (44), lpukb0yz (145), 27cfbtby (245) | cacffe7 | high for 42/43/44 (tag `ours`); 145/245 inferred (5 entries fit all 22 points). ag5rwgy3 `q-safe-gamma_0.405_seed_42` has the identical config and is also tagged `ours` |
-| Fig. 2 PPO-RL-NCBF; Fig. 4 H=1; App. H=1 | `NCBF` | `ncbf-q-safe` | ksaqa0ay (42), e1oolmdg (43), 5xsqhdr5 (44) [tag `H1`], z84dphij (145), f3s2gzet (245) | cacffe7 | medium: the SE bands fit **8** entries × 10 episodes on all 22 points, not 5. Candidates for the other 3: 3lyiu904 (`ncbf-q-safety` γ_c=5, H=1, tag `H1`), kn8h2mmb (`no_safety_H_sweep` H=1, no shield, branch `ncbf`), local run `202601_RSS_paper/ncbf-q-H_1_seed_2025` (not in this project). Unresolvable without the pkls |
+| Fig. 2 PPO-RL-NCBF; Fig. 4 H=1; App. H=1 | `NCBF` | `ncbf-q-safe` | ksaqa0ay (42), e1oolmdg (43), 5xsqhdr5 (44) [tag `H1`], z84dphij (145), f3s2gzet (245) | cacffe7 | medium: the curve is NOT 5 entries × 10 episodes. Means are multiples of 1/40 and the bands fit 4 entries × 10 or 20 episodes (or 8 × 10) on 20–21 of 22 points. Most likely 4 of these 5 runs (3 tagged `H1` + one of 145/245), possibly with 2 pkls each. Other H=1 candidates: 3lyiu904 (`ncbf-q-safety` γ_c=5, tag `H1`), kn8h2mmb (`no_safety_H_sweep`), `202601_RSS_paper/ncbf-q-H_1_seed_2025` |
 | Fig. 4 / App. H=10 | `H10` | `ncbf-q-safe` | m9j107v4 (42), 7596c1fl (43), xxn6cuqz (44), rvc4q1sa (145), ixnfwras (245) | cacffe7 | high (5 entries fit) |
 | Fig. 4 / App. H=50 | `H50` | `ncbf-q-safe` | pa7gv3f0 (42), cazxxpqv (43), fzhmn9ai (44), m37s9i3z (145), ptkx5nwh (245) | cacffe7 | high (5 entries fit) |
 | App. SafeFall (exps_safe_fall, prediction table) | `safe_fall` | `ncbf-q-safe-fall` | cr77zxxi (12142), 1kgldart (22142), u8vt9x0t (22242), b0xzdofb (22342), 6x0xfgyy (24442) | 804c7a5 (`ncbf-q-safefall`) | high |
