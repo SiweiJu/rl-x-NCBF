@@ -17,6 +17,7 @@
 # settings: action_noise_2 action_noise_hfield perturbation perturbation_hfield  (default: all four)
 # Env overrides: GAMMAS (default: gamma_c stored in the checkpoint), SEEDS (default "1"),
 #   NR_EPISODES (default 10), EP_SECONDS (default 10), AN_PROBS, PERT_PROBS, PERT_SCALE (default 2),
+#   NOISE_STD/NOISE_MODE (paper-repro tree only; e.g. 0.5 range_fraction = paper text '50% of action range'),
 #   CMD_CLIP/CMD_FACTOR (command limits, default 2.0/2.0 as in training),
 #   SAFETY (default: use_safety_layer stored in the checkpoint), DRY_RUN=1 prints the commands only.
 #
@@ -40,7 +41,7 @@ TREE=${TREE:-/home/ju/repo/pncbf/paper-01180c6}
 OUT=${OUT:-/home/ju/repo/pncbf/paper_eval}
 SEEDS=${SEEDS:-1}
 NR_EPISODES=${NR_EPISODES:-10}
-EP_SECONDS=${EP_SECONDS:-10}
+EP_SECONDS=${EP_SECONDS:-10}   # int seconds (absl int flag)
 CMD_CLIP=${CMD_CLIP:-2.0}        # training value; CPU-env default is 1.0
 CMD_FACTOR=${CMD_FACTOR:-2.0}
 AN_PROBS=${AN_PROBS:-"0.0 0.2 0.4 0.6 0.8 1.0"}
@@ -85,6 +86,8 @@ for SETTING in $SETTINGS; do
     if [[ -f $PKL ]]; then echo "[skip] $PKL"; continue; fi
     if [[ $KIND == noise ]]; then
       X_ARGS=(--algorithm.action_noise_sampling_ratio="$SP")
+      # needs a tree with branch paper-repro (03ba21a): eval-only noise-std flags
+      [[ -n "${NOISE_STD:-}" ]] && X_ARGS+=(--algorithm.action_noise_std="$NOISE_STD" --algorithm.action_noise_std_mode="${NOISE_MODE:-absolute}")
     else
       X_ARGS=(--algorithm.action_noise_sampling_ratio=0.0
               --environment.domain_randomization.perturbation.sampling_probability="$SP"
