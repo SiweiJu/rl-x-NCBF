@@ -111,6 +111,7 @@ def get_config(algorithm_name):
     config.eval_sweep.enabled = False  # True: test() runs the sweep instead of the batch evaluation
     config.eval_sweep.out_dir = ""  # "" -> <run_path>/eval_sweep
     config.eval_sweep.checkpoint_label = ""  # "" -> run directory name of runner.load_model
+    config.eval_sweep.checkpoint_source = ""  # original checkpoint path (the driver loads a private copy)
     config.eval_sweep.method = ""  # free tag copied into the summaries (e.g. ppo, ncbf_h1, ours_h25)
     config.eval_sweep.train_seed = -1  # copied into the summaries
     config.eval_sweep.terrain_label = ""  # "" -> flat (plane) / hfield (hfield_diverse)
@@ -128,7 +129,9 @@ def get_config(algorithm_name):
     config.eval_sweep.push_impl = "env"  # env: env-internal pushes (retrace per point); eval_loop: pushes before each env step (one compile)
     config.eval_sweep.background_push_prob = -1.0  # pushes during the action-noise setting; < 0 -> env config value
     config.eval_sweep.success_threshold_steps = 250  # extra metric survival_rate_at_threshold (paper CSV threshold)
-    config.eval_sweep.save_episodes = True  # per-env outcomes eval_episodes.npz next to each summary
+    config.eval_sweep.save_episodes = True
+    config.eval_sweep.paper_shield = "train"  # paper-code checkpoints only: train (full-jit shield) or cpu_test (shield of the paper's CPU eval)
+    config.eval_sweep.initial_command_zero_prob = 1.0  # P(episode starts with the zero command); 1.0 = env default, see eval_sweep.apply_initial_commands  # per-env outcomes eval_episodes.npz next to each summary
 
     if "booster" in algorithm_name.lower():
         apply_booster_defaults(config)

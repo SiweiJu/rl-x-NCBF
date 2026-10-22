@@ -254,3 +254,13 @@ def test_mode_b_requires_the_shield(model):
             eval_sweep.run_eval_sweep(model, sweep)
     finally:
         model.ncbf_use_safety_layer = True
+
+
+def test_initial_commands(model):
+    env = model.env
+    state = env.reset(jax.random.split(jax.random.PRNGKey(0), NR_ENVS), True)
+    zero = np.asarray(state.internal_state["goal_velocities"])
+    same = eval_sweep.apply_initial_commands(env, state, jax.random.PRNGKey(1), 1.0)
+    np.testing.assert_array_equal(np.asarray(same.internal_state["goal_velocities"]), zero)
+    sampled = eval_sweep.apply_initial_commands(env, state, jax.random.PRNGKey(1), 0.0)
+    assert np.any(np.asarray(sampled.internal_state["goal_velocities"]) != zero)
