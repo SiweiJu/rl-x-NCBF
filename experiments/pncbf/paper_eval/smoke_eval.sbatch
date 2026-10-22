@@ -13,6 +13,7 @@
 #   sbatch --job-name=recover_eval_smoke --output=/home/ju/repo/pncbf/recover-scratch/log/%x_%j.txt smoke_eval.sbatch
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}"
+eval "$(/home/ju/miniconda3/bin/conda shell.bash hook)"; conda activate rlx-ncbf
 MODEL=/home/ju/repo/pncbf/paper_models/ours/q-safe-H-gamma_0.405_seed_42_H_25.model
 AN_PROBS="0.0" GAMMAS="0.405" SEEDS="1" OUT=/home/ju/repo/pncbf/paper_eval_smoke \
   bash paper_eval_sweep.sh "$MODEL" ours action_noise_2
