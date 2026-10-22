@@ -60,6 +60,9 @@ def prob_token(p):
     return f"{float(p):g}".replace("-", "m").replace(".", "p")
 
 
+RL_X_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
 def _git_commit():
     try:
         repo = os.path.dirname(os.path.abspath(__file__))
@@ -419,6 +422,7 @@ def run_eval_sweep(model, sweep=None):
     loop_pushes = sweep["push_impl"] == "eval_loop"
     head_names = getattr(env, "ncbf_target_names", None)
     commit = _git_commit()
+    rlx_logger.info(f"Eval sweep code: rl_x from {RL_X_PATH}, commit {commit}")
 
     def env_push_settings(perturbation, p):
         """(env-internal push probability, scale) for push_impl=env; the env step is retraced for each value."""
@@ -465,6 +469,8 @@ def run_eval_sweep(model, sweep=None):
 
         summary = summarize_episodes(episodes, env.horizon, sweep["success_threshold_steps"], head_names,
                                      shield_used=sweep["deployment_mode"] == "B")
+        if not loop_pushes:
+            summary["push_events_per_episode"] = None  # env-internal pushes are not counted
         ncbf_config = config.algorithm.ncbf
         summary.update({
             "checkpoint": config.runner.get("load_model", None),
@@ -499,6 +505,7 @@ def run_eval_sweep(model, sweep=None):
                 "episodes_per_env": 1,
             },
             "git_commit": commit,
+            "rl_x_path": RL_X_PATH,
             "wall_time_s": wall_time,
             "wall_time_includes_compile": includes_compile,
         })

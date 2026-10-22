@@ -39,8 +39,14 @@ if [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
 fi
 read -r -a sweep_args <<< "${SWEEP_ARGS:-}"
 
+REPO_DIR="$(cd "${EXPERIMENTS_DIR}/.." && pwd)"
+# conda env rlx-ncbf has rl_x installed editable from another tree: always import rl_x from this checkout.
+export PYTHONPATH="${REPO_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+
 cd "${EXPERIMENTS_DIR}"
-echo "host $(hostname)  gpu $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)  commit $(git rev-parse --short HEAD)"
+echo "host $(hostname)  gpu $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
+echo "repo ${REPO_DIR}  commit $(git -C "${REPO_DIR}" rev-parse HEAD)"
+echo "rl_x.__file__ = $("${PYTHON_EXE}" -c 'import rl_x; print(rl_x.__file__)')"
 start=$(date +%s)
 "${PYTHON_EXE}" pncbf/eval/run_eval_sweep.py \
     --checkpoints_file "${CHECKPOINTS_FILE}" \

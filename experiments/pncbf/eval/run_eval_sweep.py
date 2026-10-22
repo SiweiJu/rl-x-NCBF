@@ -175,6 +175,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     manifest = {"git_commit": _git_commit(), "protocol": protocol, "checkpoints": checkpoints, "nr_jobs": len(jobs),
                 "created": time.strftime("%Y-%m-%d %H:%M:%S")}
+    print(f"repo {REPO_DIR} commit {manifest['git_commit']} (jobs run with PYTHONPATH={REPO_DIR})", flush=True)
     if not args.dry_run:
         Path(out_dir, "sweep_manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -186,7 +187,9 @@ def main():
         if args.dry_run:
             continue
         start = time.time()
-        result = subprocess.run(cmd, cwd=EXPERIMENTS_DIR)
+        # rl_x must come from THIS checkout (on IAS, conda env rlx-ncbf has an editable install of another tree)
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(REPO_DIR)] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]))
+        result = subprocess.run(cmd, cwd=EXPERIMENTS_DIR, env=env)
         print(f"[job {index}] exit {result.returncode} after {time.time() - start:.0f} s", flush=True)
         if result.returncode != 0:
             failed.append(index)
