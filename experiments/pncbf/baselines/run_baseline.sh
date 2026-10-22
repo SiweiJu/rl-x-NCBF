@@ -70,6 +70,13 @@ fi
 
 echo "commit=${GIT_COMMIT} method=${METHOD} algorithm=${ALGORITHM_NAME} cost_limit=${COST_LIMIT} seed=${SEED} run=${RUN_NAME}"
 echo "tags=${WANDB_TAGS}"
+# The rlx-ncbf conda env has rl_x installed editable from /home/ju/repo/rl-x-NCBF; PYTHONPATH above makes this
+# checkout win. Fail loudly if it does not.
+RLX_FILE="$(cd "${EXPERIMENTS_DIR}" && "${PYTHON_EXE}" -c 'import rl_x; print(rl_x.__file__)' 2>/dev/null | tail -1)"
+echo "rl_x.__file__=${RLX_FILE} git_rev=$(git -C "${REPO_DIR}" rev-parse HEAD)"
+if [[ "${RLX_FILE}" != "${REPO_DIR}/rl_x/"* ]]; then
+    echo "rl_x is imported from ${RLX_FILE}, not from ${REPO_DIR}" >&2; exit 1
+fi
 cd "${EXPERIMENTS_DIR}"
 "${PYTHON_EXE}" experiment.py \
     --algorithm.name="${ALGORITHM_NAME}" \
