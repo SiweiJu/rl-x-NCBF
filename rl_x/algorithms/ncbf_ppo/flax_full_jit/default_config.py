@@ -51,6 +51,10 @@ def get_config(algorithm_name):
     config.ncbf.gamma_c_scaled_by_eta = True  # paper form h_next >= (1-eta) h + eta*gamma_c; False = legacy "+ gamma_c"
     config.ncbf.label_discount = False  # weight negative labels by coef_decay_lambda ** steps_to_failure (paper eq. 2)
     config.ncbf.w_temporal = 0.0  # weight of the DT-CBF temporal consistency loss (paper eq. 4-6), on-policy samples only
+    config.ncbf.temporal_mode = "adjacent"  # F2 fix: h(s_t,a_t) vs h(s_{t+1},a_{t+1}); "legacy_raw_vs_executed" = paper code (h(s_t,a_exec) vs h(s_t,a_raw), uses w_temporal; paper used w_cbf=1)
+    config.ncbf.temporal_pairs = "safe_safe"  # "safe_safe" (paper eq. 4 on safe->safe pairs); "safe_safe_and_unsafe" = previous multistep term
+    config.ncbf.terminal_critic_input = "pre_reset"  # F1 fix; "zeros" = paper code trained the episode-ending step on (0, 0)
+    config.ncbf.first_step_prev_value = "gamma_c"  # F1 fix in the shield: first step of an episode uses h_prev = gamma_c; "input" = legacy h(reset input)
     config.ncbf.lipschitz_state_only = True  # Lipschitz penalty only on the state part of the input, not on the action
     config.ncbf.w_clf = 1.0    # weight for classification loss
     config.ncbf.w_cbf = 1.0    # weight for CBF loss

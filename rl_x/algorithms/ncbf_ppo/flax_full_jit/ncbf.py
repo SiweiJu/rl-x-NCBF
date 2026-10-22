@@ -94,6 +94,8 @@ def get_ncbf(config, env):
     tighten_uncertainty = getattr(config.algorithm.ncbf, "tighten_uncertainty", "total")
     # Which uncertainty scales the QP slack as in the paper, a^T u + sigma * xi >= c ("none" is legacy: 1 / lambda_s).
     slack_uncertainty = getattr(config.algorithm.ncbf, "slack_uncertainty", "none")
+    # First step of an episode: "gamma_c" (require h >= gamma_c only) or legacy "input" (h of the reset input).
+    first_step_prev_value = getattr(config.algorithm.ncbf, "first_step_prev_value", "gamma_c")
 
     if safety_layer_projection not in ("soft_slack", "hard_projection"):
         raise ValueError(
@@ -182,18 +184,19 @@ def get_ncbf(config, env):
             gamma_c_scaled_by_eta=gamma_c_scaled_by_eta,
             tighten_uncertainty=tighten_uncertainty,
             slack_uncertainty=slack_uncertainty,
+            first_step_prev_value=first_step_prev_value,
         )
 
     # dummy
     if ncbf_clipping:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi: (
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi, is_first_step=False: (
             jnp.clip(action_raw, act_low, act_high),
             jnp.array(False),
             jnp.array(0.0),
             dummy_safety_diagnostics(jnp.clip(action_raw, act_low, act_high)),
         )
     else:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi: (
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, latent_z, safety_layer_curriculum_coeff, phi, is_first_step=False: (
             action_raw,
             jnp.array(False),
             jnp.array(0.0),
@@ -209,7 +212,7 @@ def get_ncbf(config, env):
     batched_get_safe_action = jax.jit(
         jax.vmap(
             safety_layer_function_for_batch,
-            in_axes=(0, 0, 0, 0, 0, None, None),
+            in_axes=(0, 0, 0, 0, 0, None, None, 0),
             out_axes=(0, 0, 0, 0),
         )
     )
@@ -364,9 +367,15 @@ def make_get_safe_action(
     gamma_c_scaled_by_eta: bool = True,
     tighten_uncertainty: str = "total",
     slack_uncertainty: str = "none",
+    first_step_prev_value: str = "gamma_c",
 ):
     """
     Returns a JIT-able safety layer.
+
+    On the first step of an episode there is no previous critic value. With first_step_prev_value="gamma_c"
+    (default, project plan 4.6) h_current is replaced by gamma_c, so the constraint reduces to h_next >= gamma_c
+    (scaled form). "input" is the legacy behavior: h_current = h(last_obs, last_action), which after a reset is
+    an artificial input (zero action; the paper code also used a zero observation, F1).
 
     The safety layer uses residual-level MC uncertainty:
         R = smin(h_next) - (1 - eta_cbf) smin(h_current) - eta_cbf * gamma_c
@@ -379,6 +388,8 @@ def make_get_safe_action(
     slack_uncertainty selects the sigma that scales the QP slack (paper eq. 12-13).
     """
     gamma_c_term = eta_cbf * gamma_c if gamma_c_scaled_by_eta else gamma_c
+    if first_step_prev_value not in ("gamma_c", "input"):
+        raise ValueError("first_step_prev_value must be 'gamma_c' or 'input'")
 
     def select_std(stds: Dict[str, Array], source: str) -> Array:
         if source == "none":
@@ -410,6 +421,7 @@ def make_get_safe_action(
     def residual_mean_and_std(
         current_details: Dict[str, Array],
         next_details: Dict[str, Array],
+        is_first_step: Array = False,
     ) -> Tuple[Array, Dict[str, Array]]:
         """
         Estimate mean/std of the scalar CBF residual using MC samples.
@@ -431,6 +443,12 @@ def make_get_safe_action(
             next_details,
             "residual_eps_next",
         )  # [M, E]
+        if first_step_prev_value == "gamma_c":
+            h_current_samples = jnp.where(
+                is_first_step,
+                jnp.full_like(h_current_samples, gamma_c),
+                h_current_samples,
+            )
 
         residual_samples = (
             h_next_samples
@@ -461,6 +479,7 @@ def make_get_safe_action(
         latent_z: Array,
         safety_layer_curriculum_coeff: Array,
         phi: dict,
+        is_first_step: Array = False,
     ):
         """
         Compute the affine chance-constrained CBF approximation
@@ -493,6 +512,7 @@ def make_get_safe_action(
             residual_mean, residual_stds = residual_mean_and_std(
                 current_details,
                 next_details,
+                is_first_step,
             )
             return residual_mean, residual_stds
 
@@ -517,6 +537,7 @@ def make_get_safe_action(
         latent_z: Array,
         safety_layer_curriculum_coeff: Array,
         phi: dict,
+        is_first_step: Array = False,
     ):
         x_t = obs_t[ncbf_obs_from_obs_idx]
         x_last = obs_last[ncbf_obs_from_obs_idx]
@@ -533,6 +554,7 @@ def make_get_safe_action(
         residual_mean, residual_stds = residual_mean_and_std(
             current_details,
             next_details,
+            is_first_step,
         )
         robust_residual = residual_mean - beta_coeff * select_std(residual_stds, tighten_uncertainty)
         return residual_mean, robust_residual, residual_stds["total"]
@@ -546,6 +568,7 @@ def make_get_safe_action(
         latent_z: Array,
         safety_layer_curriculum_coeff: Array,
         phis: dict,
+        is_first_step: Array = False,
     ) -> Tuple[Array, Array, Array]:
         action_raw = jax.lax.cond(
             action_clipping,
@@ -562,6 +585,7 @@ def make_get_safe_action(
             latent_z,
             safety_layer_curriculum_coeff,
             phis,
+            is_first_step,
         )
 
         linearization_is_finite = jnp.all(jnp.isfinite(a)) & jnp.isfinite(c)
@@ -666,6 +690,7 @@ def make_get_safe_action(
                 latent_z,
                 safety_layer_curriculum_coeff,
                 phis,
+                is_first_step,
             )
             actual_post_is_finite = (
                 jnp.isfinite(actual_post_residual_mean)

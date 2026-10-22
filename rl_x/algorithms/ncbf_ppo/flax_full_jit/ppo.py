@@ -20,6 +20,17 @@ import wandb
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.general_properties import GeneralProperties
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.policy import get_policy
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.critic import get_critic
+from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf_targets import (
+    TEMPORAL_MODES,
+    TEMPORAL_PAIRS,
+    TERMINAL_CRITIC_INPUTS,
+    critic_training_inputs,
+    episode_first_step,
+    legacy_raw_vs_executed_temporal_loss,
+    receding_min_target,
+    successor_pairs,
+    temporal_consistency_loss,
+)
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf import (
     get_ncbf,
     logistic_normal_binary_cross_entropy,
@@ -179,6 +190,7 @@ def summarize_counterfactual(records, head_names, nr_calibration_bins=5):
 
 
 class PPO:
+    SUPPORTS_RESUME = True
     def __init__(self, config, env, run_path, writer):
         self.config = config
         self.env = env
@@ -186,6 +198,15 @@ class PPO:
 
         self.save_model = config.runner.save_model
         self.save_path = os.path.join(run_path, "models")
+        # Requeue-safe resume (runner.resume): see _save_resume_checkpoint / _restore_resume_checkpoint.
+        self.resume = bool(config.runner.get("resume", False))
+        self.resume_path = os.path.join(run_path, "resume")
+        self.save_interval_iterations = int(config.runner.get("save_interval_iterations", 0))
+        self.save_interval_minutes = float(config.runner.get("save_interval_minutes", 20.0))
+        self.resume_start_update = 0
+        self.resume_env_curriculum = None
+        self.resume_last_save_update = 0
+        self.resume_last_save_time = time.time()
         self.track_console = config.runner.track_console
         self.track_tb = config.runner.track_tb
         self.track_wandb = config.runner.track_wandb
@@ -280,6 +301,17 @@ class PPO:
             raise ValueError("algorithm.ncbf.critic_action_index must be 'current' or 'previous'")
         self.ncbf_label_discount = bool(config.algorithm.ncbf.get("label_discount", False))
         self.ncbf_w_temporal = float(config.algorithm.ncbf.get("w_temporal", 0.0))
+        # F1: "pre_reset" trains the episode-ending step on its real (s_t, a_t); "zeros" = paper code (0, 0).
+        self.ncbf_terminal_critic_input = config.algorithm.ncbf.get("terminal_critic_input", "pre_reset")
+        if self.ncbf_terminal_critic_input not in TERMINAL_CRITIC_INPUTS:
+            raise ValueError(f"algorithm.ncbf.terminal_critic_input must be one of {TERMINAL_CRITIC_INPUTS}")
+        # F2: "adjacent" = paper eq. 4-6 on (s_t, a_t) -> (s_{t+1}, a_{t+1}); "legacy_raw_vs_executed" = paper code.
+        self.ncbf_temporal_mode = config.algorithm.ncbf.get("temporal_mode", "adjacent")
+        if self.ncbf_temporal_mode not in TEMPORAL_MODES:
+            raise ValueError(f"algorithm.ncbf.temporal_mode must be one of {TEMPORAL_MODES}")
+        self.ncbf_temporal_pairs = config.algorithm.ncbf.get("temporal_pairs", "safe_safe")
+        if self.ncbf_temporal_pairs not in TEMPORAL_PAIRS:
+            raise ValueError(f"algorithm.ncbf.temporal_pairs must be one of {TEMPORAL_PAIRS}")
         self.ncbf_lipschitz_state_only = bool(config.algorithm.ncbf.get("lipschitz_state_only", True))
         self.ncbf_gamma_c_scaled_by_eta = bool(config.algorithm.ncbf.get("gamma_c_scaled_by_eta", True))
         self.anticipation_through_shield = bool(config.algorithm.ncbf.get("anticipation_through_shield", False))
@@ -411,7 +443,7 @@ class PPO:
         )
 
         if self.save_model:
-            os.makedirs(self.save_path)
+            os.makedirs(self.save_path, exist_ok=self.resume)
             self.latest_model_file_name = "latest.model"
             self.latest_model_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 
@@ -538,9 +570,10 @@ class PPO:
 
                 params_stack = repeat_ncbf_params(ncbf_state)
 
+                first_step = episode_first_step(env_state)
                 processed_action, constraint_active, delta_u, safety_diagnostics = self.batched_ncbf_safety_layer(raw_processed_action, observation, last_action, last_state, latent_z,
                                                                                       safety_layer_curriculum_coeff,
-                                                                                      params_stack)
+                                                                                      params_stack, first_step)
                 processed_action, constraint_active, delta_u, safety_diagnostics = self._bypass_post_drop_safety_layer(
                     raw_processed_action,
                     processed_action,
@@ -557,7 +590,7 @@ class PPO:
                 env_state = self.env.step(env_state, env_action)
                 done = env_state.terminated | env_state.truncated
                 transition = (observation, env_state.actual_next_observation, action, env_action, env_state.reward, value,
-                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, last_state, last_action, history_stack, safety_diagnostics)
+                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, last_state, last_action, history_stack, safety_diagnostics, first_step)
 
                 if self.render:
                     def render(env_state):
@@ -568,118 +601,13 @@ class PPO:
                 return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff), transition
 
             @jax.jit
-            def window_any_done_next_H(dones: jnp.ndarray, terminates: jnp.ndarray):
-                """
-                dones, terminates: [T, N_env] bool
-                Returns:
-                  y:    [T, N] bool   True if NO terminate in (t, t+H], else False
-                  mask: [T, N] bool   True if NO (done & ~terminate) in (t, t+H], else False
-                  dists_to_next_term: [T, N] int32  distance to next terminate at/after t within same episode
-                                       0 means terminate at t; cap (=H+1) means none within episode horizon
-                """
-                H = self.ncbf_H  # must be a Python int for good jit behavior
-                cap = jnp.int32(H + 10)
-
-                dones = dones.at[-1, :].set(True)
-
-                def _future_terms_within_H(events: jnp.ndarray, dones_boundary: jnp.ndarray):
-                    def body(dist_prev, inp):
-                        ev_t, done_t = inp
-
-                        # Reset distance when crossing episode boundary
-                        dist_prev = jnp.where(done_t, cap, dist_prev)
-
-                        dist_t = jnp.where(ev_t, 0, jnp.minimum(dist_prev + 1, cap))
-                        return dist_t, dist_t
-
-                    init = jnp.full((events.shape[1],), cap, dtype=jnp.int32)
-                    # Scan BACKWARD then reverse output
-                    _, dists_rev = jax.lax.scan(body, init, (events[::-1], dones_boundary[::-1]))
-                    dists = dists_rev[::-1]
-
-                    any_next_H = jnp.logical_and(dists >= 0, dists <= H)
-                    return any_next_H, dists
-
-                any_term_next_H, dists_to_next_term = _future_terms_within_H(terminates, dones)
-                y = ~any_term_next_H
-
-                def _future_trunc_within_H(terms, truncs):
-                    # set mask to false if any truncation (either timely trauncation or at the end of each env rollouts)
-                    def body(dist_prev, inp):
-                        term_t, trunc_t = inp
-
-                        # Reset distance when crossing episode boundary
-                        dist_prev = jnp.where(trunc_t, cap, dist_prev)
-
-                        # if term, set to cap t maintain
-                        dist_prev = jnp.where(term_t, cap, dist_prev)
-
-                        dist_t = jnp.where(trunc_t, 0, jnp.minimum(dist_prev + 1, cap))
-                        return dist_t, dist_t
-
-                    init = jnp.full((truncs.shape[1],), cap, dtype=jnp.int32)
-                    # Scan BACKWARD then reverse output
-                    _, dists_rev = jax.lax.scan(body, init, (terms[::-1], truncs[::-1]))
-                    dists = dists_rev[::-1]
-
-                    any_next_H = jnp.logical_and(dists >= 0, dists <= H)
-                    return any_next_H, dists
-
-                trunc_done = dones & (~terminates)
-                any_done_next_H, _ = _future_trunc_within_H(terminates, trunc_done)
-                mask = ~any_done_next_H
-                return y, mask, dists_to_next_term
-
             @jax.jit
             def get_receding_min_target(future_states: jnp.ndarray,
                                         dones: jnp.ndarray,
                                         terminates: jnp.ndarray):
-                """
-                future_states: [T, N, D], actual next observations for each sampled transition
-                dones:         [T, N] bool
-                terminates:    [T, N] bool
-
-                Returns:
-                  target: [T, N, K]   receding-horizon min target
-                  safe_y: [T, N] if state is receding-horizon-safe
-                  y:      [T, N] bool same as your current y
-                  mask:   [T, N] bool same as your current mask
-                """
-                H = self.ncbf_H
-                idx = jnp.asarray(self.env.ncbf_target_indices)
-
-                # [T, N, K], where K = number of target state dims
-                vals = future_states[..., idx]
-
-                y, mask, dists_to_next_term = window_any_done_next_H(dones, terminates)
-
-                T, N, K = vals.shape
-                offsets = jnp.arange(H, dtype=jnp.int32)  # [H]
-                time_idx = jnp.arange(T, dtype=jnp.int32)[:, None] + offsets[None, :]  # [T, H]
-
-                # Pad with +inf so that windows going beyond T do not affect the min
-                pad = jnp.full((H - 1, N, K), jnp.inf, dtype=vals.dtype)
-                vals_pad = jnp.concatenate([vals, pad], axis=0)  # [T+H-1, N, K]
-
-                # Gather rolling windows: [T, H, N, K]
-                windows = vals_pad[time_idx]
-
-                # Effective horizon length:
-                # include the terminal state if termination occurs within the horizon
-                eff_len = jnp.where(dists_to_next_term < H,
-                                    dists_to_next_term + 1,
-                                    H).astype(jnp.int32)  # [T, N]
-
-                # valid[o, t, n] = whether offset o is inside the allowed horizon
-                valid = offsets[None, :, None] < eff_len[:, None, :]  # [T, H, N]
-
-                # Mask invalid entries with +inf so min ignores them
-                windows = jnp.where(valid[..., None], windows, jnp.inf)
-
-                # Min over time -> [T, N, K]
-                target = jnp.min(windows, axis=(1))
-
-                return target, y, mask, dists_to_next_term
+                """Labels for the transitions of one rollout; see ncbf_targets.receding_min_target.
+                Returns target [T, N, K], y [T, N], mask [T, N], dists_to_next_term [T, N]."""
+                return receding_min_target(future_states, dones, terminates, self.ncbf_H, self.env.ncbf_target_indices)
 
             @partial(jax.jit, static_argnums=(8,))
             def train_next_step_predictor(encoder_state, decoder_state, states, next_states, actions, masks, history_stacks, key: jax.random.PRNGKey, nr_minibatches: int):
@@ -734,6 +662,13 @@ class PPO:
             key, reset_key = jax.random.split(key, 2)
             reset_keys = jax.random.split(reset_key, self.nr_envs)
             env_state = self.env.reset(reset_keys, False)
+            # Resume: the env state is re-reset (episodes restart), only the env curriculum is carried over.
+            if self.resume_env_curriculum is not None:
+                restored_internal_state = dict(env_state.internal_state)
+                for curriculum_key, curriculum_value in self.resume_env_curriculum.items():
+                    if curriculum_key in restored_internal_state:
+                        restored_internal_state[curriculum_key] = jnp.asarray(curriculum_value, dtype=restored_internal_state[curriculum_key].dtype)
+                env_state = env_state.replace(internal_state=restored_internal_state)
 
             policy_state = self.policy_state
             critic_state = self.critic_state
@@ -761,7 +696,7 @@ class PPO:
 
             ncbf_replay_buffer = _init_buffer(self.ncbf_neg_buffer_size)
 
-            def multi_learning_and_eval_save_iteration(multi_learning_and_eval_save_iteration_carry, multi_learning_iteration_step):
+            def multi_learning_and_eval_save_iteration(multi_learning_and_eval_save_iteration_carry, multi_learning_iteration_step, first_learning_iteration_step=0):
                 policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = multi_learning_and_eval_save_iteration_carry
 
                 def learning_iteration(learning_iteration_carry, learning_iteration_step):
@@ -787,19 +722,16 @@ class PPO:
                     rollout_carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff)
                     single_rollout_carry, batch = jax.lax.scan(single_rollout, rollout_carry, None, self.nr_steps)
                     policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, _ = single_rollout_carry
-                    states, next_states, actions, env_actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks, safety_diagnostics = batch
+                    states, next_states, actions, env_actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks, safety_diagnostics, first_steps = batch
+                    # Per-step physics-state records (env option record_transition_physics_state) are data, not metrics.
+                    infos = {k: v for k, v in infos.items() if not k.startswith("transition/")}
 
                     # process the batch data to get mask and y_target
                     y_target, safe_y, masks, indices_to_term = get_receding_min_target(next_states, dones, terminations)
                     next_state_mask = ~ dones
 
                     # Successor pairs for the temporal-consistency loss: (s_t, a_t) -> (s_{t+1}, a_{t+1}) within one episode.
-                    nr_rollout_steps = states.shape[0]
-                    next_env_actions = jnp.concatenate([env_actions[1:], env_actions[-1:]], axis=0)
-                    next_y_target = jnp.concatenate([y_target[1:], y_target[-1:]], axis=0)
-                    next_masks = jnp.concatenate([masks[1:], jnp.zeros_like(masks[-1:])], axis=0)
-                    not_last_step = (jnp.arange(nr_rollout_steps) < nr_rollout_steps - 1)[:, None]
-                    temporal_valid = not_last_step & (~dones) & masks & next_masks
+                    next_env_actions, next_y_target, temporal_valid = successor_pairs(env_actions, y_target, masks, dones)
 
                     ncbf_metrics = {}
                     ncbf_metrics["ncbf/safety_layer_enabled"] = jnp.asarray(self.ncbf_use_safety_layer, dtype=jnp.float32)
@@ -1096,7 +1028,7 @@ class PPO:
                     def ppo_loss_fn(policy_params, critic_params, encoder_params, decoder_params,
                                     ncbf_params,
                                     state_b, action_b, log_prob_b, return_b, advantage_b,
-                                    last_state_b, last_action_b, history_stack_b):
+                                    last_state_b, last_action_b, history_stack_b, first_step_b):
                         # Policy loss
                         latent_b = jax.lax.stop_gradient(self.encoder.apply(encoder_params, history_stack_b))
                         decoder_output_b = self._get_policy_decoder_output(
@@ -1141,6 +1073,7 @@ class PPO:
                                 latent_b,
                                 safety_layer_curriculum_coeff,
                                 repeat_ncbf_params_from_params(ncbf_params),
+                                first_step_b,
                             )
                             safe_action_b, _, _, _ = self._bypass_post_drop_safety_layer(
                                 action_mean_processed,
@@ -1183,7 +1116,7 @@ class PPO:
                                           state_b, next_state_b, env_action_b,
                                           last_action_b, next_state_mask_b, history_stack_b,
                                           y_target_b, indices_to_term_b, ncbf_masks_b,
-                                          next_env_action_b, next_y_target_b, temporal_valid_b,
+                                          next_env_action_b, next_y_target_b, temporal_valid_b, raw_action_b,
                                           replay_state_b, replay_next_state_b, replay_action_b,
                                           replay_y_target_b, replay_indices_to_term_b, replay_ncbf_masks_b,
                                           replay_last_action_b, replay_history_stack_b, bootstrap_key):
@@ -1202,13 +1135,12 @@ class PPO:
                         # Safety critic input (state, action, latent). The label y_t covers s_{t+1..t+H}, so the action
                         # paired with s_t must be the action executed at t; this is also how the shield queries the
                         # critic, h(s_t, u). "previous" reproduces the legacy pairing with a_{t-1}.
-                        if self.ncbf_critic_action_index == "current":
-                            current_action_b = env_action_b
-                            replay_current_action_b = replay_action_b
-                        else:
-                            current_action_b = last_action_b
-                            replay_current_action_b = replay_last_action_b
-                        current_h_input = jnp.concatenate([state_b[..., self.ncbf_observation_indices], current_action_b, latent_b], axis=-1)
+                        # The episode-ending step keeps its pre-reset (s_t, a_t) unless terminal_critic_input="zeros" (F1).
+                        critic_state_b, current_action_b = critic_training_inputs(
+                            state_b, env_action_b, last_action_b, ~next_state_mask_b,
+                            self.ncbf_critic_action_index, self.ncbf_terminal_critic_input)
+                        replay_current_action_b = replay_action_b if self.ncbf_critic_action_index == "current" else replay_last_action_b
+                        current_h_input = jnp.concatenate([critic_state_b[..., self.ncbf_observation_indices], current_action_b, latent_b], axis=-1)
                         replay_h_input = jnp.concatenate([replay_state_b[..., self.ncbf_observation_indices], replay_current_action_b, replay_latent_b], axis=-1)
 
                         h_input = jnp.concatenate((current_h_input, replay_h_input), axis=0)
@@ -1254,27 +1186,25 @@ class PPO:
                         per_member_cls = jnp.sum(sample_weight * head_loss, axis=-1) / (jnp.sum(sample_weight, axis=-1) + 1e-8)
                         cls_loss = jnp.sum(per_member_cls)
 
-                        # (2) DT-CBF temporal consistency (paper eq. 4-6) on on-policy successor pairs.
-                        # Safe-to-safe pairs (y_t = y_{t+1} = 1) must not drop faster than eta * (h - gamma_c);
-                        # unsafe pairs (y_t = 0) must decrease. Applied per head on probabilities.
+                        # (2) DT-CBF temporal consistency (paper eq. 4-6) on on-policy successor pairs (F2 fix):
+                        # residual h(s_{t+1}, a_{t+1}) - (1 - eta) h(s_t, a_t) - eta gamma_c >= 0 on safe->safe pairs
+                        # of one episode, both actions on the executed-action scale. temporal_mode
+                        # "legacy_raw_vs_executed" restores the paper code (h(s_t, a_exec) vs h(s_t, a_raw)).
                         if self.ncbf_w_temporal > 0.0:
                             n_current = state_b.shape[0]
-                            next_h_input = jnp.concatenate([next_state_b[..., self.ncbf_observation_indices], next_env_action_b, next_latent_b], axis=-1)
                             h_cur = h_prob[:, :n_current]
-                            h_next = self._ncbf_probabilities(self._ncbf_apply_members(ncbf_params, next_h_input))
-                            delta_h = h_next - h_cur
-                            gamma_c = self.ncbf_gamma_c
-                            valid = temporal_valid_b.astype(h_cur.dtype)[None, :, None]
-                            y_now = y_target_b.astype(h_cur.dtype)[None]
-                            y_next = next_y_target_b.astype(h_cur.dtype)[None]
-                            safe_pair = valid * (y_now > 0.5) * (y_next > 0.5)
-                            unsafe_pair = valid * (y_now < 0.5)
-                            loss_safe = jax.nn.relu(-delta_h - self.ncbf_eta_cbf * (h_cur - gamma_c))
-                            loss_unsafe = jax.nn.relu(delta_h - self.ncbf_eta_cbf * (gamma_c - h_cur))
-                            temporal_loss = (
-                                jnp.sum(safe_pair * loss_safe) / (jnp.sum(safe_pair) + 1e-8)
-                                + jnp.sum(unsafe_pair * loss_unsafe) / (jnp.sum(unsafe_pair) + 1e-8)
-                            )
+                            if self.ncbf_temporal_mode == "adjacent":
+                                next_h_input = jnp.concatenate([next_state_b[..., self.ncbf_observation_indices], next_env_action_b, next_latent_b], axis=-1)
+                                h_next = self._ncbf_probabilities(self._ncbf_apply_members(ncbf_params, next_h_input))
+                                temporal_loss = temporal_consistency_loss(
+                                    h_cur, h_next, y_target_b, next_y_target_b, temporal_valid_b,
+                                    self.ncbf_gamma_c, self.ncbf_eta_cbf, self.ncbf_gamma_c_scaled_by_eta,
+                                    self.ncbf_temporal_pairs)
+                            else:
+                                raw_h_input = jnp.concatenate([state_b[..., self.ncbf_observation_indices], raw_action_b, latent_b], axis=-1)
+                                h_raw = self._ncbf_probabilities(self._ncbf_apply_members(ncbf_params, raw_h_input))
+                                temporal_loss = legacy_raw_vs_executed_temporal_loss(
+                                    h_cur, h_raw, y_target_b, ncbf_masks_b, indices_to_term_b, self.ncbf_H)
                         else:
                             temporal_loss = jnp.asarray(0.0, dtype=h_logits.dtype)
 
@@ -1342,6 +1272,7 @@ class PPO:
                     batch_next_env_actions = next_env_actions.reshape((-1,) + self.as_shape)
                     batch_next_y_targets = next_y_target.reshape((-1,) + (len(self.env.ncbf_target_indices), ))
                     batch_temporal_valid = temporal_valid.reshape(-1)
+                    batch_first_steps = first_steps.reshape(-1)
 
                     def sample_neg_replay_buffer(buffer, replay_key):
                         sample_limit = jnp.maximum(buffer["size"], 1)
@@ -1352,10 +1283,16 @@ class PPO:
                             sample_limit,
                         )
                         replay_masks = buffer["masks"][replay_indices] & (buffer["size"] > 0)
+                        replay_states_raw = buffer["states"][replay_indices]
+                        replay_actions_raw = buffer["actions"][replay_indices]
+                        if self.ncbf_terminal_critic_input == "zeros":
+                            replay_states_raw, replay_actions_raw = critic_training_inputs(
+                                replay_states_raw, replay_actions_raw, replay_actions_raw,
+                                buffer["dones"][replay_indices], "current", "zeros")
                         return (
-                            buffer["states"][replay_indices],
+                            replay_states_raw,
                             buffer["next_states"][replay_indices],
-                            buffer["actions"][replay_indices],
+                            replay_actions_raw,
                             buffer["y_target"][replay_indices],
                             buffer["indices_to_term"][replay_indices],
                             replay_masks,
@@ -1418,6 +1355,7 @@ class PPO:
                             batch_last_states[minibatch_indices],
                             batch_last_actions[minibatch_indices],
                             batch_history_stack[minibatch_indices],
+                            batch_first_steps[minibatch_indices],
                         )
                         (auxiliary_loss, auxiliary_metrics), (encoder_gradients, decoder_gradients, ncbf_gradients) = auxiliary_grad_loss_fn(
                             encoder_state.params,
@@ -1435,6 +1373,7 @@ class PPO:
                             batch_next_env_actions[minibatch_indices],
                             batch_next_y_targets[minibatch_indices],
                             batch_temporal_valid[minibatch_indices],
+                            batch_actions[minibatch_indices],
                             replay_states,
                             replay_next_states,
                             replay_actions,
@@ -1537,10 +1476,22 @@ class PPO:
                     jax.debug.callback(callback, (combined_metrics, parallel_seed_id))
 
                     ncbf_replay_buffer = ncbf_neg_buffer
+
+                    if self.resume:
+                        def resume_callback(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates):
+                            self._maybe_save_resume_checkpoint(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates)
+                        env_curriculum = {
+                            k: env_state.internal_state[k]
+                            for k in ("env_curriculum_coeff", "env_curriculum_levels_in_a_row")
+                            if k in env_state.internal_state
+                        }
+                        jax.debug.callback(resume_callback, policy_state, critic_state, ncbf_state, encoder_state, decoder_state,
+                                           env_curriculum, combined_learning_iteration_step)
+
                     return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key), None
 
                 key, subkey = jax.random.split(key)
-                learning_iteration_carry, _ = jax.lax.scan(learning_iteration, (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, subkey), jnp.arange(self.nr_updates_per_multi_learning_iteration))
+                learning_iteration_carry, _ = jax.lax.scan(learning_iteration, (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, subkey), jnp.arange(first_learning_iteration_step, self.nr_updates_per_multi_learning_iteration))
                 policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
 
                 # Evaluating
@@ -1568,6 +1519,7 @@ class PPO:
                             latent_z,
                             jnp.asarray(1.0, dtype=raw_processed_action.dtype),
                             params_stack,
+                            episode_first_step(eval_env_state),
                         )
                         processed_action, eval_constraint_active, eval_delta_u, _ = self._bypass_post_drop_safety_layer(
                             raw_processed_action,
@@ -1631,10 +1583,25 @@ class PPO:
 
                 return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key), None
 
-            jax.lax.scan(multi_learning_and_eval_save_iteration, (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key), jnp.arange(self.nr_multi_learning_and_eval_save_iterations))
+            carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key)
+            # Resume: finish the partially done multi iteration first, then scan over the remaining ones.
+            start_multi, start_learning = divmod(self.resume_start_update, self.nr_updates_per_multi_learning_iteration)
+            if start_learning > 0:
+                carry, _ = multi_learning_and_eval_save_iteration(carry, jnp.asarray(start_multi), start_learning)
+                start_multi += 1
+            if start_multi < self.nr_multi_learning_and_eval_save_iterations:
+                jax.lax.scan(multi_learning_and_eval_save_iteration, carry, jnp.arange(start_multi, self.nr_multi_learning_and_eval_save_iterations))
 
 
+        if self.resume:
+            self._restore_resume_checkpoint()
+            if self.resume_start_update >= self.nr_multi_learning_and_eval_save_iterations * self.nr_updates_per_multi_learning_iteration:
+                rlx_logger.info("Resume: training already finished, nothing to do.")
+                return
         self.key, subkey = jax.random.split(self.key)
+        if self.resume_start_update > 0:
+            # Do not replay the random stream of the first attempt.
+            subkey = jax.random.fold_in(subkey, self.resume_start_update)
         seed_keys = jax.random.split(subkey, self.nr_parallel_seeds)
         train_function = jax.jit(jax.vmap(jitable_train_function))
         self.last_time = [time.time() for _ in range(self.nr_parallel_seeds)]
@@ -1687,6 +1654,114 @@ class PPO:
             wandb.save(f"{self.save_path}/{self.latest_model_file_name}", base_path=self.save_path)
 
 
+    def _resume_checkpoint_target(self):
+        return {
+            "policy": self.policy_state,
+            "critic": self.critic_state,
+            "ncbf": self.ncbf_state,
+            "encoder": self.encoder_state,
+            "decoder": self.decoder_state,
+        }
+
+
+    def _maybe_save_resume_checkpoint(self, policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates):
+        nr_completed_updates = int(np.asarray(nr_completed_updates))
+        nr_total_updates = self.nr_multi_learning_and_eval_save_iterations * self.nr_updates_per_multi_learning_iteration
+        due_by_iterations = self.save_interval_iterations > 0 and nr_completed_updates - self.resume_last_save_update >= self.save_interval_iterations
+        due_by_time = self.save_interval_minutes > 0 and (time.time() - self.resume_last_save_time) >= 60.0 * self.save_interval_minutes
+        if not (due_by_iterations or due_by_time or nr_completed_updates >= nr_total_updates):
+            return
+        self._save_resume_checkpoint(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates)
+
+
+    def _save_resume_checkpoint(self, policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates):
+        """Atomic resume checkpoint: write a new step directory, then atomically repoint resume/LATEST to it.
+        A kill during the save leaves LATEST on the previous complete checkpoint. Older step dirs are removed
+        only after the pointer has been switched."""
+        os.makedirs(self.resume_path, exist_ok=True)
+        step_dir_name = f"step_{nr_completed_updates:09d}"
+        step_dir = os.path.join(self.resume_path, step_dir_name)
+        partial_dir = step_dir + ".partial"
+        if os.path.exists(partial_dir):
+            shutil.rmtree(partial_dir)
+        os.makedirs(partial_dir)
+        checkpoint = {
+            "policy": policy_state,
+            "critic": critic_state,
+            "ncbf": ncbf_state,
+            "encoder": encoder_state,
+            "decoder": decoder_state,
+        }
+        save_args = orbax_utils.save_args_from_target(checkpoint)
+        orbax.checkpoint.PyTreeCheckpointer().save(os.path.join(partial_dir, "states"), checkpoint, save_args=save_args)
+        np.savez(os.path.join(partial_dir, "env_curriculum.npz"), **{k: np.asarray(v) for k, v in env_curriculum.items()})
+        global_step = nr_completed_updates * self.nr_steps * self.nr_envs
+        meta = {
+            "nr_completed_updates": nr_completed_updates,
+            "global_step": global_step,
+            "time": time.time(),
+            "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+            "slurm_restart_count": int(os.environ.get("SLURM_RESTART_COUNT", "0") or 0),
+        }
+        with open(os.path.join(partial_dir, "meta.json"), "w") as f:
+            json.dump(meta, f)
+        with open(os.path.join(partial_dir, "config_algorithm.json"), "w") as f:
+            json.dump(self.config.algorithm.to_dict(), f)
+        if os.path.exists(step_dir):
+            shutil.rmtree(step_dir)
+        os.rename(partial_dir, step_dir)
+        pointer_tmp = os.path.join(self.resume_path, "LATEST.tmp")
+        with open(pointer_tmp, "w") as f:
+            f.write(step_dir_name)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(pointer_tmp, os.path.join(self.resume_path, "LATEST"))
+        for name in os.listdir(self.resume_path):
+            if name.startswith("step_") and name != step_dir_name:
+                shutil.rmtree(os.path.join(self.resume_path, name), ignore_errors=True)
+        self.resume_last_save_update = nr_completed_updates
+        self.resume_last_save_time = time.time()
+        rlx_logger.info(f"Resume checkpoint saved: {step_dir} (update {nr_completed_updates}, step {global_step})")
+
+
+    def _restore_resume_checkpoint(self):
+        """Restore params + optimizer states, the update counter and the env curriculum from resume/LATEST.
+        Not restored: the env state (all envs are re-reset), the NCBF negative replay buffer (refilled by the
+        next rollout with the default neg_buffer_size=1) and the RNG stream (re-derived from the seed + step)."""
+        restart_count = int(os.environ.get("SLURM_RESTART_COUNT", "0") or 0)
+        pointer = os.path.join(self.resume_path, "LATEST")
+        if not os.path.exists(pointer):
+            rlx_logger.info(f"Resume: no checkpoint in {self.resume_path}, starting fresh (SLURM_RESTART_COUNT={restart_count})")
+            return
+        with open(pointer) as f:
+            step_dir = os.path.join(self.resume_path, f.read().strip())
+        target = self._resume_checkpoint_target()
+        restore_args = orbax_utils.restore_args_from_target(target)
+        checkpoint = orbax.checkpoint.PyTreeCheckpointer().restore(os.path.join(step_dir, "states"), item=target, restore_args=restore_args)
+        self.policy_state = checkpoint["policy"]
+        self.critic_state = checkpoint["critic"]
+        self.ncbf_state = checkpoint["ncbf"]
+        self.encoder_state = checkpoint["encoder"]
+        self.decoder_state = checkpoint["decoder"]
+        with open(os.path.join(step_dir, "meta.json")) as f:
+            meta = json.load(f)
+        curriculum_file = os.path.join(step_dir, "env_curriculum.npz")
+        if os.path.exists(curriculum_file):
+            with np.load(curriculum_file) as data:
+                self.resume_env_curriculum = {k: data[k] for k in data.files}
+        self.resume_start_update = int(meta["nr_completed_updates"])
+        self.resume_last_save_update = self.resume_start_update
+        self.resume_last_save_time = time.time()
+        rlx_logger.info(f"Resume: restored {step_dir} (update {self.resume_start_update}, step {meta['global_step']}, "
+                        f"SLURM_RESTART_COUNT={restart_count})")
+        if self.track_wandb:
+            # Config, not a logged metric: wandb drops metrics whose step is below the run's last logged step.
+            history = list(wandb.config.get("resume_history", []) or [])
+            history.append({"restored_step": int(meta["global_step"]), "slurm_restart_count": restart_count,
+                            "slurm_job_id": os.environ.get("SLURM_JOB_ID", "")})
+            wandb.config.update({"resume_history": history, "resume_nr_restores": len(history)}, allow_val_change=True)
+
+
     def load(config, env, run_path, writer, explicitly_set_algorithm_params):
         splitted_path = config.runner.load_model.split("/")
         checkpoint_dir = os.path.abspath("/".join(splitted_path[:-1]))
@@ -1735,6 +1810,7 @@ class PPO:
             "independent_ensemble": False,
             "critic_action_index": "previous",
             "gamma_c_scaled_by_eta": False,
+            "first_step_prev_value": "input",
         }
         for sub_key, legacy_value in legacy_ncbf_defaults.items():
             if sub_key not in loaded_ncbf_config and f"algorithm.ncbf.{sub_key}" not in explicitly_set_algorithm_params:
@@ -1786,6 +1862,7 @@ class PPO:
             latent_z,
             jnp.asarray(1.0, dtype=raw_processed_action.dtype),
             self._ncbf_params_stack(self.ncbf_state.params),
+            episode_first_step(env_state),
         )
         processed_action, constraint_active, delta_u, _ = self._bypass_post_drop_safety_layer(
             raw_processed_action,
