@@ -1037,6 +1037,10 @@ class PPO:
 
 
     def test(self, episodes):
+        if self.config.algorithm.get("eval_sweep", {}).get("enabled", False):
+            from rl_x.algorithms.ncbf_ppo.flax_full_jit.eval_sweep import run_eval_sweep
+            return run_eval_sweep(self)
+
         rlx_logger.info("Testing runs infinitely. The episodes parameter is ignored.")
 
         @jax.jit

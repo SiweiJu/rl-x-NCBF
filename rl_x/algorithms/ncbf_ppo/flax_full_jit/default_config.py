@@ -54,4 +54,28 @@ def get_config(algorithm_name):
     config.ncbf_buffer.pos_buffer_size = 10 # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions
     config.ncbf_buffer.neg_buffer_size = 10
     config.ncbf_buffer.neg_sampling_ratio = 0.5 # ratio of sampling from negative buffer
+
+    # Perturbation-sweep evaluation (runner.mode=test), same module and options as on pncbf-v2 (eval_sweep.py).
+    config.eval_sweep = config_dict.ConfigDict()
+    config.eval_sweep.enabled = False
+    config.eval_sweep.out_dir = ""
+    config.eval_sweep.checkpoint_label = ""
+    config.eval_sweep.method = ""
+    config.eval_sweep.train_seed = -1
+    config.eval_sweep.terrain_label = ""
+    config.eval_sweep.perturbations = "action_noise,push"
+    config.eval_sweep.sampling_probs = "0.0,0.002,0.004,0.008,0.016"
+    config.eval_sweep.action_noise_sampling_probs = ""
+    config.eval_sweep.push_sampling_probs = ""
+    config.eval_sweep.eval_seeds = "0"
+    config.eval_sweep.deployment_mode = "A"
+    config.eval_sweep.noise_std = 1.0
+    config.eval_sweep.noise_std_mode = "absolute"
+    config.eval_sweep.noise_point = "pre_shield"
+    config.eval_sweep.push_scale = 1.0
+    config.eval_sweep.push_scale_joints = False
+    config.eval_sweep.push_impl = "env"
+    config.eval_sweep.background_push_prob = -1.0
+    config.eval_sweep.success_threshold_steps = 250
+    config.eval_sweep.save_episodes = True
     return config
