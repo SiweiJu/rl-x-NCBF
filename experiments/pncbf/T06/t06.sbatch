@@ -39,8 +39,10 @@ SEED=${SEEDS[$I]}
 
 eval "$(/home/ju/miniconda3/bin/conda shell.bash hook)"
 conda activate rlx-ncbf
-# rlx-ncbf's editable rl_x points at the live /home/ju/repo/rl-x-NCBF -> force the fixed tree
+# rlx-ncbf's editable rl_x points at the live /home/ju/repo/rl-x-NCBF -> force the fixed tree. Also leave the
+# submit directory first: `python -c` puts the cwd on sys.path, so a checkout there (e.g. pncbf/core) would win.
 export PYTHONPATH=$TREE
+cd "$TREE"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 test "$(git -C "$TREE" rev-parse HEAD)" = "$COMMIT"
 test -z "$(git -C "$TREE" status --porcelain)"

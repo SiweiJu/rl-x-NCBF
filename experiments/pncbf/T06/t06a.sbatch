@@ -36,8 +36,10 @@ SEED=${SEEDS[$I]}
 
 eval "$(/home/ju/miniconda3/bin/conda shell.bash hook)"
 conda activate rlx-ncbf
-# rlx-ncbf's editable rl_x points at the live /home/ju/repo/rl-x-NCBF -> force the fixed tree
+# rlx-ncbf's editable rl_x points at the live /home/ju/repo/rl-x-NCBF -> force the fixed tree. Also leave the
+# submit directory first: `python -c` puts the cwd on sys.path, so a checkout there (e.g. pncbf/core) would win.
 export PYTHONPATH=$TREE
+cd "$TREE"
 test "$(git -C "$TREE" rev-parse HEAD)" = "$COMMIT"
 test -z "$(git -C "$TREE" status --porcelain)"
 python -c "import rl_x; assert rl_x.__file__.startswith('$TREE'), rl_x.__file__; print('rl_x:', rl_x.__file__)"
@@ -53,6 +55,16 @@ RUN_NAME="T06a_${VARIANT}_${METHOD}_seed_${SEED}${SUFFIX}"
 echo "=== $(date -Is) job ${SLURM_JOB_ID:-none} host=$(hostname) gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) run=$RUN_NAME commit=$COMMIT FIX_ARGS=${FIX_ARGS}"
 
 cd "$TREE/experiments"   # runs/ and wandb/ are gitignored
+# The paper code calls os.makedirs(run_dir/models) without exist_ok, so a rerun of the same RUN_NAME would crash.
+# A rerun therefore starts from scratch after moving the previous attempt aside (nothing is deleted); in wandb it
+# is a new run with the same name (the paper code has no fixed run id).
+RUN_DIR="runs/pncbf-2026/T06a-paper-fixed-${METHOD}/${RUN_NAME}"
+if [[ -e "$RUN_DIR" ]]; then
+  ATTEMPTS="runs/pncbf-2026/_failed_attempts"
+  mkdir -p "$ATTEMPTS"
+  mv "$RUN_DIR" "$ATTEMPTS/${RUN_NAME}_$(date +%Y%m%d_%H%M%S)"
+  echo "moved previous attempt of $RUN_NAME to $ATTEMPTS"
+fi
 # shellcheck disable=SC2086
 python experiment.py \
   --algorithm.name="ncbf_ppo.flax_full_jit" \
