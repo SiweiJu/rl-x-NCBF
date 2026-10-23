@@ -1,0 +1,119 @@
+[
+  {
+    "label": "t08_ppo_lag_gradient_d0_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/ppo_lag_gradient_go2_d0_seed0/models/latest.model",
+    "method": "ppo_lag_gradient_d0",
+    "algorithm": "ppo_lagrangian.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  },
+  {
+    "label": "t08_ppo_lag_gradient_d0.01_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/ppo_lag_gradient_go2_d0.01_seed0/models/latest.model",
+    "method": "ppo_lag_gradient_d0.01",
+    "algorithm": "ppo_lagrangian.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  },
+  {
+    "label": "t08_ppo_lag_gradient_d0.05_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/ppo_lag_gradient_go2_d0.05_seed0/models/latest.model",
+    "method": "ppo_lag_gradient_d0.05",
+    "algorithm": "ppo_lagrangian.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  },
+  {
+    "label": "t08_ppo_lag_pid_d0_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/ppo_lag_pid_go2_d0_seed0/models/latest.model",
+    "method": "ppo_lag_pid_d0",
+    "algorithm": "ppo_lagrangian.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  },
+  {
+    "label": "t08_ppo_lag_pid_d0.01_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/ppo_lag_pid_go2_d0.01_seed0/models/latest.model",
+    "method": "ppo_lag_pid_d0.01",
+    "algorithm": "ppo_lagrangian.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  },
+  {
+    "label": "t08_ppo_lag_pid_d0.05_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/ppo_lag_pid_go2_d0.05_seed0/models/latest.model",
+    "method": "ppo_lag_pid_d0.05",
+    "algorithm": "ppo_lagrangian.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  },
+  {
+    "label": "t08_cpo_d0_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/cpo_go2_d0_seed0/models/latest.model",
+    "method": "cpo_d0",
+    "algorithm": "cpo.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  },
+  {
+    "label": "t08_cpo_d0.01_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/cpo_go2_d0.01_seed0/models/latest.model",
+    "method": "cpo_d0.01",
+    "algorithm": "cpo.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  },
+  {
+    "label": "t08_cpo_d0.05_s0",
+    "path": "/home/ju/repo/pncbf/t08-cf90770/experiments/runs/pncbf-2026/P0_T08_baselines/cpo_go2_d0.05_seed0/models/latest.model",
+    "method": "cpo_d0.05",
+    "algorithm": "cpo.flax_full_jit",
+    "train_seed": 0,
+    "shield": false,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=30"
+    ],
+    "algo_args": []
+  }
+]
