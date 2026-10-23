@@ -35,6 +35,25 @@ absl_logging.set_verbosity(absl_logging.ERROR)
 rlx_logger = logging.getLogger("rl_x")
 
 
+def resume_wandb_run_id(runner_config):
+    """Fixed wandb run id for a requeue-safe run: readable run name + hash of project/exp/run_name."""
+    import hashlib
+    import re
+    full_name = f"{runner_config.project_name}/{runner_config.exp_name}/{runner_config.run_name}"
+    digest = hashlib.sha1(full_name.encode()).hexdigest()[:8]
+    readable = re.sub(r"[^A-Za-z0-9_-]", "-", str(runner_config.run_name))[:48]
+    return f"{readable}-{digest}"
+
+
+def _git_commit():
+    import subprocess
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=os.path.dirname(os.path.abspath(__file__)),
+                                       stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return ""
+
+
 class Runner:
     def __init__(self, implementation_package_names=["rl_x"]):
         algorithm_name, environment_name, self._mode = self.parse_arguments()
@@ -278,8 +297,18 @@ class Runner:
 
     def _train(self, _):
         self.init_config()
+        resume = bool(self._config.runner.get("resume", False))
+        if resume:
+            if not any(arg.startswith("--runner.run_name=") for arg in sys.argv):
+                raise ValueError("runner.resume=True needs an explicit --runner.run_name (the default is a timestamp, "
+                                 "so a requeued job would not find its run dir)")
+            if not getattr(self._model_class, "SUPPORTS_RESUME", False):
+                raise ValueError(f"runner.resume=True is not supported by {self._model_class.__name__}")
         if self._config.runner.track_wandb:
             import wandb
+            wandb_resume_kwargs = {}
+            if resume:
+                wandb_resume_kwargs = {"id": resume_wandb_run_id(self._config.runner), "resume": "allow"}
             wandb.init(
                 entity=self._config.runner.wandb_entity,
                 project=self._config.runner.project_name,
@@ -291,7 +320,12 @@ class Runner:
                 monitor_gym=True,
                 save_code=True,
                 settings=wandb.Settings(init_timeout=self._config.runner.wandb_init_timeout),
+                tags=[tag.strip() for tag in str(self._config.runner.get("wandb_tags", "")).split(",") if tag.strip()] or None,
+                **wandb_resume_kwargs,
             )
+            run_info = {"git_commit": _git_commit(), "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+                        "slurm_restart_count": int(os.environ.get("SLURM_RESTART_COUNT", "0") or 0)}
+            wandb.config.update({"run_info": run_info}, allow_val_change=True)
 
         run_path = f"runs/{self._config.runner.project_name}/{self._config.runner.exp_name}/{self._config.runner.run_name}"
         run_path = os.path.abspath(run_path)

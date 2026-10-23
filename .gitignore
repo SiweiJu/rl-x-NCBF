@@ -19,3 +19,4 @@ experiments/*.sh
 !experiments/ncbf_local_runners/train_g1_ball.sh
 !experiments/ncbf_local_runners/train_booster_locomotion.sh
 !experiments/ncbf_local_runners/train_booster_ball.sh
+experiments/pncbf/logs/

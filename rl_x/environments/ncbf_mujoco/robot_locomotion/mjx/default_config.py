@@ -10,6 +10,9 @@ def get_config(environment_name):
         "device": "gpu",
         "train_robot": "unitree_go2",
         "use_booster_defaults": True,
+        # Record the physics state before (x^-) and after (x^+) the shock / domain-randomization step in
+        # info["transition/..."] (project plan 4.4 method A). The perturbed / dr_resampled flags are always recorded.
+        "record_transition_physics_state": False,
         "ball_plate": {
             "enabled": False,
             "include_observations": True,
@@ -175,7 +178,7 @@ def get_config(environment_name):
             "zero_clip_threshold_percentage": 0.1,
             "all_zero_chance": 0.04,
             "single_zero_chance": 0.005,
-            "velocity_ratio": [1, 0.5, 0.2],
+            "velocity_ratio": (1.0, 0.5, 0.2),  # tuple so it can be overridden from the CLI: "(1.0,1.0,1.0)" = paper code
             "curriculum_initial_scale": 1.0,
             "curriculum_final_scale": 1.0,
             "curriculum_fixed_scale": -1.0,

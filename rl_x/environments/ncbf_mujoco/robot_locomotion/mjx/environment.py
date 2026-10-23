@@ -49,6 +49,7 @@ class LocomotionEnv:
         self.ball_plate_post_drop_truncation_seconds = float(self.ball_plate_config.get("post_drop_truncation_seconds"))
         self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand"))
         self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations"))
+        self.record_transition_physics_state = bool(env_config.get("record_transition_physics_state", False))
         self.obstacle_config = env_config.get("obstacles", {})
         self.use_obstacles = bool(self.obstacle_config.get("enabled", False))
         self.nr_obstacles = int(self.obstacle_config.get("nr_obstacles", 0)) if self.use_obstacles else 0
@@ -1299,6 +1300,7 @@ class LocomotionEnv:
         info["env_curriculum/coefficient"] = internal_state["env_curriculum_coeff"]
         info["constraint/cost"] = 0.0
         info["constraint/terminated"] = False
+        self._init_transition_record_info(info)
         info["constraint/safe_time"] = 0.0
         info["constraint/episode_cost"] = 0.0
         info_episode_store = {
@@ -1452,7 +1454,10 @@ class LocomotionEnv:
         state.internal_state["imu_orientation_rotation_inverse"] = state.internal_state["imu_orientation_rotation"].inv()
         state.internal_state["imu_orientation_euler"] = state.internal_state["imu_orientation_rotation"].as_euler("xyz")
 
-        data, mjx_model = self.handle_domain_randomization(state.internal_state, state.mjx_model, data, domain_randomization_key)
+        # x^-_{t+1}: physics state after the physics substeps and the qvel clip, before any shock / DR resampling.
+        pre_shock_qpos, pre_shock_qvel = data.qpos, data.qvel
+        data, mjx_model, dr_resampled, perturbed = self.handle_domain_randomization(
+            state.internal_state, state.mjx_model, data, domain_randomization_key, return_flags=True)
         state = state.replace(data=data, mjx_model=mjx_model)
 
         self.terrain_function.pre_step(data, state.internal_state)
@@ -1516,6 +1521,14 @@ class LocomotionEnv:
         new_info["constraint/terminated"] = constraint_terminated
         new_info["constraint/safe_time"] = new_info_episode_store["episode_safe_time"]
         new_info["constraint/episode_cost"] = new_info_episode_store["episode_cost"]
+        new_info["shock/perturbed"] = jnp.asarray(perturbed, dtype=jnp.float32)
+        new_info["shock/dr_resampled"] = jnp.asarray(dr_resampled, dtype=jnp.float32)
+        if self.record_transition_physics_state:
+            # x^+_{t+1} is the state after the shock / DR step (before a possible episode reset).
+            new_info["transition/x_minus_qpos"] = pre_shock_qpos
+            new_info["transition/x_minus_qvel"] = pre_shock_qvel
+            new_info["transition/x_plus_qpos"] = data.qpos
+            new_info["transition/x_plus_qvel"] = data.qvel
         if self.use_obstacles:
             new_info["env_info/obstacle_collision"] = jnp.asarray(state.internal_state["obstacle_collision"], dtype=jnp.float32)
             new_info["env_info/obstacle_min_clearance"] = jnp.asarray(state.internal_state["obstacle_min_clearance"], dtype=jnp.float32)
@@ -2040,7 +2053,18 @@ class LocomotionEnv:
         return internal_state["ball_plate_plate_dropped"] if self.use_ball_plate else False
     
 
-    def handle_domain_randomization(self, internal_state, mjx_model, data, key, is_episode_start=False):
+    def _init_transition_record_info(self, info):
+        info["shock/perturbed"] = jnp.asarray(0.0, dtype=jnp.float32)
+        info["shock/dr_resampled"] = jnp.asarray(0.0, dtype=jnp.float32)
+        if self.record_transition_physics_state:
+            nq, nv = self.initial_mj_model.nq, self.initial_mj_model.nv
+            info["transition/x_minus_qpos"] = jnp.zeros(nq)
+            info["transition/x_minus_qvel"] = jnp.zeros(nv)
+            info["transition/x_plus_qpos"] = jnp.zeros(nq)
+            info["transition/x_plus_qvel"] = jnp.zeros(nv)
+
+
+    def handle_domain_randomization(self, internal_state, mjx_model, data, key, is_episode_start=False, return_flags=False):
         domain_sampling_key, domain_perturbation_sampling_key, seen_robot_key, unseen_robot_key, mujoco_model_key, action_delay_key, joint_dropout_key, perturbation_key = jax.random.split(key, 8)
 
         should_randomize_domain_episode_start = self.domain_randomization_sampling_function.setup(domain_sampling_key)
@@ -2073,6 +2097,8 @@ class LocomotionEnv:
 
         data = self.domain_randomization_perturbation_function.sample(internal_state, mjx_model, data, should_randomize_domain_perturbation, perturbation_key)
 
+        if return_flags:
+            return data, mjx_model, should_randomize_domain, should_randomize_domain_perturbation
         return data, mjx_model
     
 
