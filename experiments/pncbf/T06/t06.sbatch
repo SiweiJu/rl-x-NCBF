@@ -56,7 +56,8 @@ if [[ -n "${SMOKE:-}" ]]; then   # 60 PPO updates of 1024x128 (fills the 50-roll
 fi
 # GPU memory trace (MiB, every 15 s) for the memory check; peak printed at the end.
 GPU_MEM_LOG=/tmp/gpu_mem_${SLURM_JOB_ID:-$$}.txt
-nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -l 15 > "$GPU_MEM_LOG" 2>/dev/null &
+# (a shell loop with >> instead of `nvidia-smi -l`, whose block-buffered file output is lost when the job is killed)
+( while true; do nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits >> "$GPU_MEM_LOG" 2>/dev/null; sleep 15; done ) &
 GPU_MEM_PID=$!
 trap 'kill $GPU_MEM_PID 2>/dev/null; echo "=== peak GPU memory used: $(sort -n "$GPU_MEM_LOG" | tail -1) MiB"' EXIT
 RUN_NAME="T06_fixed_${METHOD}_seed_${SEED}${SUFFIX}"
