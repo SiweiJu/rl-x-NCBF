@@ -41,6 +41,8 @@ rlx_logger = logging.getLogger("rl_x")
 
 
 class CPO:
+    eval_sweep_policy_only = True  # eval_sweep.make_agent: plain policy, mode A only
+
     def __init__(self, config, env, run_path, writer):
         self.config = config
         self.env = env
@@ -497,6 +499,8 @@ class CPO:
 
         loaded_algorithm_config = json.load(open(f"{checkpoint_dir}/config_algorithm.json", "r"))
         for key, value in loaded_algorithm_config.items():
+            if key == "eval_sweep":  # eval settings come from the command line only
+                continue
             if f"algorithm.{key}" not in explicitly_set_algorithm_params and key in config.algorithm:
                 config.algorithm[key] = value
         model = cls(config, env, run_path, writer)
@@ -521,6 +525,10 @@ class CPO:
         return model
 
     def test(self, episodes):
+        if self.config.algorithm.get("eval_sweep", {}).get("enabled", False):
+            from rl_x.algorithms.ncbf_ppo.flax_full_jit.eval_sweep import run_eval_sweep
+            return run_eval_sweep(self)
+
         rlx_logger.info("Testing runs infinitely. The episodes parameter is ignored.")
 
         @jax.jit

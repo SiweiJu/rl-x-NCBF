@@ -332,3 +332,44 @@ def test_end_to_end_training_has_no_nan(go2_env, name, overrides):
     bad = {key: values for key, values in logged.items() if not all(math.isfinite(v) for v in values)}
     assert not bad, f"non-finite metrics: {bad}"
     assert "constraint/lambda" in logged or "cpo/optim_case" in logged
+
+
+@pytest.mark.parametrize("name", ["ppo_lagrangian", "cpo"])
+def test_checkpoint_loads_into_the_eval_sweep(go2_env, tmp_path, name):
+    """Save after 1 update, load with Algorithm.load and run a 1-point mode-A eval sweep (policy only)."""
+    import json as _json
+    if name == "cpo":
+        from rl_x.algorithms.cpo.flax_full_jit.cpo import CPO as Algorithm
+    else:
+        from rl_x.algorithms.ppo_lagrangian.flax_full_jit.ppo_lagrangian import PPOLagrangian as Algorithm
+
+    env, env_config = go2_env
+    algorithm_config = _algorithm_config(name, total_timesteps=8 * 16)
+    runner = {"mode": "train", "save_model": True, "track_console": False, "track_tb": False, "track_wandb": False, "load_model": ""}
+    config = config_dict.ConfigDict({"algorithm": algorithm_config, "environment": env_config, "runner": runner})
+    run_path = tmp_path / "run"
+    model = Algorithm(config, env, str(run_path), None)
+    model.log = lambda *a: None
+    model.train()
+    checkpoint = run_path / "models" / "latest.model"
+    assert checkpoint.exists()
+
+    load_config = config_dict.ConfigDict({"algorithm": _algorithm_config(name), "environment": env_config,
+                                          "runner": dict(runner, mode="test", save_model=False, load_model=str(checkpoint))})
+    sweep = load_config.algorithm.eval_sweep
+    sweep.enabled = True
+    sweep.out_dir = str(tmp_path / "sweep")
+    sweep.perturbations = "action_noise"
+    sweep.action_noise_sampling_probs = "0.5"
+    sweep.save_episodes = False
+    loaded = Algorithm.load(load_config, env, str(tmp_path / "eval_run"), None, set())
+    fresh = Algorithm(config_dict.ConfigDict(dict(load_config.to_dict(), runner=dict(runner, save_model=False))), env, str(tmp_path / "fresh"), None)
+    assert not np.allclose(np.asarray(ravel_pytree(loaded.policy_state.params)[0]),
+                           np.asarray(ravel_pytree(fresh.policy_state.params)[0])), "checkpoint params were not restored"
+    summaries = loaded.test(1)
+    assert len(summaries) == 1
+    summary_files = list((tmp_path / "sweep").rglob("eval_summary.json"))
+    assert len(summary_files) == 1
+    summary = _json.loads(summary_files[0].read_text())
+    assert summary["deployment_mode"] == "A" and summary["algorithm"] == f"{name}.flax_full_jit"
+    assert 0.0 <= summary["success_rate"] <= 1.0
