@@ -359,3 +359,62 @@ def test_resume_checkpoint_restores_params_optimizer_and_counters(ppo_model):
         assert int(new.step) == int(original.step)
         for x, y in zip(jax.tree_util.tree_leaves((original.params, original.opt_state)), jax.tree_util.tree_leaves((new.params, new.opt_state))):
             np.testing.assert_allclose(np.asarray(x), np.asarray(y))
+
+
+# ---------------------------------------------------------------------------
+# Paper label window and SafeFall (ncbf.label_source / ncbf.safe_fall_H)
+# ---------------------------------------------------------------------------
+def _reference_dists(terms, dones, H):
+    """Plain-python distance to the next termination within the episode (cap H + 10), as in ncbf-q."""
+    T, N = terms.shape
+    cap = H + 10
+    dists = np.full((T, N), cap)
+    dones = dones.copy()
+    dones[-1] = True
+    for n in range(N):
+        d = cap
+        for t in reversed(range(T)):
+            if dones[t, n]:
+                d = cap
+            d = 0 if terms[t, n] else min(d + 1, cap)
+            dists[t, n] = d
+    return dists
+
+
+def test_termination_window_and_safe_fall_labels_match_the_paper_rules():
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf_targets import termination_window_labels
+
+    rng = np.random.default_rng(1)
+    T, N, H, safe_fall_H = 60, 6, 10, 3
+    terms = rng.uniform(size=(T, N)) < 0.04
+    dones = terms | (rng.uniform(size=(T, N)) < 0.01)
+    dists = _reference_dists(terms, dones, H)
+
+    target, y, mask, d = termination_window_labels(jnp.asarray(dones), jnp.asarray(terms), H)
+    np.testing.assert_array_equal(np.asarray(d), dists)
+    np.testing.assert_array_equal(np.asarray(y), ~(dists <= H))  # ncbf-q: y = no termination at t..t+H
+    assert target.shape == (T, N, 1)
+    np.testing.assert_array_equal(np.asarray(target[..., 0]), np.asarray(y).astype(np.float32))
+
+    _, y_sf, mask_sf, _ = termination_window_labels(jnp.asarray(dones), jnp.asarray(terms), H, safe_fall_H)
+    # ncbf-q-safefall (804c7a5): y = dist > H + 1; mask &= ~(safe_fall_H < dist <= H)
+    np.testing.assert_array_equal(np.asarray(y_sf), dists > H + 1)
+    not_defined = (dists <= H) & (dists > safe_fall_H)
+    np.testing.assert_array_equal(np.asarray(mask_sf), np.asarray(mask) & ~not_defined)
+    # Remaining negatives are failures within safe_fall_H steps (or exactly H + 1 away, as in that code).
+    neg = np.asarray(mask_sf) & ~np.asarray(y_sf)
+    assert np.all((dists[neg] <= safe_fall_H) | (dists[neg] == H + 1))
+
+
+def test_height_termination_curriculum_switch(env_and_config):
+    from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.termination_functions.below_height import BelowHeightTermination
+
+    _, env = env_and_config
+    internal = {"robot_imu_height_over_ground": 0.1, "robot_nominal_imu_height_over_ground": 0.3,
+                "imu_orientation_euler": jnp.zeros(3), "body_tilt_threshold": 0.4, "env_curriculum_coeff": 1.0}
+    term = BelowHeightTermination(env)
+    assert bool(term.should_terminate(internal))  # v2: fixed 0.8 * nominal threshold
+    term.height_curriculum_scaled = True
+    assert not bool(term.should_terminate(internal))  # paper: threshold * (1 - 1.0) = 0
+    internal["env_curriculum_coeff"] = 0.0
+    assert bool(term.should_terminate(internal))

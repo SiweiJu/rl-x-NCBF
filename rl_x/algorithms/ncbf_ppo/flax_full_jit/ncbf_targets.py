@@ -20,6 +20,7 @@ TERMINAL_CRITIC_INPUTS = ("pre_reset", "zeros")
 TEMPORAL_MODES = ("adjacent", "legacy_raw_vs_executed")
 TEMPORAL_PAIRS = ("safe_safe", "safe_safe_and_unsafe")
 FIRST_STEP_PREV_VALUES = ("gamma_c", "input")
+LABEL_SOURCES = ("env_targets", "termination_window")
 
 
 def window_any_done_next_H(dones, terminates, H):
@@ -93,6 +94,22 @@ def receding_min_target(future_states, dones, terminates, H, target_indices):
     windows = jnp.where(valid[..., None], windows, jnp.inf)
     target = jnp.min(windows, axis=1)
     return target, y, mask, dists_to_next_term
+
+
+def termination_window_labels(dones, terminates, H, safe_fall_H=-1):
+    """Paper (ncbf-q) labels: one head, y_t = no termination at transitions t..t+H (window_any_done_next_H).
+
+    safe_fall_H >= 0 applies the SafeFall rule of branch ncbf-q-safefall (804c7a5): y_t = dist > H + 1 (no
+    termination within H + 1 transitions), and samples with safe_fall_H < dist <= H are masked out, so only
+    failures within safe_fall_H steps are negatives. (A sample with dist == H + 1 stays a negative, as in that code.)
+    Returns target [T, N, 1] float, y [T, N] bool, mask [T, N] bool, dists [T, N] int32.
+    """
+    y, mask, dists = window_any_done_next_H(dones, terminates, H)
+    if safe_fall_H is not None and safe_fall_H >= 0:
+        y = dists > H + 1
+        not_defined = (dists <= H) & (dists > safe_fall_H)
+        mask = mask & ~not_defined
+    return y.astype(jnp.float32)[..., None], y, mask, dists
 
 
 def critic_training_inputs(states, env_actions, last_actions, dones, action_index="current", terminal_input="pre_reset"):

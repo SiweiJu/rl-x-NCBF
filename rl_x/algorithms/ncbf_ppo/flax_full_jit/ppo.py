@@ -21,6 +21,7 @@ from rl_x.algorithms.ncbf_ppo.flax_full_jit.general_properties import GeneralPro
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.policy import get_policy
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.critic import get_critic
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf_targets import (
+    LABEL_SOURCES,
     TEMPORAL_MODES,
     TEMPORAL_PAIRS,
     TERMINAL_CRITIC_INPUTS,
@@ -29,6 +30,7 @@ from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf_targets import (
     legacy_raw_vs_executed_temporal_loss,
     receding_min_target,
     successor_pairs,
+    termination_window_labels,
     temporal_consistency_loss,
 )
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf import (
@@ -315,7 +317,20 @@ class PPO:
         self.ncbf_lipschitz_state_only = bool(config.algorithm.ncbf.get("lipschitz_state_only", True))
         self.ncbf_gamma_c_scaled_by_eta = bool(config.algorithm.ncbf.get("gamma_c_scaled_by_eta", True))
         self.anticipation_through_shield = bool(config.algorithm.ncbf.get("anticipation_through_shield", False))
-        self.ncbf_target_names = list(getattr(env, "ncbf_target_names", [f"target_{i}" for i in range(len(env.ncbf_target_indices))]))
+        # Critic labels: "env_targets" = min of the env safety indicator dims over s_{t+1..t+H}, one head each;
+        # "termination_window" = paper code (ncbf-q): one head, no termination at transitions t..t+H;
+        # ncbf.safe_fall_H >= 0 switches the latter to the SafeFall rule (branch ncbf-q-safefall).
+        self.ncbf_label_source = config.algorithm.ncbf.get("label_source", "env_targets")
+        if self.ncbf_label_source not in LABEL_SOURCES:
+            raise ValueError(f"algorithm.ncbf.label_source must be one of {LABEL_SOURCES}")
+        self.ncbf_safe_fall_H = int(config.algorithm.ncbf.get("safe_fall_H", -1))
+        if self.ncbf_safe_fall_H >= 0 and self.ncbf_label_source != "termination_window":
+            raise ValueError("algorithm.ncbf.safe_fall_H needs algorithm.ncbf.label_source=termination_window")
+        if self.ncbf_label_source == "termination_window":
+            self.ncbf_target_names = ["termination"]
+        else:
+            self.ncbf_target_names = list(getattr(env, "ncbf_target_names", [f"target_{i}" for i in range(len(env.ncbf_target_indices))]))
+        self.ncbf_nr_heads = len(self.ncbf_target_names)
 
         self.ncbf_neg_buffer_size = config.algorithm.ncbf_buffer.neg_buffer_size * self.nr_steps * self.nr_envs
         self.ncbf_neg_sampling_ratio = config.algorithm.ncbf_buffer.neg_sampling_ratio
@@ -607,6 +622,8 @@ class PPO:
                                         terminates: jnp.ndarray):
                 """Labels for the transitions of one rollout; see ncbf_targets.receding_min_target.
                 Returns target [T, N, K], y [T, N], mask [T, N], dists_to_next_term [T, N]."""
+                if self.ncbf_label_source == "termination_window":
+                    return termination_window_labels(dones, terminates, self.ncbf_H, self.ncbf_safe_fall_H)
                 return receding_min_target(future_states, dones, terminates, self.ncbf_H, self.env.ncbf_target_indices)
 
             @partial(jax.jit, static_argnums=(8,))
@@ -683,7 +700,7 @@ class PPO:
                     "actions": jnp.zeros((capacity, ) + (self.as_shape[0], ), dtype=jnp.float32),
                     "dones": jnp.zeros((capacity, ), dtype=jnp.bool),
                     "terminations": jnp.zeros((capacity, ), dtype=jnp.bool),
-                    "y_target": jnp.zeros((capacity, len(self.env.ncbf_target_indices)), dtype=jnp.float32),
+                    "y_target": jnp.zeros((capacity, self.ncbf_nr_heads), dtype=jnp.float32),
                     "masks": jnp.zeros((capacity, ), dtype=jnp.bool),
                     "indices_to_term": jnp.zeros((capacity, ), dtype=jnp.int32),
                     "last_state": jnp.zeros((capacity, ) + (self.os_shape[0], ), dtype=jnp.float32),
@@ -752,10 +769,9 @@ class PPO:
                     ncbf_metrics["ncbf/mask_rate"] = jnp.mean(masks.astype(jnp.float32))
                     ncbf_metrics["ncbf/safe_y_rate"] = jnp.mean(safe_y.astype(jnp.float32))
                     ncbf_metrics["ncbf/nr_rollout_neg_samples"] = jnp.sum(~safe_y)
-                    ncbf_metrics["ncbf/target_height_safe_rate"] = jnp.mean(y_target[..., 0])
-                    ncbf_metrics["ncbf/target_tilt_safe_rate"] = jnp.mean(y_target[..., 1])
-                    ncbf_metrics["ncbf/nr_height_unsafe_targets"] = jnp.sum((masks & (y_target[..., 0] < 0.5)).astype(jnp.float32))
-                    ncbf_metrics["ncbf/nr_tilt_unsafe_targets"] = jnp.sum((masks & (y_target[..., 1] < 0.5)).astype(jnp.float32))
+                    for head_index, head_name in enumerate(self.ncbf_target_names[:2]):
+                        ncbf_metrics[f"ncbf/target_{head_name}_safe_rate"] = jnp.mean(y_target[..., head_index])
+                        ncbf_metrics[f"ncbf/nr_{head_name}_unsafe_targets"] = jnp.sum((masks & (y_target[..., head_index] < 0.5)).astype(jnp.float32))
                     ncbf_metrics["rollout/done_rate"] = jnp.mean(dones.astype(jnp.float32))
                     ncbf_metrics["rollout/termination_rate"] = jnp.mean(terminations.astype(jnp.float32))
                     ncbf_metrics["rollout/nr_terminations"] = jnp.sum(terminations.astype(jnp.float32))
@@ -1266,11 +1282,11 @@ class PPO:
                     batch_last_actions = last_actions.reshape((-1,) + self.as_shape)
                     batch_history_stack = history_stacks.reshape((-1,) + (self.nr_history_steps, ) + self.os_shape)
                     batch_next_state_masks = next_state_mask.reshape(-1)
-                    batch_y_targets = y_target.reshape((-1,) + (len(self.env.ncbf_target_indices), ))
+                    batch_y_targets = y_target.reshape((-1,) + (self.ncbf_nr_heads, ))
                     batch_ncbf_masks = masks.reshape(-1)
                     batch_indices_to_term = indices_to_term.reshape(-1)
                     batch_next_env_actions = next_env_actions.reshape((-1,) + self.as_shape)
-                    batch_next_y_targets = next_y_target.reshape((-1,) + (len(self.env.ncbf_target_indices), ))
+                    batch_next_y_targets = next_y_target.reshape((-1,) + (self.ncbf_nr_heads, ))
                     batch_temporal_valid = temporal_valid.reshape(-1)
                     batch_first_steps = first_steps.reshape(-1)
 

@@ -352,7 +352,8 @@ def get_config(environment_name):
         "termination": {
             "type": "below_height",
             "height_percentage_threshold": 0.8,
-            "body_tilt_threshold": 0.4,
+            "body_tilt_threshold": 0.4,  # also terminates (below_height); 1e6 = no tilt termination (paper code)
+            "height_curriculum_scaled": False,  # True = paper code: threshold * (1 - env curriculum coeff)
             "terminate_on_ball_plate_drop": True,
         },
         "safety": {

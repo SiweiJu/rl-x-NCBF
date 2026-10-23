@@ -73,7 +73,9 @@ def logistic_normal_safe_probability(mean_logits: Array, log_std: Array) -> Arra
 
 def get_ncbf(config, env):
     n_ncbf_ensemble = config.algorithm.ncbf.n_ensemble
-    n_ncbf_output = len(env.ncbf_target_indices)
+    # label_source "termination_window" (paper code) trains one head on the termination label.
+    label_source = config.algorithm.ncbf.get("label_source", "env_targets")
+    n_ncbf_output = 1 if label_source == "termination_window" else len(env.ncbf_target_indices)
     use_safety_layer = config.algorithm.ncbf.use_safety_layer
     gamma_c = config.algorithm.ncbf.gamma_c
     ncbf_clipping = config.algorithm.ncbf.action_clipping
