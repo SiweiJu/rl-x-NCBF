@@ -70,7 +70,7 @@ So in T06b these are set to the paper-equivalent value, which is also the fixed 
 | algorithm.ncbf.w_cbf / w_clf / w_wd | 1 / 1 / 0 | 1 / 1 / 0 | same | **not read by v2**; v2's term is `w_temporal` |
 | algorithm.ncbf.w_lip | 0 | 0 | 0 | |
 | algorithm.ncbf_buffer.pos_buffer_size | 50 | (no key) | – | **no pos buffer in v2** |
-| algorithm.ncbf_buffer.neg_buffer_size | 20 | 1 | 20 | |
+| algorithm.ncbf_buffer.neg_buffer_size | 20 | 1 | **5 (deviation)** | 20 OOMs on 24 GB: v2's buffer also stores the 10-step history stack (~5.5 KB/sample, 2.6 M samples); smoke 180597 failed allocating 16.6 GiB. Override with NEG_BUFFER=… |
 | algorithm.ncbf_buffer.neg_sampling_ratio | 0.2 (share of the 32768 critic minibatch drawn from the neg buffer, rest from pos) | 0.5 | 0.2 | v2: extra 0.2×32768 neg-replay samples on top of the on-policy minibatch; different meaning |
 | algorithm.ncbf.pretrain.* | 2 steps / 100 mb | (no key) | – | **no pretraining in v2** |
 | algorithm.ncbf.action_clipping | False | False | False | |

@@ -21,6 +21,8 @@
 #     --output=/home/ju/repo/pncbf/T06-logs/%x_%A_%a.txt --export=ALL experiments/pncbf/T06/t06.sbatch
 # Smoke: add  --array=0 --time=00:40:00  and  SMOKE=1  in the environment.
 set -euo pipefail
+# DEVIATION from the paper: neg_buffer_size 5 (paper 20). v2's neg buffer also stores the 10-step history stack
+# (~5.5 KB/sample); 20 rollouts (2.6 M samples) OOM'd a 24 GB GPU in the smoke (job 180597: alloc 16.6 GiB).
 COMMIT=${COMMIT:?set COMMIT to the full pncbf-v2 sha}
 TREE=/home/ju/repo/pncbf/v2-${COMMIT:0:7}
 METHOD=${METHOD:?set METHOD=ii_h25|ncbf_h1|ii_h10|ii_h50|ppo}
@@ -105,7 +107,7 @@ python experiment.py \
   --algorithm.ncbf.w_temporal=1.0 \
   --algorithm.ncbf.temporal_mode=adjacent \
   --algorithm.ncbf.temporal_pairs=safe_safe \
-  --algorithm.ncbf_buffer.neg_buffer_size=20 \
+  --algorithm.ncbf_buffer.neg_buffer_size=${NEG_BUFFER:-5} \
   --algorithm.ncbf_buffer.neg_sampling_ratio=0.2 \
   --environment.nr_envs=1024 \
   --environment.terrain.type=plane \
