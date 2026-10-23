@@ -1,0 +1,134 @@
+avg_return   Action Noise - Flat Terrain    PPO-RL       x=0     n=5 repro=10.715±0.021 paper=7.198±0.095 z=+37.0
+success_rate Action Noise - Flat Terrain    PPO-RL       x=0     n=5 repro=1.000±0.000 paper=0.895±0.010 z=+10.3
+avg_return   Action Noise - Flat Terrain    PPO-RL       x=0.2   n=5 repro=3.850±0.047 paper=0.163±0.006 z=+77.9
+success_rate Action Noise - Flat Terrain    PPO-RL       x=0.2   n=5 repro=0.980±0.020 paper=0.098±0.009 z=+44.1
+avg_return   Action Noise - Flat Terrain    PPO-RL       x=0.4   n=5 repro=1.348±0.050 paper=0.073±0.007 z=+25.7
+success_rate Action Noise - Flat Terrain    PPO-RL       x=0.4   n=5 repro=0.900±0.032 paper=0.045±0.012 z=+27.0
+avg_return   Action Noise - Flat Terrain    PPO-RL       x=0.6   n=5 repro=0.484±0.009 paper=0.057±0.007 z=+42.7
+success_rate Action Noise - Flat Terrain    PPO-RL       x=0.6   n=5 repro=0.860±0.025 paper=0.025±0.009 z=+34.1
+avg_return   Action Noise - Flat Terrain    PPO-RL       x=0.8   n=5 repro=0.258±0.008 paper=0.054±0.007 z=+20.4
+success_rate Action Noise - Flat Terrain    PPO-RL       x=0.8   n=5 repro=0.760±0.060 paper=0.022±0.011 z=+12.3
+avg_return   Action Noise - Flat Terrain    PPO-RL       x=1     n=5 repro=0.213±0.007 paper=0.056±0.007 z=+15.7
+success_rate Action Noise - Flat Terrain    PPO-RL       x=1     n=5 repro=0.620±0.086 paper=0.022±0.017 z=+7.0
+avg_return   Action Noise - Heightfield Ter PPO-RL       x=0     n=5 repro=6.327±0.543 paper=6.255±0.118 z=+0.1
+success_rate Action Noise - Heightfield Ter PPO-RL       x=0     n=5 repro=0.900±0.032 paper=0.738±0.008 z=+5.1
+avg_return   Action Noise - Heightfield Ter PPO-RL       x=0.2   n=5 repro=2.003±0.092 paper=0.127±0.013 z=+20.3
+success_rate Action Noise - Heightfield Ter PPO-RL       x=0.2   n=5 repro=0.860±0.068 paper=0.033±0.009 z=+12.2
+avg_return   Action Noise - Heightfield Ter PPO-RL       x=0.4   n=5 repro=0.629±0.056 paper=0.063±0.002 z=+10.2
+success_rate Action Noise - Heightfield Ter PPO-RL       x=0.4   n=5 repro=0.640±0.060 paper=0.010±0.005 z=+10.5
+avg_return   Action Noise - Heightfield Ter PPO-RL       x=0.6   n=5 repro=0.278±0.008 paper=0.058±0.004 z=+21.9
+success_rate Action Noise - Heightfield Ter PPO-RL       x=0.6   n=5 repro=0.560±0.051 paper=0.005±0.003 z=+10.9
+avg_return   Action Noise - Heightfield Ter PPO-RL       x=0.8   n=5 repro=0.189±0.006 paper=0.055±0.002 z=+13.4
+success_rate Action Noise - Heightfield Ter PPO-RL       x=0.8   n=5 repro=0.380±0.073 paper=0.007±0.005 z=+5.1
+avg_return   Action Noise - Heightfield Ter PPO-RL       x=1     n=5 repro=0.172±0.011 paper=0.053±0.006 z=+11.0
+success_rate Action Noise - Heightfield Ter PPO-RL       x=1     n=5 repro=0.280±0.037 paper=0.007±0.007 z=+7.3
+avg_return   Perturbation - Flat Terrain    PPO-RL       x=0.002 n=5 repro=9.977±0.059 paper=6.649±0.176 z=+18.9
+success_rate Perturbation - Flat Terrain    PPO-RL       x=0.002 n=5 repro=1.000±0.000 paper=0.843±0.024 z=+6.6
+avg_return   Perturbation - Flat Terrain    PPO-RL       x=0.005 n=5 repro=10.689±0.268 paper=4.893±0.270 z=+21.5
+success_rate Perturbation - Flat Terrain    PPO-RL       x=0.005 n=5 repro=0.960±0.025 paper=0.763±0.021 z=+8.1
+avg_return   Perturbation - Flat Terrain    PPO-RL       x=0.01  n=5 repro=7.287±0.263 paper=2.758±0.305 z=+14.8
+success_rate Perturbation - Flat Terrain    PPO-RL       x=0.01  n=5 repro=0.820±0.073 paper=0.597±0.044 z=+3.0
+avg_return   Perturbation - Flat Terrain    PPO-RL       x=0.015 n=5 repro=5.161±0.471 paper=1.207±0.204 z=+8.4
+success_rate Perturbation - Flat Terrain    PPO-RL       x=0.015 n=5 repro=0.740±0.025 paper=0.460±0.026 z=+10.9
+avg_return   Perturbation - Flat Terrain    PPO-RL       x=0.02  n=5 repro=4.624±0.254 paper=0.106±0.059 z=+17.8
+success_rate Perturbation - Flat Terrain    PPO-RL       x=0.02  n=5 repro=0.820±0.037 paper=0.369±0.023 z=+12.1
+avg_return   Perturbation - Heightfield Ter PPO-RL       x=0.002 n=5 repro=5.827±0.316 paper=5.346±0.236 z=+1.5
+success_rate Perturbation - Heightfield Ter PPO-RL       x=0.002 n=5 repro=0.860±0.040 paper=0.609±0.017 z=+6.3
+avg_return   Perturbation - Heightfield Ter PPO-RL       x=0.005 n=5 repro=7.157±0.291 paper=4.422±0.242 z=+9.4
+success_rate Perturbation - Heightfield Ter PPO-RL       x=0.005 n=5 repro=0.820±0.037 paper=0.543±0.041 z=+6.8
+avg_return   Perturbation - Heightfield Ter PPO-RL       x=0.01  n=5 repro=5.979±0.726 paper=2.430±0.314 z=+4.9
+success_rate Perturbation - Heightfield Ter PPO-RL       x=0.01  n=5 repro=0.700±0.071 paper=0.446±0.037 z=+3.6
+avg_return   Perturbation - Heightfield Ter PPO-RL       x=0.015 n=5 repro=4.586±0.258 paper=0.641±0.350 z=+11.3
+success_rate Perturbation - Heightfield Ter PPO-RL       x=0.015 n=5 repro=0.700±0.084 paper=0.329±0.031 z=+4.4
+avg_return   Perturbation - Heightfield Ter PPO-RL       x=0.02  n=5 repro=3.978±0.364 paper=0.206±0.159 z=+10.4
+success_rate Perturbation - Heightfield Ter PPO-RL       x=0.02  n=5 repro=0.560±0.068 paper=0.289±0.024 z=+4.0
+avg_return   Action Noise - Flat Terrain    PPO-RL-NCBF  x=0     n=5 repro=10.683±0.036 paper=6.888±0.117 z=+32.4
+success_rate Action Noise - Flat Terrain    PPO-RL-NCBF  x=0     n=5 repro=1.000±0.000 paper=0.960±0.025 z=+1.6
+avg_return   Action Noise - Flat Terrain    PPO-RL-NCBF  x=0.2   n=5 repro=3.782±0.045 paper=2.189±0.113 z=+14.1
+success_rate Action Noise - Flat Terrain    PPO-RL-NCBF  x=0.2   n=5 repro=0.960±0.025 paper=0.900±0.063 z=+0.9
+avg_return   Action Noise - Flat Terrain    PPO-RL-NCBF  x=0.4   n=5 repro=1.351±0.032 paper=0.753±0.032 z=+18.5
+success_rate Action Noise - Flat Terrain    PPO-RL-NCBF  x=0.4   n=5 repro=0.960±0.025 paper=0.960±0.040 z=+0.0
+avg_return   Action Noise - Flat Terrain    PPO-RL-NCBF  x=0.6   n=5 repro=0.465±0.035 paper=0.341±0.011 z=+3.5
+success_rate Action Noise - Flat Terrain    PPO-RL-NCBF  x=0.6   n=5 repro=0.880±0.020 paper=0.875±0.067 z=+0.1
+avg_return   Action Noise - Flat Terrain    PPO-RL-NCBF  x=0.8   n=5 repro=0.230±0.016 paper=0.238±0.007 z=-0.6
+success_rate Action Noise - Flat Terrain    PPO-RL-NCBF  x=0.8   n=5 repro=0.660±0.051 paper=0.775±0.043 z=-2.3
+avg_return   Action Noise - Flat Terrain    PPO-RL-NCBF  x=1     n=5 repro=0.211±0.007 paper=0.221±0.014 z=-0.7
+success_rate Action Noise - Flat Terrain    PPO-RL-NCBF  x=1     n=5 repro=0.640±0.051 paper=0.725±0.092 z=-0.9
+avg_return   Action Noise - Heightfield Ter PPO-RL-NCBF  x=0     n=5 repro=6.700±0.361 paper=7.157±0.274 z=-1.3
+success_rate Action Noise - Heightfield Ter PPO-RL-NCBF  x=0     n=5 repro=0.900±0.045 paper=0.900±0.000 z=+0.0
+avg_return   Action Noise - Heightfield Ter PPO-RL-NCBF  x=0.2   n=5 repro=1.909±0.100 paper=1.786±0.220 z=+0.6
+success_rate Action Noise - Heightfield Ter PPO-RL-NCBF  x=0.2   n=5 repro=0.860±0.075 paper=0.650±0.106 z=+2.0
+avg_return   Action Noise - Heightfield Ter PPO-RL-NCBF  x=0.4   n=5 repro=0.552±0.048 paper=0.632±0.003 z=-1.7
+success_rate Action Noise - Heightfield Ter PPO-RL-NCBF  x=0.4   n=5 repro=0.640±0.068 paper=0.625±0.043 z=+0.2
+avg_return   Action Noise - Heightfield Ter PPO-RL-NCBF  x=0.6   n=5 repro=0.288±0.008 paper=0.372±0.041 z=-2.0
+success_rate Action Noise - Heightfield Ter PPO-RL-NCBF  x=0.6   n=5 repro=0.580±0.086 paper=0.550±0.106 z=+0.3
+avg_return   Action Noise - Heightfield Ter PPO-RL-NCBF  x=0.8   n=5 repro=0.195±0.008 paper=0.244±0.029 z=-1.7
+success_rate Action Noise - Heightfield Ter PPO-RL-NCBF  x=0.8   n=5 repro=0.340±0.051 paper=0.425±0.123 z=-0.7
+avg_return   Action Noise - Heightfield Ter PPO-RL-NCBF  x=1     n=5 repro=0.148±0.010 paper=0.217±0.015 z=-4.5
+success_rate Action Noise - Heightfield Ter PPO-RL-NCBF  x=1     n=5 repro=0.200±0.071 paper=0.325±0.056 z=-1.8
+avg_return   Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.002 n=5 repro=9.806±0.031 paper=6.305±0.248 z=+14.1
+success_rate Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.002 n=5 repro=0.980±0.020 paper=0.900±0.063 z=+1.3
+avg_return   Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.005 n=5 repro=9.775±0.733 paper=5.104±0.402 z=+6.4
+success_rate Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.005 n=5 repro=0.860±0.075 paper=0.875±0.056 z=-0.2
+avg_return   Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.01  n=5 repro=6.987±0.343 paper=3.497±0.274 z=+10.2
+success_rate Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.01  n=5 repro=0.820±0.049 paper=0.725±0.043 z=+1.9
+avg_return   Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.015 n=5 repro=4.736±0.223 paper=1.588±0.397 z=+7.9
+success_rate Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.015 n=5 repro=0.740±0.068 paper=0.500±0.063 z=+3.5
+avg_return   Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.02  n=5 repro=4.564±0.209 paper=1.250±0.536 z=+6.2
+success_rate Perturbation - Flat Terrain    PPO-RL-NCBF  x=0.02  n=5 repro=0.680±0.020 paper=0.675±0.043 z=+0.1
+avg_return   Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.002 n=5 repro=6.221±0.216 paper=6.516±0.497 z=-0.6
+success_rate Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.002 n=5 repro=0.860±0.025 paper=0.775±0.056 z=+1.5
+avg_return   Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.005 n=5 repro=6.779±0.490 paper=4.612±1.044 z=+2.1
+success_rate Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.005 n=5 repro=0.820±0.037 paper=0.625±0.123 z=+1.6
+avg_return   Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.01  n=5 repro=5.199±0.500 paper=3.104±0.592 z=+3.5
+success_rate Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.01  n=5 repro=0.660±0.051 paper=0.600±0.110 z=+0.6
+avg_return   Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.015 n=5 repro=4.285±0.308 paper=1.280±0.242 z=+9.8
+success_rate Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.015 n=5 repro=0.480±0.066 paper=0.475±0.043 z=+0.1
+avg_return   Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.02  n=5 repro=4.179±0.321 paper=0.947±0.247 z=+10.1
+success_rate Perturbation - Heightfield Ter PPO-RL-NCBF  x=0.02  n=5 repro=0.520±0.066 paper=0.625±0.056 z=-1.6
+avg_return   Action Noise - Flat Terrain    ours         x=0     n=5 repro=10.053±0.089 paper=7.849±0.053 z=+24.8
+success_rate Action Noise - Flat Terrain    ours         x=0     n=5 repro=0.980±0.020 paper=1.000±0.000 z=-1.0
+avg_return   Action Noise - Flat Terrain    ours         x=0.2   n=5 repro=3.720±0.420 paper=2.116±0.049 z=+3.8
+success_rate Action Noise - Flat Terrain    ours         x=0.2   n=5 repro=0.920±0.020 paper=0.940±0.040 z=-0.5
+avg_return   Action Noise - Flat Terrain    ours         x=0.4   n=5 repro=1.210±0.082 paper=0.652±0.022 z=+6.8
+success_rate Action Noise - Flat Terrain    ours         x=0.4   n=5 repro=0.820±0.058 paper=0.920±0.049 z=-1.7
+avg_return   Action Noise - Flat Terrain    ours         x=0.6   n=5 repro=0.495±0.067 paper=0.337±0.011 z=+2.3
+success_rate Action Noise - Flat Terrain    ours         x=0.6   n=5 repro=0.700±0.055 paper=0.840±0.075 z=-1.9
+avg_return   Action Noise - Flat Terrain    ours         x=0.8   n=5 repro=0.229±0.016 paper=0.234±0.013 z=-0.3
+success_rate Action Noise - Flat Terrain    ours         x=0.8   n=5 repro=0.620±0.116 paper=0.780±0.080 z=-1.4
+avg_return   Action Noise - Flat Terrain    ours         x=1     n=5 repro=0.182±0.017 paper=0.204±0.010 z=-1.3
+success_rate Action Noise - Flat Terrain    ours         x=1     n=5 repro=0.460±0.117 paper=0.600±0.114 z=-1.2
+avg_return   Action Noise - Heightfield Ter ours         x=0     n=5 repro=5.785±0.371 paper=7.495±0.408 z=-4.2
+success_rate Action Noise - Heightfield Ter ours         x=0     n=5 repro=0.880±0.058 paper=0.900±0.000 z=-0.3
+avg_return   Action Noise - Heightfield Ter ours         x=0.2   n=5 repro=1.449±0.084 paper=1.673±0.152 z=-1.5
+success_rate Action Noise - Heightfield Ter ours         x=0.2   n=5 repro=0.600±0.045 paper=0.660±0.060 z=-1.0
+avg_return   Action Noise - Heightfield Ter ours         x=0.4   n=5 repro=0.493±0.083 paper=0.513±0.042 z=-0.2
+success_rate Action Noise - Heightfield Ter ours         x=0.4   n=5 repro=0.420±0.092 paper=0.580±0.058 z=-1.8
+avg_return   Action Noise - Heightfield Ter ours         x=0.6   n=5 repro=0.260±0.044 paper=0.318±0.013 z=-1.3
+success_rate Action Noise - Heightfield Ter ours         x=0.6   n=5 repro=0.360±0.051 paper=0.460±0.093 z=-1.1
+avg_return   Action Noise - Heightfield Ter ours         x=0.8   n=5 repro=0.147±0.013 paper=0.206±0.011 z=-4.4
+success_rate Action Noise - Heightfield Ter ours         x=0.8   n=5 repro=0.260±0.068 paper=0.280±0.092 z=-0.2
+avg_return   Action Noise - Heightfield Ter ours         x=1     n=5 repro=0.109±0.015 paper=0.180±0.013 z=-4.8
+success_rate Action Noise - Heightfield Ter ours         x=1     n=5 repro=0.100±0.045 paper=0.160±0.081 z=-0.7
+avg_return   Perturbation - Flat Terrain    ours         x=0.002 n=5 repro=9.180±0.066 paper=7.853±0.049 z=+20.1
+success_rate Perturbation - Flat Terrain    ours         x=0.002 n=5 repro=0.900±0.055 paper=1.000±0.000 z=-1.8
+avg_return   Perturbation - Flat Terrain    ours         x=0.005 n=5 repro=8.345±0.854 paper=6.562±0.083 z=+2.1
+success_rate Perturbation - Flat Terrain    ours         x=0.005 n=5 repro=0.760±0.068 paper=0.960±0.025 z=-3.0
+avg_return   Perturbation - Flat Terrain    ours         x=0.01  n=5 repro=6.784±0.959 paper=3.484±0.260 z=+3.4
+success_rate Perturbation - Flat Terrain    ours         x=0.01  n=5 repro=0.640±0.081 paper=0.820±0.020 z=-2.2
+avg_return   Perturbation - Flat Terrain    ours         x=0.015 n=5 repro=4.208±0.479 paper=2.661±0.575 z=+2.7
+success_rate Perturbation - Flat Terrain    ours         x=0.015 n=5 repro=0.460±0.060 paper=0.800±0.105 z=-3.2
+avg_return   Perturbation - Flat Terrain    ours         x=0.02  n=5 repro=3.946±0.423 paper=1.995±0.348 z=+4.6
+success_rate Perturbation - Flat Terrain    ours         x=0.02  n=5 repro=0.420±0.107 paper=0.700±0.055 z=-2.6
+avg_return   Perturbation - Heightfield Ter ours         x=0.002 n=5 repro=5.399±0.194 paper=7.465±0.437 z=-4.7
+success_rate Perturbation - Heightfield Ter ours         x=0.002 n=5 repro=0.740±0.051 paper=0.840±0.025 z=-2.0
+avg_return   Perturbation - Heightfield Ter ours         x=0.005 n=5 repro=5.230±0.401 paper=6.684±0.276 z=-3.6
+success_rate Perturbation - Heightfield Ter ours         x=0.005 n=5 repro=0.620±0.049 paper=0.820±0.037 z=-4.1
+avg_return   Perturbation - Heightfield Ter ours         x=0.01  n=5 repro=4.670±0.203 paper=4.997±0.367 z=-0.9
+success_rate Perturbation - Heightfield Ter ours         x=0.01  n=5 repro=0.420±0.037 paper=0.740±0.025 z=-8.6
+avg_return   Perturbation - Heightfield Ter ours         x=0.015 n=5 repro=5.456±0.693 paper=2.680±0.828 z=+3.4
+success_rate Perturbation - Heightfield Ter ours         x=0.015 n=5 repro=0.560±0.075 paper=0.620±0.080 z=-0.8
+avg_return   Perturbation - Heightfield Ter ours         x=0.02  n=5 repro=4.116±0.447 paper=1.683±0.668 z=+3.6
+success_rate Perturbation - Heightfield Ter ours         x=0.02  n=5 repro=0.380±0.097 paper=0.580±0.049 z=-2.1
+success_rate: 66 points, |z|<=1: 29%, |z|<=2: 53%, median z +0.17
+avg_return: 66 points, |z|<=1: 12%, |z|<=2: 23%, median z +4.75

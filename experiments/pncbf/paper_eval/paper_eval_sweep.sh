@@ -68,6 +68,9 @@ PY
 )
 SAFETY=${SAFETY:-$CKPT_SL}
 GAMMAS=${GAMMAS:-$CKPT_GC}
+# branch ncbf (version (i), 78d9f1c) has no ncbf_use_policy_observations flag: run with NCBF_POLICY_OBS=""
+NCBF_POLICY_OBS=${NCBF_POLICY_OBS-True}
+NCBF_POLICY_OBS_ARG=(); [[ -n $NCBF_POLICY_OBS ]] && NCBF_POLICY_OBS_ARG=(--environment.ncbf_use_policy_observations=$NCBF_POLICY_OBS)
 tok() { python -c "import sys; v=float(sys.argv[1]); print(str(abs(v)).replace('.','p') if v>=0 else 'm'+str(abs(v)).replace('.','p'))" "$1"; }
 
 mkdir -p "$OUT/experiments"; cd "$OUT/experiments"
@@ -113,7 +116,7 @@ for SETTING in $SETTINGS; do
       --environment.nr_envs=1
       --environment.terrain.type="$TERRAIN"
       --environment.episode_length_in_seconds="$EP_SECONDS"
-      --environment.ncbf_use_policy_observations=True
+      ${NCBF_POLICY_OBS_ARG[@]+"${NCBF_POLICY_OBS_ARG[@]}"}
       --environment.env_curriculum_level_success_episode_return=8
       --environment.command.max_velocity_per_m_factor="$CMD_FACTOR"
       --environment.command.clip_max_velocity="$CMD_CLIP")
