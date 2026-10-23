@@ -28,6 +28,42 @@ from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf import get_ncbf
 rlx_logger = logging.getLogger("rl_x")
 
 
+def critic_inputs_and_pairs(states, exec_actions, post_step_states, post_step_actions, y, masks, dones, critic_input="pre_step"):
+    """T06a F1/F2 helper on rollout arrays [T, E, ...].
+
+    Critic input: "pre_step" = (s_t, a_t) with a_t the executed (shielded) action; "post_step" = the env state's
+    (last_state, last_action) read after env.step (paper code; (0, a_0) / (0, 0) on the first / last step).
+    Adjacent pairs: a_{t+1}, y_{t+1} and whether (t, t+1) is a valid pair inside one episode (t is not the last
+    rollout step, the episode does not end at t, both labels unmasked). The successor state is next_states[t].
+    """
+    if critic_input == "pre_step":
+        crit_s, crit_a = states, exec_actions
+    else:
+        crit_s, crit_a = post_step_states, post_step_actions
+    T = states.shape[0]
+    next_action = jnp.concatenate([exec_actions[1:], exec_actions[-1:]], axis=0)
+    next_y = jnp.concatenate([y[1:], y[-1:]], axis=0)
+    next_masks = jnp.concatenate([masks[1:], jnp.zeros_like(masks[-1:])], axis=0)
+    pair_valid = (jnp.arange(T) < T - 1)[:, None] & (~dones) & masks & next_masks
+    return crit_s, crit_a, next_action, next_y, pair_valid
+
+
+def adjacent_temporal_loss(h_cur_raw, h_next_raw, y, next_y, masks, pair_valid, gamma_c, eta, space="prob"):
+    """T06a F2: paper eq. (4) on adjacent safe->safe pairs: mean of ReLU(-(h_{t+1} - (1 - eta) h_t - eta gamma_c)).
+    h_*_raw are network outputs (logits); gamma_c is the logit threshold of the paper config. space="prob" applies
+    sigmoid to h and gamma_c (the scale of the paper code's CBF term), "logit" uses them as they are (the space of the
+    paper's shield)."""
+    if space == "prob":
+        h_cur, h_next = jax.nn.sigmoid(h_cur_raw), jax.nn.sigmoid(h_next_raw)
+        gamma = jax.nn.sigmoid(jnp.asarray(gamma_c, dtype=h_cur.dtype))
+    else:
+        h_cur, h_next = h_cur_raw, h_next_raw
+        gamma = jnp.asarray(gamma_c, dtype=h_cur.dtype)
+    residual = h_next - (1.0 - eta) * h_cur - eta * gamma
+    pair_mask = (pair_valid & masks & (y > 0) & (next_y > 0)).astype(h_cur.dtype)
+    return jnp.sum(pair_mask * jax.nn.relu(-residual)) / (jnp.sum(pair_mask) + 1e-8)
+
+
 class PPO:
     def __init__(self, config, env, run_path, writer):
         self.config = config
@@ -75,6 +111,25 @@ class PPO:
         self.ncbf_minibatch_size = config.algorithm.minibatch_size
         self.ncbf_nr_minibatches = config.algorithm.ncbf.nr_minibatches
         self.ncbf_coef_decay_lambda = config.algorithm.ncbf.coef_decay_lambda
+        # T06a fixes (branch ncbf-q-fixed). Defaults = fixed; the second value restores the paper code.
+        # F1: critic input of each transition. "pre_step" = (s_t, a_t) recorded before env.step; "post_step" = the
+        #     env state's (last_state, last_action) after env.step, which is (0, a_0) on the first and (0, 0) on the
+        #     episode-ending step of every episode.
+        self.ncbf_critic_input = config.algorithm.ncbf.get("critic_input", "pre_step")
+        # F2: "adjacent" = paper eq. (4) on adjacent safe->safe pairs, ReLU(-(h(s_{t+1},a_{t+1}) - (1-eta) h(s_t,a_t)
+        #     - eta gamma_c)); "legacy_raw_vs_executed" = paper code (h(s_t, a_exec) vs h(s_t, a_raw), no eta).
+        self.ncbf_temporal_mode = config.algorithm.ncbf.get("temporal_mode", "adjacent")
+        # Space of the adjacent term: "prob" (sigmoid outputs, as the paper code's term; gamma_c -> sigmoid(gamma_c))
+        # or "logit" (raw outputs and the logit gamma_c, the space of the paper's shield).
+        self.ncbf_temporal_space = config.algorithm.ncbf.get("temporal_space", "prob")
+        # Paper bug: sample_and_merge permuted every field but `actions` (only used by the legacy term).
+        self.ncbf_fix_replay_action_permutation = bool(config.algorithm.ncbf.get("fix_replay_action_permutation", True))
+        if self.ncbf_critic_input not in ("pre_step", "post_step"):
+            raise ValueError("algorithm.ncbf.critic_input must be 'pre_step' or 'post_step'")
+        if self.ncbf_temporal_mode not in ("adjacent", "legacy_raw_vs_executed"):
+            raise ValueError("algorithm.ncbf.temporal_mode must be 'adjacent' or 'legacy_raw_vs_executed'")
+        if self.ncbf_temporal_space not in ("prob", "logit"):
+            raise ValueError("algorithm.ncbf.temporal_space must be 'prob' or 'logit'")
 
         self.ncbf_pos_buffer_size = config.algorithm.ncbf_buffer.pos_buffer_size * self.nr_steps * self.nr_envs
         self.ncbf_neg_buffer_size = config.algorithm.ncbf_buffer.neg_buffer_size * self.nr_steps * self.nr_envs
@@ -188,14 +243,16 @@ class PPO:
 
                 params_stack = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[s.params for s in ncbf_state])
 
+                first_step = env_state.info_episode_store["episode_step"] == 0
                 processed_action, constraint_active, delta_u = self.batched_ncbf_safety_layer(raw_processed_action, observation, env_state.last_action, env_state.last_state,
-                                                                                      params_stack)
+                                                                                      params_stack, first_step)
                 value = self.critic.apply(critic_state.params, observation).squeeze(-1)
 
                 env_state = self.env.step(env_state, processed_action)
                 done = env_state.terminated | env_state.truncated
                 transition = (observation, env_state.actual_next_observation, action, env_state.reward, value,
-                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, env_state.last_state, env_state.last_action)
+                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, env_state.last_state, env_state.last_action,
+                              processed_action, first_step)
 
                 if self.render:
                     def render(env_state):
@@ -282,7 +339,8 @@ class PPO:
                 """
 
                 @jax.jit
-                def loss_fn(params, minib_obs, minib_nxt, minib_acts, minib_y, minib_mask, minib_indices_to_term, last_states, last_actions):
+                def loss_fn(params, minib_obs, minib_nxt, minib_acts, minib_y, minib_mask, minib_indices_to_term, last_states, last_actions,
+                            minib_next_acts, minib_next_y, minib_pair_valid):
                     # vmap_apply = jax.vmap(ncbf_state.apply_fn, in_axes=(None, 0))
                     h_input = jnp.concatenate([last_states[..., self.ncbf_observation_indices], last_actions], axis=-1)
                     h_input_next = jnp.concatenate([minib_obs[..., self.ncbf_observation_indices], minib_acts], axis=-1)
@@ -311,18 +369,27 @@ class PPO:
 
                     clf_loss = num / den
 
-                    # (2) DT-CBF penalty: if not safe, h(x_next) should further decrease
-                    cbf_decrease = h_xn - h_x
-                    neg_mask = (1.0 - minib_y) * minib_mask  # only apply to unsafe samples
+                    if self.ncbf_temporal_mode == "legacy_raw_vs_executed":
+                        # (2) DT-CBF penalty: if not safe, h(x_next) should further decrease
+                        cbf_decrease = h_xn - h_x
+                        neg_mask = (1.0 - minib_y) * minib_mask  # only apply to unsafe samples
 
-                    violation = jnp.maximum(0.0, cbf_decrease)  # ReLU(h_xn - h_x)
-                    neg_cbf_loss = jnp.sum(neg_mask * violation) / (jnp.sum(neg_mask) + 1e-8)
+                        violation = jnp.maximum(0.0, cbf_decrease)  # ReLU(h_xn - h_x)
+                        neg_cbf_loss = jnp.sum(neg_mask * violation) / (jnp.sum(neg_mask) + 1e-8)
 
-                    # if both x and x_n is safe, apply cbf to encourage h(x_n) >= h(x)
-                    pos_mask = minib_y * minib_mask * (minib_indices_to_term > self.ncbf_H)  # only apply to safe samples that will not terminate in next H steps
-                    pos_cbf_increase = jnp.maximum(0.0, -cbf_decrease)  # ReLU(h_x - h_xn)
-                    pos_cbf_loss = jnp.sum(pos_mask * pos_cbf_increase) / (jnp.sum(pos_mask) + 1e-8)
-                    cbf_loss = neg_cbf_loss + pos_cbf_loss
+                        # if both x and x_n is safe, apply cbf to encourage h(x_n) >= h(x)
+                        pos_mask = minib_y * minib_mask * (minib_indices_to_term > self.ncbf_H)  # only apply to safe samples that will not terminate in next H steps
+                        pos_cbf_increase = jnp.maximum(0.0, -cbf_decrease)  # ReLU(h_x - h_xn)
+                        pos_cbf_loss = jnp.sum(pos_mask * pos_cbf_increase) / (jnp.sum(pos_mask) + 1e-8)
+                        cbf_loss = neg_cbf_loss + pos_cbf_loss
+                    else:
+                        # (2) F2 fix: paper eq. (4) on adjacent pairs of one episode, both safe (y_t = y_{t+1} = 1):
+                        # h(s_{t+1}, a_{t+1}) - (1 - eta) h(s_t, a_t) - eta gamma_c >= 0, both actions executed.
+                        h_input_succ = jnp.concatenate([minib_nxt[..., self.ncbf_observation_indices], minib_next_acts], axis=-1)
+                        cbf_loss = adjacent_temporal_loss(
+                            ncbf_state.apply_fn(params, h_input), ncbf_state.apply_fn(params, h_input_succ),
+                            minib_y, minib_next_y, minib_mask, minib_pair_valid,
+                            self.ncbf_gamma_c, self.ncbf_eta_cbf, self.ncbf_temporal_space)
 
 
                     # (3) Lipschitz regularizer: fixed-size pair sampling from valid positions
@@ -431,6 +498,9 @@ class PPO:
                             indices_to_term_pos = pos_buffer["indices_to_term"][pos_indices]
                             last_state_pos = pos_buffer["last_state"][pos_indices]
                             last_action_pos = pos_buffer["last_action"][pos_indices]
+                            next_action_pos = pos_buffer["next_action"][pos_indices]
+                            next_y_pos = pos_buffer["next_y"][pos_indices]
+                            pair_valid_pos = pos_buffer["pair_valid"][pos_indices]
 
                             states_neg = neg_buffer["states"][neg_indices]
                             next_states_neg = neg_buffer["next_states"][neg_indices]
@@ -440,6 +510,9 @@ class PPO:
                             indices_to_term_neg = neg_buffer["indices_to_term"][neg_indices]
                             last_state_neg = neg_buffer["last_state"][neg_indices]
                             last_action_neg = neg_buffer["last_action"][neg_indices]
+                            next_action_neg = neg_buffer["next_action"][neg_indices]
+                            next_y_neg = neg_buffer["next_y"][neg_indices]
+                            pair_valid_neg = neg_buffer["pair_valid"][neg_indices]
 
                             states = jnp.concatenate([states_pos, states_neg], axis=0)
                             next_states = jnp.concatenate([next_states_pos, next_states_neg], axis=0)
@@ -449,6 +522,9 @@ class PPO:
                             indices_to_term = jnp.concatenate([indices_to_term_pos, indices_to_term_neg], axis=0)
                             last_states = jnp.concatenate([last_state_pos, last_state_neg], axis=0)
                             last_actions = jnp.concatenate([last_action_pos, last_action_neg], axis=0)
+                            next_actions = jnp.concatenate([next_action_pos, next_action_neg], axis=0)
+                            next_y = jnp.concatenate([next_y_pos, next_y_neg], axis=0)
+                            pair_valid = jnp.concatenate([pair_valid_pos, pair_valid_neg], axis=0)
 
                             # shuffle
                             perm_key, _ = jax.random.split(key)
@@ -460,9 +536,14 @@ class PPO:
                             indices_to_term = indices_to_term[perm]
                             last_states = last_states[perm]
                             last_actions = last_actions[perm]
-                            return states, next_states, actions, y_target, masks, indices_to_term, last_states, last_actions
+                            next_actions = next_actions[perm]
+                            next_y = next_y[perm]
+                            pair_valid = pair_valid[perm]
+                            if self.ncbf_fix_replay_action_permutation:
+                                actions = actions[perm]
+                            return states, next_states, actions, y_target, masks, indices_to_term, last_states, last_actions, next_actions, next_y, pair_valid
 
-                        states, next_states, actions, y_targets, masks, indices_to_term, last_states, last_actions = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
+                        states, next_states, actions, y_targets, masks, indices_to_term, last_states, last_actions, next_actions, next_y, pair_valid = sample_and_merge(pos_buffer, neg_buffer, replay_buffer_key)
 
                         (loss, metrics), ncbf_grads = grad_ncbf_loss_fn(
                             ncbf_state.params,
@@ -473,7 +554,10 @@ class PPO:
                             masks,
                             indices_to_term,
                             last_states,
-                            last_actions
+                            last_actions,
+                            next_actions,
+                            next_y,
+                            pair_valid,
                         )
                         metrics["grad_norm"] = optax.global_norm(ncbf_grads)
                         new_state = ncbf_state.apply_gradients(grads=ncbf_grads)
@@ -529,7 +613,14 @@ class PPO:
             ncbf_state = self.ncbf_state
 
             @jax.jit
-            def update_buffer(pos_buffer, neg_buffer, states, next_states, actions, dones, terminations, y_target, masks, indices_to_term, last_state, last_action):
+            def update_buffer(pos_buffer, neg_buffer, states, next_states, actions, dones, terminations, y_target, masks, indices_to_term, last_state, last_action,
+                              exec_actions, ):
+                # Critic input (F1) and adjacent pairs (F2) are formed here, before flattening (T, E).
+                last_state, last_action, next_action, next_y, pair_valid = critic_inputs_and_pairs(
+                    states, exec_actions, last_state, last_action, y_target, masks, dones, self.ncbf_critic_input)
+                next_action = next_action.reshape(-1, next_action.shape[-1])
+                next_y = next_y.reshape(-1)
+                pair_valid = pair_valid.reshape(-1)
                 """
                 states: (T, E, D)
                 next_states: (T, E, D)
@@ -568,6 +659,9 @@ class PPO:
                             b["indices_to_term"] = b["indices_to_term"].at[idx].set(indices_to_term[i])
                             b["last_state"] = b["last_state"].at[idx].set(last_state[i])
                             b["last_action"] = b["last_action"].at[idx].set(last_action[i])
+                            b["next_action"] = b["next_action"].at[idx].set(next_action[i])
+                            b["next_y"] = b["next_y"].at[idx].set(next_y[i])
+                            b["pair_valid"] = b["pair_valid"].at[idx].set(pair_valid[i])
                             new_idx = (idx + 1) % capacity
                             b["pos"] = new_idx
                             b["size"] = jnp.minimum(capacity, b["size"] + 1)
@@ -596,6 +690,9 @@ class PPO:
                     "indices_to_term": jnp.zeros((capacity, ), dtype=jnp.int32),
                     "last_state": jnp.zeros((capacity, ) + (self.os_shape[0], ), dtype=jnp.float32),
                     "last_action": jnp.zeros((capacity, ) + (self.as_shape[0], ), dtype=jnp.float32),
+                    "next_action": jnp.zeros((capacity, ) + (self.as_shape[0], ), dtype=jnp.float32),
+                    "next_y": jnp.zeros((capacity, ), dtype=jnp.bool),
+                    "pair_valid": jnp.zeros((capacity, ), dtype=jnp.bool),
                     "pos": jnp.zeros((), dtype=jnp.int32),
                     "size": jnp.zeros((), dtype=jnp.int32)
                 }
@@ -613,7 +710,7 @@ class PPO:
                 single_rollout_carry, batch = jax.lax.scan(single_rollout, init_carry, None,
                                                            self.ncbf_pretrain_steps)
                 policy_state, critic_state, ncbf_state, env_state, key = single_rollout_carry
-                states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_state, last_action = batch
+                states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_state, last_action, exec_actions, first_steps = batch
 
                 # # for debugging
                 # def _save_pretrain_batch(states, next_states, actions, rewards, values,
@@ -653,6 +750,7 @@ class PPO:
                 ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
                     ncbf_pos_buffer, ncbf_neg_buffer,
                     states, next_states, actions, dones, terminations, y_target, masks, indices_to_term, last_state, last_action,
+                    exec_actions,
                 )
 
                 ncbf_state[0], ncbf_metrics, key = train_ncbf(ncbf_state[0], ncbf_pos_buffer, ncbf_neg_buffer, key, self.ncbf_pretrain_nr_minibatches)
@@ -694,14 +792,14 @@ class PPO:
                     rollout_carry = (policy_state, critic_state, ncbf_state, env_state, key)
                     single_rollout_carry, batch = jax.lax.scan(single_rollout, rollout_carry, None, self.nr_steps)
                     policy_state, critic_state, ncbf_state, env_state, key = single_rollout_carry
-                    states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions = batch
+                    states, next_states, actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, exec_actions, first_steps = batch
 
                     # process the batch data to get mask and y_target
                     y_target, masks, indices_to_term = window_any_done_next_H(dones, terminations)
 
                     ncbf_pos_buffer, ncbf_neg_buffer = update_buffer(
                         ncbf_pos_buffer, ncbf_neg_buffer,
-                        states, next_states, actions, dones, terminations, y_target, masks, indices_to_term, last_states, last_actions)
+                        states, next_states, actions, dones, terminations, y_target, masks, indices_to_term, last_states, last_actions, exec_actions)
 
                     mean_indices_to_term_pos_rollout = jnp.sum(indices_to_term * masks * (y_target==1.0)) / (jnp.sum(masks * (y_target==1.0)) + 1e-8)
                     mean_indices_to_term_neg_rollout = jnp.sum(indices_to_term * masks * (y_target==0.0)) / (jnp.sum(masks * (y_target==0.0)) + 1e-8)

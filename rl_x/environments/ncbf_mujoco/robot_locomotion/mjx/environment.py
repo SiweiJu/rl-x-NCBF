@@ -365,6 +365,11 @@ class LocomotionEnv:
         data, mjx_model = self.handle_domain_randomization(new_state.internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
 
         next_observation = self.get_observation(data, mjx_model, new_state.internal_state, observation_key, jnp.zeros(self.nr_actuator_joints))
+        # F1 (T06a): with reset_last_state="observation" the first step of an episode reports last_state = s_0
+        # (the paper code reported 0, so the critic trained the first step on (0, a_0) and the shield's h_prev at
+        # step 1 was h(0, a_0)). The State.last_state returned here stays 0; the shield detects step 0 instead.
+        if self.env_config.get("reset_last_state", "observation") == "observation":
+            new_state.internal_state["last_state"] = next_observation
         reward = 0.0
         terminated = False
         truncated = False

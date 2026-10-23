@@ -45,6 +45,12 @@ def get_config(algorithm_name):
     config.ncbf.coef_decay_lambda = 0.95  # decay lambda for ncbf loss coefficients < 1
     config.ncbf.action_clipping = True
     config.ncbf.lambda_slack = 1000.0  # weight for slack variable in safety layer QP
+    # T06a fixes (branch ncbf-q-fixed); the second value restores the paper code.
+    config.ncbf.critic_input = "pre_step"  # F1: (s_t, a_t) before env.step; "post_step" = (0, .) on first/last step
+    config.ncbf.first_step_prev_value = "gamma_c"  # F1: shield h_prev = gamma_c on step 0; "input" = h(0, 0)
+    config.ncbf.temporal_mode = "adjacent"  # F2: paper eq. 4 on adjacent pairs; "legacy_raw_vs_executed"
+    config.ncbf.temporal_space = "prob"  # "prob" (sigmoid, paper term's scale) or "logit" (paper shield's space)
+    config.ncbf.fix_replay_action_permutation = True  # paper bug: replay `actions` were not shuffled with the rest
 
     config.ncbf.pretrain = config_dict.ConfigDict()
     config.ncbf.pretrain.nr_steps = 2    # note this params says pretrian ncbf with X normal policy steps (nr_steps of rollout x， nr_epochs of training, each with minibatches with minibatch size)

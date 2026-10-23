@@ -4,6 +4,7 @@ from ml_collections import config_dict
 def get_config(environment_name):
     config = {
         "name": environment_name,
+        "reset_last_state": "observation",  # T06a F1 fix; "zeros" = paper code (internal last_state = 0 after reset)
         "nr_envs": 4096,
         "seed": 1,
         "render": False,

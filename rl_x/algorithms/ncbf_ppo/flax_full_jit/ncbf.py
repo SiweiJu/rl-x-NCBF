@@ -20,6 +20,11 @@ def get_ncbf(config, env):
     ncbf_clipping = config.algorithm.ncbf.action_clipping
     eta_cbf = config.algorithm.ncbf.eta_cbf
     lambda_s = config.algorithm.ncbf.lambda_slack
+    # T06a F1: "gamma_c" = on the first step of an episode use h_prev = gamma_c (only require h >= gamma_c);
+    # "input" = paper code, h_prev = h(last_state, last_action) = h(0, 0) after a reset.
+    first_step_prev_value = config.algorithm.ncbf.get("first_step_prev_value", "gamma_c")
+    if first_step_prev_value not in ("gamma_c", "input"):
+        raise ValueError("algorithm.ncbf.first_step_prev_value must be 'gamma_c' or 'input'")
 
     act_low = jnp.array(env.single_action_space.low)
     act_high = jnp.array(env.single_action_space.high)
@@ -40,13 +45,14 @@ def get_ncbf(config, env):
             eta_cbf=eta_cbf,
             lambda_s=lambda_s,
             action_clipping=ncbf_clipping,
+            first_step_prev_value=first_step_prev_value,
         )
 
     # dummy
     if ncbf_clipping:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, phi: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, phi, is_first_step=False: (jnp.clip(action_raw, act_low, act_high), jnp.array(False), jnp.array(0.0))
     else:
-        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, phi: (action_raw, jnp.array(False), jnp.array(0.0))
+        dummy_safety_layer_function = lambda action_raw, obs_t, last_action, last_obs, phi, is_first_step=False: (action_raw, jnp.array(False), jnp.array(0.0))
 
     if config.algorithm.ncbf.use_safety_layer:
         safety_layer_function_for_batch = safety_layer_function
@@ -57,7 +63,7 @@ def get_ncbf(config, env):
     batched_get_safe_action = jax.jit(
         jax.vmap(
             safety_layer_function_for_batch,
-            in_axes=(0, 0, 0, 0, None),  # action_raw[env], obs_t[env], same phi for items in the batch
+            in_axes=(0, 0, 0, 0, None, 0),  # action_raw[env], obs_t[env], same phi for items in the batch
             out_axes=(0, 0, 0)  # batched u_safe, constraint_active, delta_u
         )
     )
@@ -125,7 +131,8 @@ def make_get_safe_action(
     gamma_c: float,
     eta_cbf: float,      # \tilde alpha(s) = eta_cbf * s
     lambda_s: float,     # slack penalty
-    action_clipping: bool
+    action_clipping: bool,
+    first_step_prev_value: str = "gamma_c",
     ):
     """
     Returns a JIT-able safety layer:
@@ -153,7 +160,7 @@ def make_get_safe_action(
         return eta_cbf * s
 
     @jax.jit
-    def a_and_c_from_linearization(obs_t: Array, u0: Array, obs_last, u_last, phi: dict):
+    def a_and_c_from_linearization(obs_t: Array, u0: Array, obs_last, u_last, phi: dict, is_first_step=False):
         """
         Compute:
           a = d/du h_phi(x_{t+1}(u)) | u0
@@ -173,6 +180,8 @@ def make_get_safe_action(
         a = jax.grad(q_of_u)(u0)
 
         h_x, h_x_std, _ = ncbf_apply(phi, jnp.concatenate([x_last, u_last], axis=-1))
+        if first_step_prev_value == "gamma_c":
+            h_x = jnp.where(is_first_step, jnp.asarray(gamma_c, dtype=h_x.dtype), h_x)
         h_u0, h_u0_std, _ = ncbf_apply(phi, jnp.concatenate([x_t, u0], axis=-1))
 
         c_lin = h_x - alpha(h_x - gamma_c) + jnp.dot(a, u0) - h_u0
@@ -184,12 +193,13 @@ def make_get_safe_action(
         obs_t: Array,
         last_action: Array,
         last_obs: Array,
-        phis: dict
+        phis: dict,
+        is_first_step=False,
     ) -> Tuple[Array, Array, Array]:
 
         action_raw = jax.lax.cond(action_clipping, lambda x: jnp.clip(x, act_low, act_high), lambda x: x, action_raw)
 
-        a, c, h_x, h_u0, h_u0_std = a_and_c_from_linearization(obs_t, action_raw, last_obs, last_action, phis)
+        a, c, h_x, h_u0, h_u0_std = a_and_c_from_linearization(obs_t, action_raw, last_obs, last_action, phis, is_first_step)
 
         aTa = jnp.dot(a, a) + 1e-12
         aTu = jnp.dot(a, action_raw)
