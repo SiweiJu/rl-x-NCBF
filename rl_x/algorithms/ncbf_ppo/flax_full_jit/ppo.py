@@ -1788,7 +1788,7 @@ class PPO:
         }
         for key, value in loaded_algorithm_config.items():
             if isinstance(value, dict):
-                if key not in config.algorithm:
+                if key not in config.algorithm or key == "eval_sweep":  # eval settings come from the command line only
                     continue
                 parent = config.algorithm[key]
                 for sub_key, sub_value in value.items():
@@ -2011,6 +2011,10 @@ class PPO:
 
         if self.counterfactual_enabled:
             return self.counterfactual_check()
+
+        if self.config.algorithm.get("eval_sweep", {}).get("enabled", False):
+            from rl_x.algorithms.ncbf_ppo.flax_full_jit.eval_sweep import run_eval_sweep
+            return run_eval_sweep(self)
 
         # Batch evaluation: run episodes * horizon steps on all parallel envs and write a summary.
         nr_eval_steps = int(max(1, episodes)) * self.horizon

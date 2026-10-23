@@ -109,6 +109,34 @@ def get_config(algorithm_name):
     config.counterfactual.continuation = "shielded"  # policy after the first step: "shielded" (the critic's semantics) or "raw"
     config.counterfactual.nr_repeats = 1  # rollouts per branch with different env randomness (shared by both branches)
 
+    # Perturbation-sweep evaluation (runner.mode=test, see eval_sweep.py and experiments/pncbf/eval/run_eval_sweep.py).
+    # Off by default: test() then runs the old batch evaluation. Training never reads these values.
+    config.eval_sweep = config_dict.ConfigDict()
+    config.eval_sweep.enabled = False  # True: test() runs the sweep instead of the batch evaluation
+    config.eval_sweep.out_dir = ""  # "" -> <run_path>/eval_sweep
+    config.eval_sweep.checkpoint_label = ""  # "" -> run directory name of runner.load_model
+    config.eval_sweep.checkpoint_source = ""  # original checkpoint path (the driver loads a private copy)
+    config.eval_sweep.method = ""  # free tag copied into the summaries (e.g. ppo, ncbf_h1, ours_h25)
+    config.eval_sweep.train_seed = -1  # copied into the summaries
+    config.eval_sweep.terrain_label = ""  # "" -> flat (plane) / hfield (hfield_diverse)
+    config.eval_sweep.perturbations = "action_noise,push"
+    config.eval_sweep.sampling_probs = "0.0,0.002,0.004,0.008,0.016"  # per-step, per-env probability (x-axis)
+    config.eval_sweep.action_noise_sampling_probs = ""  # "" -> sampling_probs
+    config.eval_sweep.push_sampling_probs = ""  # "" -> sampling_probs
+    config.eval_sweep.eval_seeds = "0"  # shared by all methods (paired comparison)
+    config.eval_sweep.deployment_mode = "A"  # A: policy only (shield never called); B: policy + shield
+    config.eval_sweep.noise_std = 1.0  # paper code: N(0, 1) on the processed action
+    config.eval_sweep.noise_std_mode = "absolute"  # absolute or action_range_fraction (std = noise_std * (high - low))
+    config.eval_sweep.noise_point = "pre_shield"  # pre_shield (paper) or post_shield (mode B only)
+    config.eval_sweep.push_scale = 1.0  # multiplies the env's max trunk velocity kick in the push setting
+    config.eval_sweep.push_scale_joints = False  # also scale the joint velocity/position kicks
+    config.eval_sweep.push_impl = "env"  # env: env-internal pushes (retrace per point); eval_loop: pushes before each env step (one compile)
+    config.eval_sweep.background_push_prob = -1.0  # pushes during the action-noise setting; < 0 -> env config value
+    config.eval_sweep.success_threshold_steps = 250  # extra metric survival_rate_at_threshold (paper CSV threshold)
+    config.eval_sweep.save_episodes = True
+    config.eval_sweep.paper_shield = "train"  # paper-code checkpoints only: train (full-jit shield) or cpu_test (shield of the paper's CPU eval)
+    config.eval_sweep.initial_command_zero_prob = 1.0  # P(episode starts with the zero command); 1.0 = env default, see eval_sweep.apply_initial_commands  # per-env outcomes eval_episodes.npz next to each summary
+
     if "booster" in algorithm_name.lower():
         apply_booster_defaults(config)
     return config

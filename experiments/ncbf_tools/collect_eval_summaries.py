@@ -6,7 +6,9 @@ Usage:
 Each run directory name becomes the `run` column; a trailing `_speed<v>` (as written by
 cluster_runner/eval_go2_obstacles_speed_sweep.sh) is parsed into an `obstacle_speed` column, and a
 trailing obstacle preset (cluster_runner/eval_go2_obstacles_held_out.sh) into an `obstacle_preset` column.
-Nested entries become `parent/child` columns; lists are written as JSON.
+Nested entries become `parent/child` columns; lists are written as JSON. `path` is the summary directory
+relative to root (for the perturbation sweep of experiments/pncbf/eval/run_eval_sweep.py:
+<checkpoint>/<setting>/mode_<A|B>/sp_<p>/seed_<s>; the sweep metadata is also inside each summary).
 """
 import argparse
 import csv
@@ -44,7 +46,8 @@ def main():
         match = re.search(r"_speed(\d+)p?(\d*)$", run)
         speed = float(f"{match.group(1)}.{match.group(2) or 0}") if match else None
         preset = next((name for name in PRESETS if run.endswith(f"_{name}")), None)
-        rows.append({"run": run, "obstacle_speed": speed, "obstacle_preset": preset, **flatten(summary)})
+        rel_path = str(summary_path.parent.relative_to(args.root))  # eval sweep: <ckpt>/<setting>/mode_<M>/sp_<p>/seed_<s>
+        rows.append({"run": run, "path": rel_path, "obstacle_speed": speed, "obstacle_preset": preset, **flatten(summary)})
 
     if not rows:
         raise SystemExit(f"No {args.file} found under {args.root}")
