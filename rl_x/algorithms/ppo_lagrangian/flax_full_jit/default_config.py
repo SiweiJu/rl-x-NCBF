@@ -30,9 +30,22 @@ def get_config(algorithm_name):
     config.cost_gae_lambda = 0.9
     config.cost_limit = 0.0
     config.cost_lambda_init = 0.0
-    config.cost_lambda_lr = 0.05
+    config.cost_lambda_lr = 0.05  # gradient rule only
     config.cost_lambda_max = 100.0
     config.normalize_cost_advantages = True
-    config.scale_lagrangian_objective = True
+    config.scale_lagrangian_objective = True  # (A_r - lambda A_c) / (1 + lambda), "sum_norm" in Stooke et al.
+
+    # Lagrange multiplier update (see lagrange.py). Defaults reproduce the pre-T07 behavior.
+    config.lagrangian = config_dict.ConfigDict()
+    config.lagrangian.update_rule = "gradient"  # gradient, pid
+    config.lagrangian.cost_measure = "rollout"  # rollout (old: summed cost per nr_steps rollout), episode (cost per episode)
+    config.lagrangian.diff_norm = False  # (1 - lambda) A_r - lambda A_c with lambda in [0, 1]
+    # PID gains and smoothing, defaults from OmniSafe cppo_pid.yaml / Stooke et al. 2020 code.
+    config.lagrangian.pid_kp = 0.1
+    config.lagrangian.pid_ki = 0.01
+    config.lagrangian.pid_kd = 0.01
+    config.lagrangian.pid_d_delay = 10
+    config.lagrangian.pid_delta_p_ema_alpha = 0.95
+    config.lagrangian.pid_delta_d_ema_alpha = 0.95
 
     return config
