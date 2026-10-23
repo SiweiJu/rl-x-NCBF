@@ -46,8 +46,10 @@ test "$(git -C "$TREE" rev-parse HEAD)" = "$COMMIT"
 test -z "$(git -C "$TREE" status --porcelain)"
 python -c "import rl_x; assert rl_x.__file__.startswith('$TREE'), rl_x.__file__; print('rl_x:', rl_x.__file__)"
 
-TOTAL=1000000000; SUFFIX=""
-if [[ -n "${SMOKE:-}" ]]; then TOTAL=5242880; SUFFIX="_smoke"; fi   # 40 PPO updates of 1024x128
+TOTAL=1000000000; SUFFIX=""; SMOKE_ARGS=""
+if [[ -n "${SMOKE:-}" ]]; then   # 40 PPO updates of 1024x128 in 2 eval/save blocks
+  TOTAL=5242880; SUFFIX="_smoke"; SMOKE_ARGS="--algorithm.evaluation_and_save_frequency=2621440"
+fi
 RUN_NAME="T06_fixed_${METHOD}_seed_${SEED}${SUFFIX}"
 TAGS="phase/P0,exp/T06,method/${METHOD},robot/go2,task/locomotion,code/fixed,commit/${COMMIT:0:7}${SMOKE:+,smoke}"
 echo "=== $(date -Is) job ${SLURM_JOB_ID:-none} (${SLURM_ARRAY_JOB_ID:-}_${I}) host=$(hostname) gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) qos=${SLURM_JOB_QOS:-?} SLURM_RESTART_COUNT=${SLURM_RESTART_COUNT:-0} run=$RUN_NAME commit=$COMMIT"
@@ -105,6 +107,10 @@ python experiment.py \
   --environment.command.clip_max_velocity=2.0 \
   --environment.command.velocity_ratio="(1.0,1.0,1.0)" \
   --environment.ncbf_use_policy_observations=True \
+  --algorithm.ncbf.label_source=termination_window \
+  --environment.termination.height_curriculum_scaled=True \
+  --environment.termination.body_tilt_threshold=1000000.0 \
+  $SMOKE_ARGS \
   --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
   --environment.seed=$SEED \
   --runner.mode=train \

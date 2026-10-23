@@ -6,6 +6,31 @@ Reference run: wandb `202601_paper/zdqj50w0` (ours, H=25, seed 43). Its CLI args
 Method: I diffed the flattened configs, then diffed the code paths
 (`flax_full_jit/*`, mjx env, Go2 default reward/termination/command) for behavior changes that have no config key.
 
+## Decision (main session, 2026-10-23)
+Both. **T06a** (`ncbf-q-fixed`, paper code + fixes only) is the G0 comparison against T05. **T06b** (v2 with paper
+values where a switch exists, "full v2") is the reference point for P2/P3. Since this table was first written, three
+of the no-switch rows got switches on pncbf-v2 (5b06f9f) and T06b uses them:
+- `ncbf.label_source=termination_window`: paper label, one head.
+- `environment.termination.height_curriculum_scaled=True`: paper height termination.
+- `environment.termination.body_tilt_threshold=1e6`: no tilt termination.
+
+## T06a: `ncbf-q-fixed` (from cacffe7, commit bdd62eb)
+| fix | switch (default = fixed) | paper value |
+|---|---|---|
+| F1 critic input | `ncbf.critic_input=pre_step`: (s_t, a_t) recorded before `env.step`, a_t = executed action | `post_step`: env state after the step, i.e. (0, a_0) on the **first** step (the env reset internal last_state to 0) and (0, 0) on the last step of every episode |
+| F1 env | `environment.reset_last_state=observation`: internal last_state = s_0 after a reset | `zeros` |
+| F1 shield | `ncbf.first_step_prev_value=gamma_c`: step 0 of an episode uses h_prev = gamma_c (logit 0.405) | `input`: h(0, 0) |
+| F2 | `ncbf.temporal_mode=adjacent`: paper eq. 4, ReLU(−(h(s_{t+1},a_{t+1}) − (1−η)h(s_t,a_t) − η γ_c)) on adjacent safe→safe pairs inside one episode. a_{t+1}, y_{t+1} and pair validity are stored in the pos/neg buffers. `ncbf.temporal_space=prob` (sigmoid h and sigmoid(γ_c) = 0.6, the scale of the paper's term) or `logit` (the space of the paper's shield) | `legacy_raw_vs_executed` (h(s_t,a_exec) vs h(s_t,a_raw)) |
+| replay bug | `ncbf.fix_replay_action_permutation=True` | `False`: `actions` not shuffled with the other fields; only the legacy term uses them |
+
+Not changed in T06a:
+- the anticipation loss still uses the post-step (last_state, last_action);
+- the labels (ncbf-q window) and everything else stay as in the paper code.
+
+PPO is not affected by any of these fixes (shield off; the critic does not act on the policy; no RNG stream
+changes), so T06a reuses T05 PPO. Tests: `tests/test_t06a_fixes.py` on that branch (6 passed). Tiny CPU training
+runs pass with all fixes on and with all switches set to the paper values.
+
 ## Main finding
 **v2 cannot reproduce the paper code with only the fixes changed.** About 15 behavior changes between cacffe7
 and v2 have **no switch**. They are marked "no switch" below and include: labels, the critic input and training
@@ -75,15 +100,17 @@ So in T06b these are set to the paper-equivalent value, which is also the fixed 
 | algorithm.next_step_predictor.aux_loss_coef | 1 | no encoder/decoder | 1 | **no switch to remove the latent from the critic input**; aux loss only trains encoder/decoder |
 | use_history_latent_for_policy/value, use_decoder_output_for_policy | False | – | False | |
 | environment.nr_history_steps | 10 | – | 10 | feeds the critic latent |
-| environment.command.velocity_ratio | [1, 0.5, 0.2] | [1, 1, 1] | **[1,1,1]** | paper value |
-| environment.termination.body_tilt_threshold | 0.4 rad (terminates) | no tilt termination | **0.4 (no switch)** | a huge value removes the tilt termination but also makes the tilt safety head always safe; keep 0.4. **Behavior change** |
+| environment.command.velocity_ratio | (1, 0.5, 0.2) | (1, 1, 1) | **(1,1,1)** | paper value (made a tuple so the CLI can override it) |
+| environment.termination.body_tilt_threshold | 0.4 rad (terminates) | no tilt termination | **1e6** | paper value; with label_source=termination_window the tilt head is not used |
+| environment.termination.height_curriculum_scaled | False | True | **True** | paper value (new switch) |
+| ncbf.label_source / safe_fall_H | env_targets / −1 | termination window, 1 head | **termination_window** / −1 | paper value (new switch) |
 | environment.record_transition_physics_state | False | – | False | |
 
 ### Behavior changes with **no switch** (present in any v2 run)
 | area | paper (cacffe7) | v2 |
 |---|---|---|
-| height termination | `h < (1 − curriculum) · 0.8 · h_nom` (relaxes to none as the env curriculum → 1; none in eval) | fixed `h < 0.8 · h_nom` |
-| critic label / heads | 1 head, y = no termination in transitions t..t+H (H+1) | K=2 heads (height, tilt bits from the obs), target = min over s_{t+1..t+H} (H states), soft-min over heads in the shield |
+| ~~height termination~~ | now switchable: `termination.height_curriculum_scaled` | |
+| ~~critic label / heads~~ | now switchable: `ncbf.label_source=termination_window` | |
 | critic input | policy obs + action | policy obs + action + history-encoder latent (64-d) |
 | critic training | separate update per iteration: 64 minibatches per member from pos/neg buffers (80/20), Adam per member, clip 5 per member; pretraining | joint with encoder/decoder inside the PPO minibatch scan (nr_epochs × nr_minibatches steps on the on-policy batch + neg replay), one stacked Adam, global-norm clip over all members |
 | shield value | CVaR (mean of lowest 3 of 5) on **logits**, linear CBF in logits | ensemble mean of soft-min(sigmoid(logits)), linear CBF in **probabilities** |
@@ -95,11 +122,22 @@ So in T06b these are set to the paper-equivalent value, which is also the fixed 
 | obs | – | +2 safety bits at the end of the observation (not in the policy/critic index sets) |
 | RNG | 5-way key split | 7-way + per-minibatch splits |
 
+## Legacy checkpoint loader (fixed on pncbf-v2)
+`PPO.load` used to set `gamma_c_scaled_by_eta=False` and `critic_action_index=previous` on every checkpoint whose
+config lacks those keys, which includes cacffe7 checkpoints. That was wrong for them, because the paper code already
+had the η form and the (s_t, a_t) pairing. Now:
+- `checkpoint_code_family()` tells "paper" (has `ncbf.pretrain` / `pos_buffer_size`) from "multistep" (pre-fix)
+  and "current";
+- `legacy_ncbf_defaults(family)` gives the family's behavior;
+- loading a paper checkpoint raises a clear error, since 5 separate TrainStates and no encoder/decoder cannot be
+  restored into v2 (eval uses the paper code via `PaperAgent`).
+Test: `test_legacy_loader_defaults_by_code_family`, which uses the real zdqj50w0 config.
+
 ## Label convention (asked: keep ncbf-q's window)
 `ncbf_targets.window_any_done_next_H` is identical to the paper's (y = no termination at transitions
 t..t+H, i.e. H+1 transitions; mask drops windows that hit a truncation/rollout end). But v2 trains the critic on
 `receding_min_target` (min of env indicator dims over H next states), and uses y only to select replay
-negatives. So in v2 the paper window is **not** the training label, and a "keep ncbf-q's window" option would be a
-new switch (`ncbf.label_source = termination_window`, 1 head). The one-step mismatch: the termination
+negatives. So by default the paper window is **not** v2's training label. The new switch
+`ncbf.label_source=termination_window` (1 head) restores it, and T06b uses it. The one-step mismatch: the termination
 window covers H+1 transitions while the target covers H states, so when termination is exactly H+1 steps away
 y = 0 but target = safe. In T06a (paper code) the paper window is used unchanged.

@@ -191,6 +191,33 @@ def summarize_counterfactual(records, head_names, nr_calibration_bins=5):
     return summary
 
 
+def checkpoint_code_family(loaded_algorithm_config):
+    """Which code wrote a checkpoint, from its saved algorithm config:
+    "paper"     - ncbf-q / plots (cacffe7): has ncbf.pretrain and ncbf_buffer.pos_buffer_size;
+    "multistep" - multistep before the 2026-10-14 safety-critic fixes: no ncbf.independent_ensemble;
+    "current"   - written after the fixes."""
+    ncbf = loaded_algorithm_config.get("ncbf", {}) or {}
+    buffers = loaded_algorithm_config.get("ncbf_buffer", {}) or {}
+    if "pretrain" in ncbf or "pos_buffer_size" in buffers:
+        return "paper"
+    if "independent_ensemble" not in ncbf:
+        return "multistep"
+    return "current"
+
+
+def legacy_ncbf_defaults(family):
+    """Values for ncbf keys that a checkpoint's config lacks, so it runs with the behavior of the code that wrote it.
+    The paper code already trained independent members, paired (s_t, a_t) and used the eta-scaled gamma_c; only the
+    pre-fix multistep code had the B1/B2/B3 regressions. Both used h(reset input) on the first step."""
+    if family == "paper":
+        return {"independent_ensemble": True, "critic_action_index": "current", "gamma_c_scaled_by_eta": True,
+                "first_step_prev_value": "input", "label_source": "termination_window"}
+    if family == "multistep":
+        return {"independent_ensemble": False, "critic_action_index": "previous", "gamma_c_scaled_by_eta": False,
+                "first_step_prev_value": "input"}
+    return {"first_step_prev_value": "input"}  # written after B1-B3 but before the F1 fix
+
+
 class PPO:
     SUPPORTS_RESUME = True
     def __init__(self, config, env, run_path, writer):
@@ -1819,16 +1846,15 @@ class PPO:
             if f"algorithm.{key}" not in explicitly_set_algorithm_params and key in config.algorithm:
                 config.algorithm[key] = value
 
-        # Checkpoints written before the safety-critic fixes have none of these keys: load them with the
-        # legacy behavior (single repeated critic, h(s_t, a_{t-1}) pairing, gamma_c not scaled by eta).
         loaded_ncbf_config = loaded_algorithm_config.get("ncbf", {})
-        legacy_ncbf_defaults = {
-            "independent_ensemble": False,
-            "critic_action_index": "previous",
-            "gamma_c_scaled_by_eta": False,
-            "first_step_prev_value": "input",
-        }
-        for sub_key, legacy_value in legacy_ncbf_defaults.items():
+        checkpoint_family = checkpoint_code_family(loaded_algorithm_config)
+        if checkpoint_family == "paper":
+            raise ValueError(
+                "This checkpoint was written by the paper code (ncbf-q family: 5 separate critic TrainStates, no "
+                "history encoder/decoder); its parameters cannot be restored into this PPO. Load it with the paper "
+                "code, e.g. eval_sweep's PaperAgent. Its behavior corresponds to legacy_ncbf_defaults('paper'): "
+                f"{legacy_ncbf_defaults(checkpoint_family)}")
+        for sub_key, legacy_value in legacy_ncbf_defaults(checkpoint_family).items():
             if sub_key not in loaded_ncbf_config and f"algorithm.ncbf.{sub_key}" not in explicitly_set_algorithm_params:
                 rlx_logger.info(f"Legacy checkpoint: setting algorithm.ncbf.{sub_key}={legacy_value}")
                 config.algorithm.ncbf[sub_key] = legacy_value

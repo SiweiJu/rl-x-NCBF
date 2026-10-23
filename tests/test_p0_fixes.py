@@ -418,3 +418,19 @@ def test_height_termination_curriculum_switch(env_and_config):
     assert not bool(term.should_terminate(internal))  # paper: threshold * (1 - 1.0) = 0
     internal["env_curriculum_coeff"] = 0.0
     assert bool(term.should_terminate(internal))
+
+
+def test_legacy_loader_defaults_by_code_family():
+    import json
+    import pathlib
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.ppo import checkpoint_code_family, legacy_ncbf_defaults
+
+    paper_run = pathlib.Path(__file__).parents[1] / "experiments/pncbf/paper_configs/ncbf-q-safe/zdqj50w0.json"
+    paper_algorithm_config = {k: v for k, v in json.load(open(paper_run))["config"]["algorithm"].items()}
+    assert checkpoint_code_family(paper_algorithm_config) == "paper"
+    paper = legacy_ncbf_defaults("paper")
+    # cacffe7 already had the eta-scaled residual and the (s_t, a_t) pairing: do not force the multistep regressions.
+    assert paper["gamma_c_scaled_by_eta"] is True and paper["critic_action_index"] == "current"
+    assert checkpoint_code_family({"ncbf": {"H": 25}, "ncbf_buffer": {"neg_buffer_size": 1}}) == "multistep"
+    assert legacy_ncbf_defaults("multistep")["critic_action_index"] == "previous"
+    assert checkpoint_code_family({"ncbf": {"independent_ensemble": True}}) == "current"
