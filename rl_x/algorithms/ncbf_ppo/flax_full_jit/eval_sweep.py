@@ -37,6 +37,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf_targets import episode_first_step
+
 
 rlx_logger = logging.getLogger("rl_x")
 
@@ -110,7 +112,8 @@ class MultistepAgent:
         m = self.model
         safe_action, constraint_active, delta_u, _ = m.batched_ncbf_safety_layer(
             action, env_state.next_observation, env_state.last_action, env_state.last_state, latent_z,
-            jnp.asarray(1.0, dtype=action.dtype), m._ncbf_params_stack(m.ncbf_state.params))
+            jnp.asarray(1.0, dtype=action.dtype), m._ncbf_params_stack(m.ncbf_state.params),
+            episode_first_step(env_state))
         safe_action, constraint_active, delta_u, _ = m._bypass_post_drop_safety_layer(
             action, safe_action, constraint_active, delta_u, {}, env_state.next_observation)
         return safe_action, constraint_active, delta_u
