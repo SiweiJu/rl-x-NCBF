@@ -178,7 +178,7 @@ def get_config(environment_name):
             "zero_clip_threshold_percentage": 0.1,
             "all_zero_chance": 0.04,
             "single_zero_chance": 0.005,
-            "velocity_ratio": [1, 0.5, 0.2],
+            "velocity_ratio": (1.0, 0.5, 0.2),  # tuple so it can be overridden from the CLI: "(1.0,1.0,1.0)" = paper code
             "curriculum_initial_scale": 1.0,
             "curriculum_final_scale": 1.0,
             "curriculum_fixed_scale": -1.0,

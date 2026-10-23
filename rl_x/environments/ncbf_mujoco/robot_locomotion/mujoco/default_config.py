@@ -116,7 +116,7 @@ def get_config(environment_name):
             "zero_clip_threshold_percentage": 0.1,
             "all_zero_chance": 0.04,
             "single_zero_chance": 0.005,
-            "velocity_ratio": [1, 0.5, 0.2],
+            "velocity_ratio": (1.0, 0.5, 0.2),  # tuple so it can be overridden from the CLI: "(1.0,1.0,1.0)" = paper code
             # configs for test mode with type "random_trajectory"
             "trajectory_length_in_seconds": 10.0,
 
