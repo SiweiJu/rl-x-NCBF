@@ -8,6 +8,7 @@
 #SBATCH --mem-per-cpu=8G
 #SBATCH --time=1-12:00:00
 #SBATCH --array=0-4
+#SBATCH --open-mode=append
 # T06a: the paper's Fig. 2 / Fig. 4 shield runs re-trained with the PAPER code (cacffe7) + only the fixes
 # (branch ncbf-q-fixed: F1, F2, replay action permutation; experiments/pncbf/reports/T06_config.md). Same CLI as
 # T05 (experiments/pncbf/T05/paper_fig2.sbatch) plus the fix switches; compare against T05. PPO is not affected

@@ -141,3 +141,12 @@ negatives. So by default the paper window is **not** v2's training label. The ne
 `ncbf.label_source=termination_window` (1 head) restores it, and T06b uses it. The one-step mismatch: the termination
 window covers H+1 transitions while the target covers H states, so when termination is exactly H+1 steps away
 y = 0 but target = safe. In T06a (paper code) the paper window is used unchanged.
+
+## Smoke tests (2026-10-23, scavenger, 60 updates of 1024x128 = 7.86 M steps)
+| job | code | GPU | result | peak GPU mem | MaxRSS (host) | speed | notes |
+|---|---|---|---|---|---|---|---|
+| 180597 | T06b, neg_buffer 20 | 3090 | **OOM** (alloc 16.6 GiB at start) | – | 9.2 GB | – | → neg_buffer_size 5 (deviation) |
+| 180603 | T06b @62d1616, neg_buffer 5 | 3090 | COMPLETED, 60 updates, 0 restarts | 18.5 GB | 9.3 GB | 3.9 s/update ≈ 34k steps/s (≈ 8.3 h per 1e9) | compile 5.5 min; wandb `T06_fixed_ii_h25_seed_42_smoke-dc0bdba2` |
+| 180598 | T06a @bdd62eb | A6000 (last attempt) | COMPLETED, 60 updates, **2 scavenger preemptions** (restarted from scratch, earlier run dirs moved to `_failed_attempts/`) | 18.8 GB | 12.0 GB | 9 s/update ≈ 14.6k steps/s (≈ 19 h per 1e9, paper 15k) | wandb `rt7ymemj`; log of earlier attempts lost (t06a now has `--open-mode=append`) |
+Both fit a 24 GB GPU and the 16 GB host limit (8G x 2 CPUs). The jax cache on the shared home was not exercised by
+a requeue (180603 was not preempted).
