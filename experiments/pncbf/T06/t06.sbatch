@@ -19,7 +19,7 @@
 #
 #   COMMIT=<sha> METHOD=ii_h25 sbatch --qos=scavenger --job-name=T06_ii_h25 \
 #     --output=/home/ju/repo/pncbf/T06-logs/%x_%A_%a.txt --export=ALL experiments/pncbf/T06/t06.sbatch
-# Smoke: add  --array=0 --time=00:20:00  and  SMOKE=1  in the environment.
+# Smoke: add  --array=0 --time=00:40:00  and  SMOKE=1  in the environment.
 set -euo pipefail
 COMMIT=${COMMIT:?set COMMIT to the full pncbf-v2 sha}
 TREE=/home/ju/repo/pncbf/v2-${COMMIT:0:7}
@@ -49,9 +49,14 @@ test -z "$(git -C "$TREE" status --porcelain)"
 python -c "import rl_x; assert rl_x.__file__.startswith('$TREE'), rl_x.__file__; print('rl_x:', rl_x.__file__)"
 
 TOTAL=1000000000; SUFFIX=""; SMOKE_ARGS=""
-if [[ -n "${SMOKE:-}" ]]; then   # 40 PPO updates of 1024x128 in 2 eval/save blocks
-  TOTAL=5242880; SUFFIX="_smoke"; SMOKE_ARGS="--algorithm.evaluation_and_save_frequency=2621440"
+if [[ -n "${SMOKE:-}" ]]; then   # 60 PPO updates of 1024x128 (fills the 50-rollout pos buffer) in 3 eval/save blocks
+  TOTAL=7864320; SUFFIX="_smoke"; SMOKE_ARGS="--algorithm.evaluation_and_save_frequency=2621440"
 fi
+# GPU memory trace (MiB, every 15 s) for the memory check; peak printed at the end.
+GPU_MEM_LOG=/tmp/gpu_mem_${SLURM_JOB_ID:-$$}.txt
+nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -l 15 > "$GPU_MEM_LOG" 2>/dev/null &
+GPU_MEM_PID=$!
+trap 'kill $GPU_MEM_PID 2>/dev/null; echo "=== peak GPU memory used: $(sort -n "$GPU_MEM_LOG" | tail -1) MiB"' EXIT
 RUN_NAME="T06_fixed_${METHOD}_seed_${SEED}${SUFFIX}"
 TAGS="phase/P0,exp/T06,method/${METHOD},robot/go2,task/locomotion,code/fixed,commit/${COMMIT:0:7}${SMOKE:+,smoke}"
 echo "=== $(date -Is) job ${SLURM_JOB_ID:-none} (${SLURM_ARRAY_JOB_ID:-}_${I}) host=$(hostname) gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) qos=${SLURM_JOB_QOS:-?} SLURM_RESTART_COUNT=${SLURM_RESTART_COUNT:-0} run=$RUN_NAME commit=$COMMIT"

@@ -16,7 +16,7 @@
 #
 #   COMMIT=bdd62ebbc61713c7270154ed66f84a605e677f51 METHOD=ours_h25 sbatch --qos=normal --job-name=T06a_ours_h25 \
 #     --output=/home/ju/repo/pncbf/T06-logs/%x_%A_%a.txt --export=ALL experiments/pncbf/T06/t06a.sbatch
-# Smoke: add  --array=0 --time=00:20:00  and  SMOKE=1  in the environment.
+# Smoke: add  --array=0 --time=00:40:00  and  SMOKE=1  in the environment.
 # Attribution runs: set FIX_ARGS to override single switches, e.g.
 #   FIX_ARGS="--algorithm.ncbf.temporal_mode=legacy_raw_vs_executed" (F1 only).
 set -euo pipefail
@@ -40,14 +40,20 @@ conda activate rlx-ncbf
 # submit directory first: `python -c` puts the cwd on sys.path, so a checkout there (e.g. pncbf/core) would win.
 export PYTHONPATH=$TREE
 cd "$TREE"
+export XLA_PYTHON_CLIENT_PREALLOCATE=false   # so the GPU memory trace shows real use (no effect on results)
 test "$(git -C "$TREE" rev-parse HEAD)" = "$COMMIT"
 test -z "$(git -C "$TREE" status --porcelain)"
 python -c "import rl_x; assert rl_x.__file__.startswith('$TREE'), rl_x.__file__; print('rl_x:', rl_x.__file__)"
 
 TOTAL=1000000000; SUFFIX=""; SMOKE_ARGS=""
-if [[ -n "${SMOKE:-}" ]]; then   # 40 PPO updates of 1024x128 in 2 eval/save blocks
-  TOTAL=5242880; SUFFIX="_smoke"; SMOKE_ARGS="--algorithm.evaluation_and_save_frequency=2621440"
+if [[ -n "${SMOKE:-}" ]]; then   # 60 PPO updates of 1024x128 (fills the 50-rollout pos buffer) in 3 eval/save blocks
+  TOTAL=7864320; SUFFIX="_smoke"; SMOKE_ARGS="--algorithm.evaluation_and_save_frequency=2621440"
 fi
+# GPU memory trace (MiB, every 15 s) for the memory check; peak printed at the end.
+GPU_MEM_LOG=/tmp/gpu_mem_${SLURM_JOB_ID:-$$}.txt
+nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -l 15 > "$GPU_MEM_LOG" 2>/dev/null &
+GPU_MEM_PID=$!
+trap 'kill $GPU_MEM_PID 2>/dev/null; echo "=== peak GPU memory used: $(sort -n "$GPU_MEM_LOG" | tail -1) MiB"' EXIT
 FIX_ARGS=${FIX_ARGS:-}
 VARIANT=${VARIANT:-fixed}   # name the run if FIX_ARGS turns a fix off, e.g. VARIANT=f1only
 export WANDB_TAGS="phase/P0,exp/T06a,method/${METHOD},robot/go2,task/locomotion,code/paper-fixed,variant/${VARIANT},commit/${COMMIT:0:7}${SMOKE:+,smoke}"
