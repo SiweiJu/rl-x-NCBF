@@ -1,0 +1,45 @@
+{
+  "_comment": "Perturbation-sweep protocol (T04, plan 6.3), filled with the paper values recovered in T03 (pncbf-v2-recover) and the T04 reconciliation. Evidence per value in _evidence and experiments/pncbf/reports/T04.md. Override any value on the run_eval_sweep.py command line.",
+  "nr_envs": 1024,
+  "episode_length_in_seconds": 10,
+  "terrains": {"flat": "plane", "hfield": "hfield_diverse"},
+  "modes": ["A", "B"],
+  "perturbations": ["action_noise", "push"],
+  "sampling_probs": {
+    "action_noise": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    "push": [0.002, 0.005, 0.01, 0.015, 0.02]
+  },
+  "eval_seeds": [0],
+  "noise_std": 1.0,
+  "noise_std_mode": "absolute",
+  "noise_point": "pre_shield",
+  "push_scale": 2.0,
+  "push_scale_joints": true,
+  "push_impl": "env",
+  "background_push_prob": -1.0,
+  "success_threshold_steps": 250,
+  "initial_command_zero_prob": 0.16,
+  "paper_shield": "cpu_test",
+  "env_args": [
+    "--environment.train_robot=unitree_go2"
+  ],
+  "algo_args": [],
+  "_evidence": {
+    "nr_envs": "plan 6.3 (paper: 1 CPU env x 10 episodes per pkl, T03_T05.md F10)",
+    "episode_length_in_seconds": "OPEN. plan 6.3 says 10 s; paper eval length not recorded; recover's return calibration suggests ~4 s (paper return 7.85 / ~0.04 per step). CPU env default 20 s (plots:mujoco/default_config.py:175)",
+    "terrains": "figure column titles (plot_line_plot_one_figure.py:46-51); CPU env default hfield_diverse (mujoco/default_config.py:164); training on plane (wandb args, INDEX.md)",
+    "modes": "plan 6.2: A for all methods, B for shield methods (B is the paper setting: eval_safety_True pkls)",
+    "sampling_probs": "x ticks of paper Fig. 2 (recover, paper_curves.csv / T03_T05.md F10)",
+    "eval_seeds": "paper eval seeds not recoverable (pkls missing); one fixed seed shared by all methods",
+    "noise_std": "plots:ncbf_ppo/flax/ppo.py:951-952 (N(0,1) * if_sampling on the processed action); = 6-16 % of the Go2 action range, not 50 % (plan 6.3)",
+    "noise_point": "plots:ncbf_ppo/flax/ppo.py:951-955 (noise added before the shield call)",
+    "push_scale": "paper appendix 'we double the magnitude' (recover); not in code",
+    "push_scale_joints": "assumption shared with recover's paper_eval_sweep.sh (all four perturbation bounds x2); exact parameter set not recoverable",
+    "push_impl": "env = the env's own push (same as paper CPU env and training); eval_loop is ~60x cheaper per push point (see T04.md section 5)",
+    "background_push_prob": "-1 = env config 0.002, on during the action-noise suites as in the paper CPU env (mujoco/default_config.py:75, eval_mode forced True at environment.py:185)",
+    "success_threshold_steps": "write_evaluation_to_csv.py:261 (finished = length >= 250); primary success = not terminated within the horizon",
+    "initial_command_zero_prob": "paper eval ran 10 episodes in sequence per process and the command persists across resets (resampled w.p. 0.002/step, 0 at the first reset): with 10 s episodes P(episode starts at 0) ~ (1 + e^-1 + e^-2 + ...)/10 ~ 0.16. 0.0 = every episode starts with a random command, 1.0 = env default (all 0)",
+    "paper_shield": "cpu_test = shield of the paper's CPU eval (plots:ncbf_ppo/flax/ncbf.py make_get_safe_action_q, last_state = current obs at flax/ppo.py:1001); only used for paper-code (ncbf-q) checkpoints on branch pncbf-v2-eval-paper",
+    "paper_checkpoint_env_args": "see checkpoints_paper_example.json: ncbf_use_policy_observations=True, env_curriculum_level_success_episode_return=8, command max_velocity_per_m_factor=2.0, clip_max_velocity=2.0 (wandb args of the ncbf-q-safe runs, INDEX.md)"
+  }
+}

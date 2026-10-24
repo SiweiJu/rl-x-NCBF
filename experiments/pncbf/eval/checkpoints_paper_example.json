@@ -1,0 +1,16 @@
+[
+  {
+    "label": "ours_h25_s42",
+    "path": "/home/ju/repo/pncbf/paper_models/ours/q-safe-H-gamma_0.405_seed_42_H_25.model",
+    "method": "ours_h25",
+    "train_seed": 42,
+    "shield": true,
+    "env_args": [
+      "--environment.ncbf_use_policy_observations=True",
+      "--environment.env_curriculum_level_success_episode_return=8",
+      "--environment.command.max_velocity_per_m_factor=2.0",
+      "--environment.command.clip_max_velocity=2.0"
+    ],
+    "algo_args": []
+  }
+]
