@@ -81,4 +81,5 @@ def get_config(algorithm_name):
     config.eval_sweep.save_episodes = True
     config.eval_sweep.paper_shield = "train"
     config.eval_sweep.initial_command_zero_prob = 1.0
+    config.eval_sweep.skip_existing = False
     return config

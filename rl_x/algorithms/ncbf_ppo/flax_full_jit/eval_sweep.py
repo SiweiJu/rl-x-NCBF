@@ -37,6 +37,12 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+try:
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf_targets import episode_first_step
+except ImportError:  # paper-code branches (ncbf-q, ncbf-q-fixed) share this file but have no ncbf_targets module
+    def episode_first_step(env_state):
+        return env_state.info_episode_store["episode_step"] == 0
+
 
 rlx_logger = logging.getLogger("rl_x")
 
@@ -110,7 +116,8 @@ class MultistepAgent:
         m = self.model
         safe_action, constraint_active, delta_u, _ = m.batched_ncbf_safety_layer(
             action, env_state.next_observation, env_state.last_action, env_state.last_state, latent_z,
-            jnp.asarray(1.0, dtype=action.dtype), m._ncbf_params_stack(m.ncbf_state.params))
+            jnp.asarray(1.0, dtype=action.dtype), m._ncbf_params_stack(m.ncbf_state.params),
+            episode_first_step(env_state))
         safe_action, constraint_active, delta_u, _ = m._bypass_post_drop_safety_layer(
             action, safe_action, constraint_active, delta_u, {}, env_state.next_observation)
         return safe_action, constraint_active, delta_u
@@ -158,12 +165,33 @@ class PaperAgent:
             safe_action, delta, delta_u, _, _ = self._cpu_test_shield(action, obs, env_state.last_action, obs, params_stack)
             last_action_zero = jnp.all(env_state.last_action == 0.0, axis=-1)
             return safe_action, (delta > 0.0) & ~last_action_zero, delta_u
-        safe_action, constraint_active, delta_u = m.batched_ncbf_safety_layer(
-            action, env_state.next_observation, env_state.last_action, env_state.last_state, params_stack)
+        args = (action, env_state.next_observation, env_state.last_action, env_state.last_state, params_stack)
+        if "first_step_prev_value" in m.config.algorithm.ncbf:  # ncbf-q-fixed (T06a): F1 shield switch
+            args = args + (episode_first_step(env_state),)
+        safe_action, constraint_active, delta_u = m.batched_ncbf_safety_layer(*args)
         return safe_action, constraint_active, delta_u
 
 
+class PolicyOnlyAgent:
+    """Plain Gaussian-MLP policies without a shield (ppo_lagrangian, cpo): mode A only."""
+
+    use_safety_layer = False
+
+    def __init__(self, model):
+        self.model = model
+
+    def policy(self, env_state):
+        m = self.model
+        action_mean, _ = m.policy.apply(m.policy_state.params, env_state.next_observation)
+        return m.get_processed_action(action_mean), None
+
+    def shield(self, env_state, action, aux):
+        raise ValueError("PolicyOnlyAgent has no shield (deployment mode B is not available)")
+
+
 def make_agent(model, paper_shield="train"):
+    if getattr(model, "eval_sweep_policy_only", False):
+        return PolicyOnlyAgent(model)
     return MultistepAgent(model) if hasattr(model, "encoder_state") else PaperAgent(model, paper_shield)
 
 
@@ -200,19 +228,21 @@ def read_sweep_config(config):
         "initial_command_zero_prob": float(get("initial_command_zero_prob", 1.0)),
         "paper_shield": get("paper_shield", "train"),
         "checkpoint_source": get("checkpoint_source", ""),
+        "skip_existing": bool(get("skip_existing", False)),
         "save_episodes": bool(get("save_episodes", True)),
     }
     for name in sweep["perturbations"]:
         if name not in PERTURBATIONS:
             raise ValueError(f"eval_sweep.perturbations: unknown '{name}', expected {PERTURBATIONS}")
-    if sweep["deployment_mode"] not in ("A", "B"):
-        raise ValueError("eval_sweep.deployment_mode must be A (policy only) or B (policy + shield)")
+    modes = [m.strip() for m in sweep["deployment_mode"].split(",") if m.strip()]
+    if not modes or any(m not in ("A", "B") for m in modes):
+        raise ValueError("eval_sweep.deployment_mode must be A (policy only), B (policy + shield) or a list like A,B")
     if sweep["noise_std_mode"] not in ("absolute", "action_range_fraction"):
         raise ValueError("eval_sweep.noise_std_mode must be absolute or action_range_fraction")
     if sweep["noise_point"] not in ("pre_shield", "post_shield"):
         raise ValueError("eval_sweep.noise_point must be pre_shield or post_shield")
-    if sweep["push_impl"] not in ("env", "eval_loop"):
-        raise ValueError("eval_sweep.push_impl must be env or eval_loop")
+    if sweep["push_impl"] not in ("env", "env_traced", "eval_loop"):
+        raise ValueError("eval_sweep.push_impl must be env, env_traced or eval_loop")
     return sweep
 
 
@@ -259,12 +289,15 @@ def apply_initial_commands(env, env_state, key, zero_prob):
 
 
 def make_episode_runner(env, agent, deployment_mode, noise_point="pre_shield", loop_pushes=False,
-                        push_scale_joints=False, success_threshold_steps=250, horizon=None):
+                        push_scale_joints=False, success_threshold_steps=250, horizon=None, traced_env_pushes=False):
     """jitted run(env_state, noise_key, push_key, noise_prob, noise_std[A], push_prob, push_scale) -> per-env dict.
 
     Every env runs exactly one episode of `horizon` steps (later auto-reset episodes are ignored).
     `loop_pushes=True` applies pushes here (traced probability/scale, before the env step); otherwise the env applies
     its own pushes (probability/magnitude fixed when the env step is traced).
+    `traced_env_pushes=True` (push_impl=env_traced): the env applies its own pushes, with push_prob/push_scale traced
+    into its sampling/perturbation functions while `run` is traced, so one compile serves all push points. Call
+    jax.clear_caches() before the first call (the env's inner jits must be retraced inside `run`).
     """
     horizon = int(horizon or env.horizon)
     use_shield = deployment_mode == "B"
@@ -348,7 +381,16 @@ def make_episode_runner(env, agent, deployment_mode, noise_point="pre_shield", l
             "noise_prob": jnp.asarray(noise_prob, jnp.float32), "noise_std": jnp.asarray(noise_std, jnp.float32),
             "push_prob": jnp.asarray(push_prob, jnp.float32), "push_scale": jnp.asarray(push_scale, jnp.float32),
         }
-        (_, stats), _ = jax.lax.scan(step, (env_state, stats), jnp.arange(horizon))
+        if traced_env_pushes:
+            scaled = _scaled_perturbation_function(perturbation_function, stats["push_scale"], push_scale_joints)
+            attrs = {name: getattr(scaled, name) for name in ("trunk_velocity_clip_mass_factor", "trunk_velocity_clip_limit",
+                                                             "max_joint_velocity", "max_joint_position")}
+            stats["push_prob"] = jnp.zeros_like(stats["push_prob"])  # no eval-loop pushes; the env pushes
+            with _patched_attributes(env.domain_randomization_perturbation_sampling_function, probability=jnp.asarray(push_prob, jnp.float32)), \
+                    _patched_attributes(perturbation_function, **attrs):
+                (_, stats), _ = jax.lax.scan(step, (env_state, stats), jnp.arange(horizon))
+        else:
+            (_, stats), _ = jax.lax.scan(step, (env_state, stats), jnp.arange(horizon))
         for name in ("alive", "noise_key", "push_key", "noise_prob", "noise_std", "push_prob", "push_scale"):
             stats.pop(name)
         return stats
@@ -448,9 +490,17 @@ def command_key(seed):
 
 
 def run_eval_sweep(model, sweep=None):
-    """Run the sweep for a loaded model (PPO of this branch or of the paper code). Returns the list of summaries."""
+    """Run the sweep for a loaded model (PPO of this branch or of the paper code). Returns the list of summaries.
+    `deployment_mode` may list several modes ("B,A"); they run one after the other in this process (one model load)."""
+    sweep = sweep or read_sweep_config(model.config)
+    summaries = []
+    for mode in [m.strip() for m in sweep["deployment_mode"].split(",") if m.strip()]:
+        summaries.extend(_run_eval_sweep_one_mode(model, dict(sweep, deployment_mode=mode)))
+    return summaries
+
+
+def _run_eval_sweep_one_mode(model, sweep):
     env, config = model.env, model.config
-    sweep = sweep or read_sweep_config(config)
     agent = make_agent(model, sweep["paper_shield"])
     if sweep["deployment_mode"] == "B" and not agent.use_safety_layer:
         raise ValueError("deployment_mode=B needs algorithm.ncbf.use_safety_layer=True (the shield is a no-op otherwise).")
@@ -468,14 +518,15 @@ def run_eval_sweep(model, sweep=None):
     noise_std = jnp.asarray(noise_std_vector(env, sweep))
     zero_std = jnp.zeros_like(noise_std)
     loop_pushes = sweep["push_impl"] == "eval_loop"
+    traced_env = sweep["push_impl"] == "env_traced"
     head_names = getattr(env, "ncbf_target_names", None)
     commit = _git_commit()
     rlx_logger.info(f"Eval sweep code: rl_x from {RL_X_PATH}, commit {commit}")
 
     def env_push_settings(perturbation, p):
         """(env-internal push probability, scale) for push_impl=env; the env step is retraced for each value."""
-        if loop_pushes:
-            return 0.0, 1.0
+        if loop_pushes or traced_env:
+            return 0.0, 1.0  # one runner; probability/scale are run() arguments
         if perturbation == "push":
             return p, sweep["push_scale"]
         return background_push_prob, 1.0
@@ -491,13 +542,16 @@ def run_eval_sweep(model, sweep=None):
             runners.clear()
         runners[env_setting] = make_episode_runner(
             env, agent, sweep["deployment_mode"], sweep["noise_point"], loop_pushes,
-            sweep["push_scale_joints"], sweep["success_threshold_steps"])
+            sweep["push_scale_joints"], sweep["success_threshold_steps"], traced_env_pushes=traced_env)
         return runners[env_setting], True
 
     summaries = []
     rlx_logger.info(f"Eval sweep: {env.nr_envs} envs x 1 episode ({env.horizon} steps), mode {sweep['deployment_mode']}, "
                     f"terrain {sweep['terrain_label']}, push_impl {sweep['push_impl']}, out {sweep['out_dir']}")
     for perturbation, p, seed in sweep_points(sweep):
+        if sweep["skip_existing"] and os.path.exists(os.path.join(point_dir(sweep, perturbation, p, seed), "eval_summary.json")):
+            rlx_logger.info(f"[skip] {point_dir(sweep, perturbation, p, seed)} exists")
+            continue
         env_prob, env_scale = env_push_settings(perturbation, p)
         scaled = _scaled_perturbation_function(perturbation_function, env_scale, sweep["push_scale_joints"])
         attrs = {name: getattr(scaled, name) for name in ("trunk_velocity_clip_mass_factor", "trunk_velocity_clip_limit",
@@ -505,9 +559,9 @@ def run_eval_sweep(model, sweep=None):
         with _patched_attributes(sampling_function, probability=env_prob), _patched_attributes(perturbation_function, **attrs):
             run, includes_compile = get_runner((env_prob, env_scale))
             if perturbation == "action_noise":
-                noise_prob, push_prob, push_scale = p, (background_push_prob if loop_pushes else 0.0), 1.0
+                noise_prob, push_prob, push_scale = p, (background_push_prob if (loop_pushes or traced_env) else 0.0), 1.0
             else:
-                noise_prob, push_prob, push_scale = 0.0, (p if loop_pushes else 0.0), sweep["push_scale"]
+                noise_prob, push_prob, push_scale = 0.0, (p if (loop_pushes or traced_env) else 0.0), sweep["push_scale"]
             reset_key, noise_key, push_key = eval_keys(seed)
             start = time.time()
             env_state = env.reset(jax.random.split(reset_key, env.nr_envs), True)
@@ -520,7 +574,7 @@ def run_eval_sweep(model, sweep=None):
                                      shield_used=sweep["deployment_mode"] == "B")
         if not loop_pushes:
             summary["push_events_per_episode"] = None  # env-internal pushes are not counted
-        ncbf_config = config.algorithm.ncbf
+        ncbf_config = config.algorithm.get("ncbf", None)  # None for the constrained baselines (no shield)
         summary.update({
             "checkpoint": sweep["checkpoint_source"] or config.runner.get("load_model", None),
             "checkpoint_label": sweep["checkpoint_label"],
@@ -534,16 +588,17 @@ def run_eval_sweep(model, sweep=None):
             "eval_seed": seed,
             "deployment_mode": sweep["deployment_mode"],
             "use_safety_layer": sweep["deployment_mode"] == "B",
-            "gamma_c": float(ncbf_config.gamma_c),
-            "eta_cbf": float(ncbf_config.eta_cbf),
-            "H": int(ncbf_config.get("H", -1)),
+            "algorithm": config.algorithm.name,
+            "gamma_c": float(ncbf_config.gamma_c) if ncbf_config is not None else None,
+            "eta_cbf": float(ncbf_config.eta_cbf) if ncbf_config is not None else None,
+            "H": int(ncbf_config.get("H", -1)) if ncbf_config is not None else None,
             "protocol": {
                 "noise_prob": noise_prob,
                 "noise_std": sweep["noise_std"], "noise_std_mode": sweep["noise_std_mode"],
                 "noise_std_per_joint": [float(v) for v in np.asarray(noise_std)],
                 "noise_point": sweep["noise_point"],
                 "push_impl": sweep["push_impl"],
-                "push_prob": p if perturbation == "push" else (background_push_prob if loop_pushes else env_prob),
+                "push_prob": p if perturbation == "push" else (background_push_prob if (loop_pushes or traced_env) else env_prob),
                 "push_scale": sweep["push_scale"] if perturbation == "push" else 1.0,
                 "push_scale_joints": sweep["push_scale_joints"],
                 "background_push_prob": background_push_prob,
