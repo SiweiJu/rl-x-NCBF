@@ -172,7 +172,26 @@ class PaperAgent:
         return safe_action, constraint_active, delta_u
 
 
+class PolicyOnlyAgent:
+    """Plain Gaussian-MLP policies without a shield (ppo_lagrangian, cpo): mode A only."""
+
+    use_safety_layer = False
+
+    def __init__(self, model):
+        self.model = model
+
+    def policy(self, env_state):
+        m = self.model
+        action_mean, _ = m.policy.apply(m.policy_state.params, env_state.next_observation)
+        return m.get_processed_action(action_mean), None
+
+    def shield(self, env_state, action, aux):
+        raise ValueError("PolicyOnlyAgent has no shield (deployment mode B is not available)")
+
+
 def make_agent(model, paper_shield="train"):
+    if getattr(model, "eval_sweep_policy_only", False):
+        return PolicyOnlyAgent(model)
     return MultistepAgent(model) if hasattr(model, "encoder_state") else PaperAgent(model, paper_shield)
 
 
@@ -555,7 +574,7 @@ def _run_eval_sweep_one_mode(model, sweep):
                                      shield_used=sweep["deployment_mode"] == "B")
         if not loop_pushes:
             summary["push_events_per_episode"] = None  # env-internal pushes are not counted
-        ncbf_config = config.algorithm.ncbf
+        ncbf_config = config.algorithm.get("ncbf", None)  # None for the constrained baselines (no shield)
         summary.update({
             "checkpoint": sweep["checkpoint_source"] or config.runner.get("load_model", None),
             "checkpoint_label": sweep["checkpoint_label"],
@@ -569,9 +588,10 @@ def _run_eval_sweep_one_mode(model, sweep):
             "eval_seed": seed,
             "deployment_mode": sweep["deployment_mode"],
             "use_safety_layer": sweep["deployment_mode"] == "B",
-            "gamma_c": float(ncbf_config.gamma_c),
-            "eta_cbf": float(ncbf_config.eta_cbf),
-            "H": int(ncbf_config.get("H", -1)),
+            "algorithm": config.algorithm.name,
+            "gamma_c": float(ncbf_config.gamma_c) if ncbf_config is not None else None,
+            "eta_cbf": float(ncbf_config.eta_cbf) if ncbf_config is not None else None,
+            "H": int(ncbf_config.get("H", -1)) if ncbf_config is not None else None,
             "protocol": {
                 "noise_prob": noise_prob,
                 "noise_std": sweep["noise_std"], "noise_std_mode": sweep["noise_std_mode"],

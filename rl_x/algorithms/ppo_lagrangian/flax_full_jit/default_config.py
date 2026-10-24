@@ -48,4 +48,9 @@ def get_config(algorithm_name):
     config.lagrangian.pid_delta_p_ema_alpha = 0.95
     config.lagrangian.pid_delta_d_ema_alpha = 0.95
 
+    # Perturbation-sweep evaluation (runner.mode=test), same keys as ncbf_ppo; see
+    # rl_x/algorithms/ncbf_ppo/flax_full_jit/eval_sweep.py and experiments/pncbf/eval/run_eval_sweep.py.
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.default_config import get_config as get_ncbf_ppo_config
+    config.eval_sweep = get_ncbf_ppo_config("ncbf_ppo.flax_full_jit").eval_sweep
+
     return config

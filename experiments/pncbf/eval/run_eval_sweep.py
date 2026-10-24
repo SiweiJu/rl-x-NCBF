@@ -11,6 +11,8 @@ perturbations (action noise, push) at every sampling probability and eval seed i
 Checkpoints come from a JSON list (--checkpoints_file) or --checkpoint label=path (repeatable). JSON entries:
     {"label": "ours_h25_s1", "path": ".../models/latest.model", "method": "ours_h25", "train_seed": 1,
      "shield": true, "env_args": [...], "algo_args": ["--algorithm.ncbf.gamma_c=5", ...]}
+optional "algorithm" (default ncbf_ppo.flax_full_jit; ppo_lagrangian.flax_full_jit / cpo.flax_full_jit are evaluated
+policy-only, mode A, shield defaults to false).
 `env_args` must reproduce the training env (not stored in the checkpoint); `algo_args` must give the shield's
 runtime parameters (gamma_c, eta_cbf, ... are not restored from the checkpoint). Mode B is skipped for entries
 with "shield": false.
@@ -34,6 +36,7 @@ from pathlib import Path
 
 EXPERIMENTS_DIR = Path(__file__).resolve().parents[2]
 REPO_DIR = EXPERIMENTS_DIR.parent
+NCBF_ALGORITHM = "ncbf_ppo.flax_full_jit"
 DEFAULT_PROTOCOL = Path(__file__).resolve().parent / "protocol_default.json"
 
 
@@ -56,6 +59,9 @@ def load_checkpoints(args):
     if not entries:
         raise SystemExit("No checkpoints: pass --checkpoints_file or --checkpoint label=path")
     for entry in entries:
+        entry.setdefault("algorithm", NCBF_ALGORITHM)
+        if entry["algorithm"] != NCBF_ALGORITHM:
+            entry.setdefault("shield", False)  # ppo_lagrangian / cpo: policy only, mode A
         entry.setdefault("method", "")
         entry.setdefault("train_seed", -1)
         entry.setdefault("shield", True)
@@ -131,7 +137,7 @@ def job_command(job, protocol, out_dir, python):
     sp = protocol["sampling_probs"]
     cmd = [
         python, "experiment.py",
-        "--algorithm.name=ncbf_ppo.flax_full_jit",
+        f"--algorithm.name={entry['algorithm']}",
         "--environment.name=ncbf_mujoco.robot_locomotion.mjx",
         "--runner.mode=test",
         f"--runner.load_model={entry['path']}",
@@ -143,9 +149,9 @@ def job_command(job, protocol, out_dir, python):
         f"--environment.terrain.type={job['terrain_type']}",
         f"--environment.episode_length_in_seconds={protocol['episode_length_in_seconds']}",
         *protocol.get("env_args", []), *entry["env_args"],
-        *(shield_args_from_checkpoint(entry.get("source_path", entry["path"])) if entry.get("shield_args_from_checkpoint", True) else []),
+        *(shield_args_from_checkpoint(entry.get("source_path", entry["path"])) if entry.get("shield_args_from_checkpoint", True) and entry["algorithm"] == NCBF_ALGORITHM else []),
         *protocol.get("algo_args", []), *entry["algo_args"],
-        f"--algorithm.ncbf.use_safety_layer={'B' in job['mode']}",
+        *([f"--algorithm.ncbf.use_safety_layer={'B' in job['mode']}"] if entry["algorithm"] == NCBF_ALGORITHM else []),
         "--algorithm.eval_sweep.enabled=True",
         f"--algorithm.eval_sweep.out_dir={out_dir}",
         f"--algorithm.eval_sweep.checkpoint_label={entry['label']}",
