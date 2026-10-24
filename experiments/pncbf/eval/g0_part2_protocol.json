@@ -1,0 +1,38 @@
+{
+  "_comment": "G0 part 2 protocol = recover's G0 part 1 settings (T03_T05.md 'G0 part 1', paper_eval_sweep.sh) on the MJX eval. See T04.md section 8.",
+  "nr_envs": 1024,
+  "episode_length_in_seconds": 5,
+  "terrains": {"flat": "plane", "hfield": "hfield_diverse"},
+  "modes": ["B", "A"],
+  "modes_in_one_job": true,
+  "perturbations": ["action_noise", "push"],
+  "sampling_probs": {
+    "action_noise": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    "push": [0.002, 0.005, 0.01, 0.015, 0.02]
+  },
+  "eval_seeds": [0],
+  "noise_std": 1.0,
+  "noise_std_mode": "absolute",
+  "noise_point": "pre_shield",
+  "push_scale": 2.0,
+  "push_scale_joints": true,
+  "push_impl": "env_traced",
+  "background_push_prob": -1.0,
+  "success_threshold_steps": 250,
+  "initial_command_zero_prob": 0.25,
+  "paper_shield": "cpu_test",
+  "skip_existing": true,
+  "env_args": ["--environment.train_robot=unitree_go2"],
+  "algo_args": [],
+  "_evidence": {
+    "episode_length_in_seconds": "G0 part 1 uses EP_SECONDS=5 (T03_T05.md); 5 s = 250 steps = the 250-step success threshold, so success = not terminated",
+    "noise_std": "committed test() semantics, N(0,1) on the processed action (G0 part 1)",
+    "push_scale / push_scale_joints": "PERT_SCALE=2 on all four perturbation bounds (paper_eval_sweep.sh)",
+    "push_impl": "env_traced = the env's own pushes with probability/scale traced into one compile; equal to push_impl=env (test_env_traced_pushes_equal_env_pushes)",
+    "background_push_prob": "-1 = env config 0.002 during the noise suites (CPU env default, also in G0 part 1)",
+    "initial_command_zero_prob": "10 sequential 5 s episodes per process in G0 part 1: P(episode starts at command 0) ~ sum_k exp(-0.5 k)/10 = 0.25",
+    "paper_shield": "cpu_test for paper-code checkpoints (paper, T05, T06a) = the test() shield of G0 part 1; T06b uses its own v2 shield with the trained parameters",
+    "gamma_c": "as trained: run_eval_sweep.py passes the checkpoint's shield parameters (shield_args_from_checkpoint)",
+    "eval_seeds": "one fixed seed for all groups (paired); 1024 envs per point (G0 part 1: 10 episodes x 1 eval seed)"
+  }
+}

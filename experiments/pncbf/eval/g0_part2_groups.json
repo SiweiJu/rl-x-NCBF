@@ -1,0 +1,52 @@
+{
+  "_comment": "G0 part 2: paper checkpoints, T05 (paper code retrain), T06a (paper code + fixes), T06b (pncbf-v2) on the MJX eval with recover's G0 part 1 settings. Paths are on IAS. Methods are canonical: ppo, ncbf_h1, ours_h25 (T06b ii_h25 -> ours_h25). T06a has no PPO (T05 PPO is reused, the fixes do not touch PPO).",
+  "out_dir": "/home/ju/repo/pncbf/g0_part2/out",
+  "protocol": "g0_part2_protocol.json",
+  "groups": {
+    "paper": {
+      "tree": "/home/ju/repo/pncbf/eval-paper",
+      "conda_env": "rlx-ncbf-q",
+      "env_args": ["--environment.ncbf_use_policy_observations=True", "--environment.env_curriculum_level_success_episode_return=8",
+                   "--environment.command.max_velocity_per_m_factor=2.0", "--environment.command.clip_max_velocity=2.0"],
+      "methods": {
+        "ppo":      {"seeds": [1042, 1142, 1242, 1342, 1442], "shield": false, "path": "/home/ju/repo/pncbf/paper_models/no_safety/no_safe_seed_{seed}.model"},
+        "ncbf_h1":  {"seeds": [42, 43, 44, 145, 245], "shield": true, "path": "/home/ju/repo/pncbf/paper_models/NCBF/q-safe-H-gamma_0.405_seed_{seed}_H_1.model"},
+        "ours_h25": {"seeds": [42, 43, 44, 145, 245], "shield": true, "path": "/home/ju/repo/pncbf/paper_models/ours/q-safe-H-gamma_0.405_seed_{seed}_H_25.model"}
+      }
+    },
+    "T05": {
+      "tree": "/home/ju/repo/pncbf/eval-paper",
+      "conda_env": "rlx-ncbf-q",
+      "env_args": ["--environment.ncbf_use_policy_observations=True", "--environment.env_curriculum_level_success_episode_return=8",
+                   "--environment.command.max_velocity_per_m_factor=2.0", "--environment.command.clip_max_velocity=2.0"],
+      "methods": {
+        "ppo":      {"seeds": [1042, 1142, 1242, 1342, 1442], "shield": false, "path": "/home/ju/repo/pncbf/paper-cacffe7/experiments/runs/pncbf-2026/T05-paper-ppo/T05_paper_ppo_seed_{seed}/models/latest.model"},
+        "ncbf_h1":  {"seeds": [42, 43, 44, 145, 245], "shield": true, "path": "/home/ju/repo/pncbf/paper-cacffe7/experiments/runs/pncbf-2026/T05-paper-ncbf_h1/T05_paper_ncbf_h1_seed_{seed}/models/latest.model"},
+        "ours_h25": {"seeds": [42, 43, 44, 145, 245], "shield": true, "path": "/home/ju/repo/pncbf/paper-cacffe7/experiments/runs/pncbf-2026/T05-paper-ours_h25/T05_paper_ours_h25_seed_{seed}/models/latest.model"}
+      }
+    },
+    "T06a": {
+      "tree": "/home/ju/repo/pncbf/eval-fixed",
+      "conda_env": "rlx-ncbf-q",
+      "env_args": ["--environment.ncbf_use_policy_observations=True", "--environment.env_curriculum_level_success_episode_return=8",
+                   "--environment.command.max_velocity_per_m_factor=2.0", "--environment.command.clip_max_velocity=2.0"],
+      "methods": {
+        "ncbf_h1":  {"seeds": [42, 43, 44, 145, 245], "shield": true, "path": "/home/ju/repo/pncbf/paper-fixed-bdd62eb/experiments/runs/pncbf-2026/T06a-paper-fixed-ncbf_h1/T06a_fixed_ncbf_h1_seed_{seed}/models/latest.model"},
+        "ours_h25": {"seeds": [42, 43, 44, 145, 245], "shield": true, "path": "/home/ju/repo/pncbf/paper-fixed-bdd62eb/experiments/runs/pncbf-2026/T06a-paper-fixed-ours_h25/T06a_fixed_ours_h25_seed_{seed}/models/latest.model"}
+      }
+    },
+    "T06b": {
+      "tree": "/home/ju/repo/pncbf/eval-g0",
+      "conda_env": "rlx-ncbf",
+      "env_args": ["--environment.ncbf_use_policy_observations=True", "--environment.env_curriculum_level_success_episode_return=8",
+                   "--environment.command.max_velocity_per_m_factor=2.0", "--environment.command.clip_max_velocity=2.0",
+                   "--environment.command.velocity_ratio=(1.0,1.0,1.0)", "--environment.termination.height_curriculum_scaled=True",
+                   "--environment.termination.body_tilt_threshold=1000000.0"],
+      "methods": {
+        "ppo":      {"seeds": [1042, 1142, 1242, 1342, 1442], "shield": false, "path": "/home/ju/repo/pncbf/v2-62d1616/experiments/runs/pncbf-2026/T06-fixed-ppo/T06_fixed_ppo_seed_{seed}/models/latest.model"},
+        "ncbf_h1":  {"seeds": [42, 43, 44, 145, 245], "shield": true, "path": "/home/ju/repo/pncbf/v2-62d1616/experiments/runs/pncbf-2026/T06-fixed-ncbf_h1/T06_fixed_ncbf_h1_seed_{seed}/models/latest.model"},
+        "ours_h25": {"seeds": [42, 43, 44, 145, 245], "shield": true, "path": "/home/ju/repo/pncbf/v2-62d1616/experiments/runs/pncbf-2026/T06-fixed-ii_h25/T06_fixed_ii_h25_seed_{seed}/models/latest.model"}
+      }
+    }
+  }
+}

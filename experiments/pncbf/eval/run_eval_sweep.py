@@ -65,6 +65,30 @@ def load_checkpoints(args):
     return entries
 
 
+# Shield parameters that PPO.load (pncbf-v2) does not restore from the checkpoint ("runtime" parameters).
+RUNTIME_NCBF_KEYS = ("gamma_c", "eta_cbf", "lambda_slack", "action_clipping", "max_delta_u", "safety_layer_projection",
+                     "safety_layer_min_grad_norm", "safety_layer_std_coeff_start", "safety_layer_std_coeff_final",
+                     "gamma_c_scaled_by_eta", "tighten_uncertainty", "slack_uncertainty", "first_step_prev_value")
+
+
+def shield_args_from_checkpoint(path):
+    """--algorithm.ncbf.<key>=<value> for the shield parameters stored in the checkpoint's config (gamma_c etc. as
+    trained). Paper-code checkpoints get them restored anyway; for pncbf-v2 checkpoints PPO.load skips them."""
+    import zipfile
+    try:
+        config = json.load(zipfile.ZipFile(path).open("config_algorithm.json"))
+    except Exception as e:
+        print(f"[warn] cannot read config_algorithm.json from {path}: {e}")
+        return []
+    ncbf = config.get("ncbf", {})
+    out = []
+    for key in RUNTIME_NCBF_KEYS:
+        if key in ncbf:
+            value = ncbf[key]
+            out.append(f"--algorithm.ncbf.{key}={value}")
+    return out
+
+
 def load_protocol(args):
     protocol = json.loads(Path(args.protocol).read_text())
     overrides = {
@@ -74,6 +98,7 @@ def load_protocol(args):
         "push_scale": args.push_scale, "push_impl": args.push_impl, "background_push_prob": args.background_push_prob,
         "initial_command_zero_prob": args.initial_command_zero_prob,
         "paper_shield": args.paper_shield,
+        "skip_existing": args.skip_existing,
     }
     protocol.update({k: v for k, v in overrides.items() if v is not None})
     if args.sampling_probs is not None:
@@ -87,9 +112,12 @@ def build_jobs(checkpoints, protocol):
     jobs = []
     for entry in checkpoints:
         for terrain_label, terrain_type in protocol["terrains"].items():
-            for mode in protocol["modes"]:
-                if mode == "B" and not entry["shield"]:
-                    continue
+            modes = [m for m in protocol["modes"] if m != "B" or entry["shield"]]
+            if protocol.get("modes_in_one_job", False):
+                if modes:  # one process per checkpoint x terrain: load once, run the modes one after the other
+                    jobs.append({"checkpoint": entry, "terrain_label": terrain_label, "terrain_type": terrain_type, "mode": ",".join(modes)})
+                continue
+            for mode in modes:
                 jobs.append({"checkpoint": entry, "terrain_label": terrain_label, "terrain_type": terrain_type, "mode": mode})
     return jobs
 
@@ -110,13 +138,14 @@ def job_command(job, protocol, out_dir, python):
         f"--algorithm.eval_sweep.checkpoint_source={entry.get('source_path', entry['path'])}",
         "--runner.track_console=False", "--runner.track_tb=False", "--runner.track_wandb=False", "--runner.save_model=False",
         "--runner.project_name=pncbf_eval", "--runner.exp_name=eval_sweep",
-        f"--runner.run_name={entry['label']}_{job['terrain_label']}_mode{job['mode']}",
+        f"--runner.run_name={entry['label']}_{job['terrain_label']}_mode{job['mode'].replace(',', '')}",
         f"--environment.nr_envs={protocol['nr_envs']}",
         f"--environment.terrain.type={job['terrain_type']}",
         f"--environment.episode_length_in_seconds={protocol['episode_length_in_seconds']}",
         *protocol.get("env_args", []), *entry["env_args"],
+        *(shield_args_from_checkpoint(entry.get("source_path", entry["path"])) if entry.get("shield_args_from_checkpoint", True) else []),
         *protocol.get("algo_args", []), *entry["algo_args"],
-        f"--algorithm.ncbf.use_safety_layer={job['mode'] == 'B'}",
+        f"--algorithm.ncbf.use_safety_layer={'B' in job['mode']}",
         "--algorithm.eval_sweep.enabled=True",
         f"--algorithm.eval_sweep.out_dir={out_dir}",
         f"--algorithm.eval_sweep.checkpoint_label={entry['label']}",
@@ -137,6 +166,7 @@ def job_command(job, protocol, out_dir, python):
         f"--algorithm.eval_sweep.success_threshold_steps={int(protocol['success_threshold_steps'])}",
         f"--algorithm.eval_sweep.paper_shield={protocol.get('paper_shield', 'train')}",
         f"--algorithm.eval_sweep.initial_command_zero_prob={float(protocol.get('initial_command_zero_prob', 1.0))}",
+        f"--algorithm.eval_sweep.skip_existing={bool(protocol.get('skip_existing', False))}",
         f"--algorithm.eval_sweep.push_scale_joints={bool(protocol.get('push_scale_joints', False))}",
     ]
     return cmd
@@ -159,9 +189,10 @@ def main():
     ap.add_argument("--noise_std_mode", default=None, choices=["absolute", "action_range_fraction"])
     ap.add_argument("--noise_point", default=None, choices=["pre_shield", "post_shield"])
     ap.add_argument("--push_scale", type=float, default=None)
-    ap.add_argument("--push_impl", default=None, choices=["env", "eval_loop"])
+    ap.add_argument("--push_impl", default=None, choices=["env", "env_traced", "eval_loop"])
     ap.add_argument("--background_push_prob", type=float, default=None)
     ap.add_argument("--initial_command_zero_prob", type=float, default=None)
+    ap.add_argument("--skip_existing", action="store_true", default=None, help="skip points whose summary exists (requeue)")
     ap.add_argument("--paper_shield", default=None, choices=["train", "cpu_test"], help="paper-code checkpoints only")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--task_index", type=int, default=None, help="run only this job (slurm array index)")

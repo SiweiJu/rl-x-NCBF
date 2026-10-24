@@ -137,7 +137,7 @@ def test_summary_statistics():
 NR_ENVS = 4
 
 
-def _make_model(tmp_path, use_safety_layer=True, **sweep_overrides):
+def _make_model(tmp_path, use_safety_layer=True, ncbf_overrides=None, env_overrides=None, **sweep_overrides):
     from rl_x.algorithms.ncbf_ppo.flax_full_jit.default_config import get_config as get_algorithm_config
     from rl_x.algorithms.ncbf_ppo.flax_full_jit.ppo import PPO
     from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.create_env import create_env
@@ -158,6 +158,10 @@ def _make_model(tmp_path, use_safety_layer=True, **sweep_overrides):
     algorithm.eval_sweep.checkpoint_label = "untrained"
     for key, value in sweep_overrides.items():
         algorithm.eval_sweep[key] = value
+    for key, value in (ncbf_overrides or {}).items():
+        algorithm.ncbf[key] = value
+    for key, value in (env_overrides or {}).items():
+        env_config.termination[key] = value
     runner = get_runner_config("test")
     config = config_dict.ConfigDict({"environment": env_config, "algorithm": algorithm, "runner": runner})
     env = create_env(config)
@@ -264,3 +268,42 @@ def test_initial_commands(model):
     np.testing.assert_array_equal(np.asarray(same.internal_state["goal_velocities"]), zero)
     sampled = eval_sweep.apply_initial_commands(env, state, jax.random.PRNGKey(1), 0.0)
     assert np.any(np.asarray(sampled.internal_state["goal_velocities"]) != zero)
+
+
+def test_single_head_termination_window_model(tmp_path):
+    """T06b checkpoints: label_source=termination_window gives one critic head while the env has several safety
+    targets (height, tilt). The sweep must run in both modes and keep the per-target event rates of the env."""
+    t06b = _make_model(tmp_path, ncbf_overrides={"label_source": "termination_window", "gamma_c": 0.6, "eta_cbf": 0.5,
+                                                 "max_delta_u": 0.0, "tighten_uncertainty": "none"},
+                       env_overrides={"height_curriculum_scaled": True, "body_tilt_threshold": 1e6})
+    assert t06b.env.ncbf_target_indices.shape[0] > 1
+    for mode in ("A", "B"):
+        sweep = eval_sweep.read_sweep_config(t06b.config)
+        sweep.update({"out_dir": str(tmp_path / mode), "perturbations": ["action_noise"],
+                      "sampling_probs": {"action_noise": [0.5], "push": []}, "deployment_mode": mode})
+        (summary,) = eval_sweep.run_eval_sweep(t06b, sweep)
+        assert 0.0 <= summary["success_rate"] <= 1.0
+        assert "unsafe_height" in summary["event_rates"]
+        if mode == "B":
+            assert summary["intervention_rate"] is not None
+
+
+def test_env_traced_pushes_equal_env_pushes(model, tmp_path):
+    """push_impl=env_traced (one compile, traced push probability/scale) gives exactly the episodes of push_impl=env
+    (env step retraced per point with python constants)."""
+    results = {}
+    for impl in ("env", "env_traced"):
+        sweep = eval_sweep.read_sweep_config(model.config)
+        sweep.update({"out_dir": str(tmp_path / impl), "perturbations": ["push", "action_noise"],
+                      "sampling_probs": {"push": [0.0, 0.3], "action_noise": [0.2]}, "eval_seeds": [0],
+                      "push_impl": impl, "push_scale": 2.0, "push_scale_joints": True, "background_push_prob": 0.1,
+                      "deployment_mode": "A"})
+        eval_sweep.run_eval_sweep(model, sweep)
+        results[impl] = {str(f.parent.relative_to(tmp_path / impl)): dict(np.load(f)) for f in (tmp_path / impl).rglob("eval_episodes.npz")}
+    assert results["env"].keys() == results["env_traced"].keys() and len(results["env"]) == 3
+    for point, episodes in results["env"].items():
+        for name in ("return", "length", "terminated"):
+            np.testing.assert_allclose(results["env_traced"][point][name], episodes[name], rtol=1e-5, atol=1e-5, err_msg=f"{point} {name}")
+    # the pushes do something
+    assert not np.allclose(results["env"]["untrained/push_flat/mode_A/sp_0/seed_0"]["return"],
+                           results["env"]["untrained/push_flat/mode_A/sp_0p3/seed_0"]["return"])
