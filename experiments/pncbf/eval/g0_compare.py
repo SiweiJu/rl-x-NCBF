@@ -12,7 +12,7 @@ Comparisons (rows = method x setting x x):
   T06b vs T05      pncbf-v2 vs paper code
 z = (a - b) / sqrt(se_a^2 + se_b^2), with each se floored at 0.01 (independent sets of trained models).
 
-    python3 g0_compare.py /home/ju/repo/pncbf/g0_part2/out --g0_part1 <recover>/paper_eval/results/g0_part1_ep5.csv \
+    <conda rlx-ncbf>/bin/python g0_compare.py /home/ju/repo/pncbf/g0_part2/out --g0_part1 <recover>/paper_eval/results/g0_part1_ep5.csv \
         --out /home/ju/repo/pncbf/g0_part2/results
 writes g0_part2_points.csv (aggregates), g0_part2_compare.csv (all comparisons) and g0_part2_compare.md.
 """
@@ -103,6 +103,7 @@ def main():
 
     comparisons = list(COMPARISONS) + ([("T05", "G0part1_CPU", "T05 (MJX) vs paper checkpoints on the CPU path")] if references else [])
     xs = sorted({(k[3], k[4]) for k in list(points) + list(references)}, key=lambda t: (SETTING_ORDER.index(t[0]) if t[0] in SETTING_ORDER else 9, t[1]))
+    summary_lines = []
     rows, md = [], ["# G0 part 2 comparisons", "", f"source: `{args.root}`; z = Δ / sqrt(se_a² + se_b²), se floored at {SE_FLOOR}", ""]
     for table_mode in ("paper", "A"):
         for a, b, title in comparisons:
@@ -110,8 +111,10 @@ def main():
                 continue
             md += [f"## {a} vs {b}: {title} ({'mode B for shield methods, A for PPO' if table_mode == 'paper' else 'mode A, all methods'})", "",
                    "| method | setting | x | " + a + " | " + b + " | Δ | z |", "|---|---|---|---|---|---|---|"]
-            zs = []
+            zs, by_method = [], defaultdict(list)
             for method in METHOD_ORDER:
+                if a == "T06a" and method == "ppo":
+                    continue  # T06a reuses T05's PPO: identical by construction
                 mode = paper_setting_mode(method) if table_mode == "paper" else "A"
                 for setting, x in xs:
                     pa, pb = get(a, method, mode, setting, x), get(b, method, mode, setting, x)
@@ -121,13 +124,21 @@ def main():
                     delta = pa["success"] - pb["success"]
                     z = delta / np.sqrt(sea ** 2 + seb ** 2)
                     zs.append(z)
+                    by_method[method].append((z, delta))
                     rows.append([table_mode, a, b, method, mode, setting, x, pa["n"], pb["n"], f"{pa['success']:.4f}", f"{pa['success_se']:.4f}",
                                  f"{pb['success']:.4f}", f"{pb['success_se']:.4f}", f"{delta:+.4f}", f"{z:+.2f}"])
                     md.append(f"| {method} | {setting} | {x:g} | {pa['success']:.3f} ± {pa['success_se']:.3f} (n={pa['n']}) | "
                               f"{pb['success']:.3f} ± {pb['success_se']:.3f} (n={pb['n']}) | {delta:+.3f} | {z:+.1f} |")
             if zs:
                 zs = np.array(zs)
-                md += ["", f"{len(zs)} points: |z| ≤ 1: {np.mean(np.abs(zs) <= 1):.0%}, |z| ≤ 2: {np.mean(np.abs(zs) <= 2):.0%}, median z {np.median(zs):+.2f}", ""]
+                md += ["", f"{len(zs)} points: |z| ≤ 1: {np.mean(np.abs(zs) <= 1):.0%}, |z| ≤ 2: {np.mean(np.abs(zs) <= 2):.0%}, median z {np.median(zs):+.2f}"]
+                for method, values in by_method.items():
+                    z_m, d_m = np.array([v[0] for v in values]), np.array([v[1] for v in values])
+                    line = (f"- {method}: {len(z_m)} points, |z| ≤ 2: {np.mean(np.abs(z_m) <= 2):.0%}, median z {np.median(z_m):+.2f}, "
+                            f"mean Δ success {d_m.mean():+.3f}")
+                    md.append(line)
+                    summary_lines.append(f"{a} vs {b} [{table_mode}] {line[2:]}")
+                md.append("")
             else:
                 md += ["", "(no data yet)", ""]
     with open(out / "g0_part2_compare.csv", "w", newline="") as f:
@@ -136,6 +147,7 @@ def main():
         w.writerows(rows)
     (out / "g0_part2_compare.md").write_text("\n".join(md) + "\n")
     print(f"{len(points)} aggregated points, {len(rows)} comparison rows -> {out}/g0_part2_compare.md")
+    print("\n".join(summary_lines))
 
 
 if __name__ == "__main__":
