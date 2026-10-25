@@ -82,6 +82,28 @@ source: `/home/ju/repo/pncbf/g0_part2/out`; z = Δ / sqrt(se_a² + se_b²), se f
 
 | method | setting | x | T06a | T05 | Δ | z |
 |---|---|---|---|---|---|---|
+| ncbf_h1 | action_noise_flat | 0 | 0.994 ± 0.001 (n=5) | 0.993 ± 0.001 (n=5) | +0.001 | +0.1 |
+| ncbf_h1 | action_noise_flat | 0.2 | 0.979 ± 0.003 (n=5) | 0.966 ± 0.004 (n=5) | +0.013 | +0.9 |
+| ncbf_h1 | action_noise_flat | 0.4 | 0.931 ± 0.014 (n=5) | 0.888 ± 0.002 (n=5) | +0.043 | +2.5 |
+| ncbf_h1 | action_noise_flat | 0.6 | 0.854 ± 0.030 (n=5) | 0.742 ± 0.005 (n=5) | +0.112 | +3.5 |
+| ncbf_h1 | action_noise_flat | 0.8 | 0.739 ± 0.050 (n=5) | 0.558 ± 0.011 (n=5) | +0.180 | +3.5 |
+| ncbf_h1 | action_noise_flat | 1 | 0.614 ± 0.063 (n=5) | 0.384 ± 0.010 (n=5) | +0.230 | +3.6 |
+| ncbf_h1 | action_noise_hfield | 0 | 0.963 ± 0.004 (n=5) | 0.963 ± 0.005 (n=5) | +0.001 | +0.0 |
+| ncbf_h1 | action_noise_hfield | 0.2 | 0.935 ± 0.014 (n=5) | 0.919 ± 0.002 (n=5) | +0.016 | +0.9 |
+| ncbf_h1 | action_noise_hfield | 0.4 | 0.861 ± 0.019 (n=5) | 0.811 ± 0.007 (n=5) | +0.051 | +2.4 |
+| ncbf_h1 | action_noise_hfield | 0.6 | 0.754 ± 0.042 (n=5) | 0.623 ± 0.004 (n=5) | +0.130 | +3.0 |
+| ncbf_h1 | action_noise_hfield | 0.8 | 0.640 ± 0.046 (n=5) | 0.464 ± 0.014 (n=5) | +0.176 | +3.7 |
+| ncbf_h1 | action_noise_hfield | 1 | 0.509 ± 0.060 (n=5) | 0.304 ± 0.017 (n=5) | +0.205 | +3.3 |
+| ncbf_h1 | push_flat | 0.002 | 0.963 ± 0.005 (n=5) | 0.960 ± 0.005 (n=5) | +0.003 | +0.2 |
+| ncbf_h1 | push_flat | 0.005 | 0.913 ± 0.013 (n=5) | 0.904 ± 0.007 (n=5) | +0.009 | +0.6 |
+| ncbf_h1 | push_flat | 0.01 | 0.834 ± 0.020 (n=5) | 0.813 ± 0.010 (n=5) | +0.021 | +0.9 |
+| ncbf_h1 | push_flat | 0.015 | 0.756 ± 0.032 (n=5) | 0.742 ± 0.011 (n=5) | +0.014 | +0.4 |
+| ncbf_h1 | push_flat | 0.02 | 0.685 ± 0.038 (n=5) | 0.667 ± 0.018 (n=5) | +0.018 | +0.4 |
+| ncbf_h1 | push_hfield | 0.002 | 0.927 ± 0.006 (n=5) | 0.913 ± 0.003 (n=5) | +0.014 | +1.0 |
+| ncbf_h1 | push_hfield | 0.005 | 0.856 ± 0.014 (n=5) | 0.847 ± 0.007 (n=5) | +0.009 | +0.5 |
+| ncbf_h1 | push_hfield | 0.01 | 0.744 ± 0.022 (n=5) | 0.745 ± 0.007 (n=5) | -0.001 | -0.0 |
+| ncbf_h1 | push_hfield | 0.015 | 0.665 ± 0.033 (n=5) | 0.659 ± 0.011 (n=5) | +0.006 | +0.2 |
+| ncbf_h1 | push_hfield | 0.02 | 0.598 ± 0.038 (n=5) | 0.581 ± 0.013 (n=5) | +0.017 | +0.4 |
 | ours_h25 | action_noise_flat | 0 | 0.994 ± 0.001 (n=5) | 0.981 ± 0.003 (n=5) | +0.013 | +0.9 |
 | ours_h25 | action_noise_flat | 0.2 | 0.976 ± 0.001 (n=5) | 0.821 ± 0.022 (n=5) | +0.155 | +6.3 |
 | ours_h25 | action_noise_flat | 0.4 | 0.919 ± 0.005 (n=5) | 0.668 ± 0.033 (n=5) | +0.251 | +7.2 |
@@ -105,7 +127,8 @@ source: `/home/ju/repo/pncbf/g0_part2/out`; z = Δ / sqrt(se_a² + se_b²), se f
 | ours_h25 | push_hfield | 0.015 | 0.654 ± 0.024 (n=5) | 0.452 ± 0.030 (n=5) | +0.202 | +5.3 |
 | ours_h25 | push_hfield | 0.02 | 0.586 ± 0.021 (n=5) | 0.366 ± 0.034 (n=5) | +0.220 | +5.6 |
 
-22 points: |z| ≤ 1: 5%, |z| ≤ 2: 9%, median z +5.44
+44 points: |z| ≤ 1: 32%, |z| ≤ 2: 36%, median z +3.46
+- ncbf_h1: 22 points, |z| ≤ 2: 64%, median z +0.91, mean Δ success +0.058
 - ours_h25: 22 points, |z| ≤ 2: 9%, median z +5.44, mean Δ success +0.184
 
 ## T06b vs T05: pncbf-v2 vs paper code (mode B for shield methods, A for PPO)
@@ -340,6 +363,28 @@ source: `/home/ju/repo/pncbf/g0_part2/out`; z = Δ / sqrt(se_a² + se_b²), se f
 
 | method | setting | x | T06a | T05 | Δ | z |
 |---|---|---|---|---|---|---|
+| ncbf_h1 | action_noise_flat | 0 | 0.993 ± 0.001 (n=5) | 0.994 ± 0.001 (n=5) | -0.001 | -0.1 |
+| ncbf_h1 | action_noise_flat | 0.2 | 0.971 ± 0.006 (n=5) | 0.966 ± 0.003 (n=5) | +0.005 | +0.3 |
+| ncbf_h1 | action_noise_flat | 0.4 | 0.906 ± 0.018 (n=5) | 0.894 ± 0.005 (n=5) | +0.012 | +0.6 |
+| ncbf_h1 | action_noise_flat | 0.6 | 0.790 ± 0.034 (n=5) | 0.766 ± 0.006 (n=5) | +0.025 | +0.7 |
+| ncbf_h1 | action_noise_flat | 0.8 | 0.648 ± 0.052 (n=5) | 0.606 ± 0.010 (n=5) | +0.042 | +0.8 |
+| ncbf_h1 | action_noise_flat | 1 | 0.498 ± 0.060 (n=5) | 0.428 ± 0.008 (n=5) | +0.070 | +1.1 |
+| ncbf_h1 | action_noise_hfield | 0 | 0.966 ± 0.004 (n=5) | 0.963 ± 0.005 (n=5) | +0.002 | +0.2 |
+| ncbf_h1 | action_noise_hfield | 0.2 | 0.926 ± 0.011 (n=5) | 0.916 ± 0.006 (n=5) | +0.011 | +0.7 |
+| ncbf_h1 | action_noise_hfield | 0.4 | 0.817 ± 0.028 (n=5) | 0.800 ± 0.005 (n=5) | +0.017 | +0.6 |
+| ncbf_h1 | action_noise_hfield | 0.6 | 0.695 ± 0.044 (n=5) | 0.654 ± 0.010 (n=5) | +0.041 | +0.9 |
+| ncbf_h1 | action_noise_hfield | 0.8 | 0.532 ± 0.049 (n=5) | 0.490 ± 0.011 (n=5) | +0.042 | +0.8 |
+| ncbf_h1 | action_noise_hfield | 1 | 0.396 ± 0.053 (n=5) | 0.351 ± 0.009 (n=5) | +0.044 | +0.8 |
+| ncbf_h1 | push_flat | 0.002 | 0.963 ± 0.005 (n=5) | 0.958 ± 0.002 (n=5) | +0.005 | +0.4 |
+| ncbf_h1 | push_flat | 0.005 | 0.913 ± 0.013 (n=5) | 0.904 ± 0.007 (n=5) | +0.009 | +0.5 |
+| ncbf_h1 | push_flat | 0.01 | 0.836 ± 0.019 (n=5) | 0.819 ± 0.009 (n=5) | +0.017 | +0.8 |
+| ncbf_h1 | push_flat | 0.015 | 0.760 ± 0.030 (n=5) | 0.750 ± 0.012 (n=5) | +0.011 | +0.3 |
+| ncbf_h1 | push_flat | 0.02 | 0.685 ± 0.034 (n=5) | 0.670 ± 0.013 (n=5) | +0.015 | +0.4 |
+| ncbf_h1 | push_hfield | 0.002 | 0.921 ± 0.007 (n=5) | 0.916 ± 0.005 (n=5) | +0.005 | +0.4 |
+| ncbf_h1 | push_hfield | 0.005 | 0.849 ± 0.015 (n=5) | 0.846 ± 0.010 (n=5) | +0.003 | +0.2 |
+| ncbf_h1 | push_hfield | 0.01 | 0.748 ± 0.023 (n=5) | 0.738 ± 0.011 (n=5) | +0.010 | +0.4 |
+| ncbf_h1 | push_hfield | 0.015 | 0.662 ± 0.030 (n=5) | 0.660 ± 0.009 (n=5) | +0.002 | +0.1 |
+| ncbf_h1 | push_hfield | 0.02 | 0.604 ± 0.038 (n=5) | 0.586 ± 0.011 (n=5) | +0.018 | +0.5 |
 | ours_h25 | action_noise_flat | 0 | 0.994 ± 0.000 (n=5) | 0.985 ± 0.002 (n=5) | +0.009 | +0.6 |
 | ours_h25 | action_noise_flat | 0.2 | 0.968 ± 0.003 (n=5) | 0.969 ± 0.005 (n=5) | -0.001 | -0.1 |
 | ours_h25 | action_noise_flat | 0.4 | 0.894 ± 0.007 (n=5) | 0.925 ± 0.009 (n=5) | -0.031 | -2.2 |
@@ -363,7 +408,8 @@ source: `/home/ju/repo/pncbf/g0_part2/out`; z = Δ / sqrt(se_a² + se_b²), se f
 | ours_h25 | push_hfield | 0.015 | 0.652 ± 0.019 (n=5) | 0.450 ± 0.029 (n=5) | +0.202 | +5.9 |
 | ours_h25 | push_hfield | 0.02 | 0.578 ± 0.016 (n=5) | 0.377 ± 0.028 (n=5) | +0.201 | +6.3 |
 
-22 points: |z| ≤ 1: 18%, |z| ≤ 2: 18%, median z +0.28
+44 points: |z| ≤ 1: 57%, |z| ≤ 2: 59%, median z +0.49
+- ncbf_h1: 22 points, |z| ≤ 2: 100%, median z +0.49, mean Δ success +0.018
 - ours_h25: 22 points, |z| ≤ 2: 18%, median z +0.28, mean Δ success +0.018
 
 ## T06b vs T05: pncbf-v2 vs paper code (mode A, all methods)
