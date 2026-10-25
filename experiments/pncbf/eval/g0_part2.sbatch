@@ -20,6 +20,8 @@ set -euo pipefail
 HERE="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 [[ -f "${HERE}/g0_part2.py" ]] || HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
+# node /tmp was cleaned under a running task once (181408_54/55 on gn06: XLA and checkpoint temp files vanished): use our own dir
+export TMPDIR="${G0_TMP_ROOT:-/home/ju/repo/pncbf/g0_part2/tmp}/${SLURM_JOB_ID:-$$}"; mkdir -p "$TMPDIR"; trap 'rm -rf "$TMPDIR"' EXIT
 echo "=== $(date -Is) job ${SLURM_JOB_ID:-none} (${SLURM_ARRAY_JOB_ID:-}_${SLURM_ARRAY_TASK_ID:-}) host=$(hostname) gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1) qos=${SLURM_JOB_QOS:-?} SLURM_RESTART_COUNT=${SLURM_RESTART_COUNT:-0} driver commit $(git -C "${HERE}" rev-parse --short HEAD)"
 read -r -a g0_args <<< "${G0_ARGS:-}"
 start=$(date +%s)
