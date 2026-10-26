@@ -1,0 +1,151 @@
+{
+  "_comment": "T06c bisect (experiments/pncbf/T06c/t06c.sbatch @ 3608236): Go2 flat PPO, shield off, evaluated like T06b PPO in g0_part2_groups.json (same env args, mode A is the metric). The T06c switches are read from each checkpoint's config. Group names must not contain '_' (g0_compare splits labels on it). T06c-b-no-minor is optional (array 15-17); missing checkpoints are refused by --list_jobs.",
+  "out_dir": "/home/ju/repo/pncbf/g0_part2/out",
+  "protocol": "g0_part2_protocol.json",
+  "groups": {
+    "T06c-a": {
+      "tree": "/home/ju/repo/pncbf/regress-3608236",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/regress-3608236/experiments/runs/pncbf-2026/T06c-a/T06c_a_seed_{seed}/models/latest.model"
+        }
+      }
+    },
+    "T06c-b": {
+      "tree": "/home/ju/repo/pncbf/regress-3608236",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/regress-3608236/experiments/runs/pncbf-2026/T06c-b/T06c_b_seed_{seed}/models/latest.model"
+        }
+      }
+    },
+    "T06c-b-no-lnpol": {
+      "tree": "/home/ju/repo/pncbf/regress-3608236",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/regress-3608236/experiments/runs/pncbf-2026/T06c-b-no-lnpol/T06c_b-no-lnpol_seed_{seed}/models/latest.model"
+        }
+      }
+    },
+    "T06c-b-no-lnval": {
+      "tree": "/home/ju/repo/pncbf/regress-3608236",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/regress-3608236/experiments/runs/pncbf-2026/T06c-b-no-lnval/T06c_b-no-lnval_seed_{seed}/models/latest.model"
+        }
+      }
+    },
+    "T06c-b-no-gae": {
+      "tree": "/home/ju/repo/pncbf/regress-3608236",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/regress-3608236/experiments/runs/pncbf-2026/T06c-b-no-gae/T06c_b-no-gae_seed_{seed}/models/latest.model"
+        }
+      }
+    },
+    "T06c-b-no-minor": {
+      "tree": "/home/ju/repo/pncbf/regress-3608236",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/regress-3608236/experiments/runs/pncbf-2026/T06c-b-no-minor/T06c_b-no-minor_seed_{seed}/models/latest.model"
+        }
+      }
+    }
+  }
+}
