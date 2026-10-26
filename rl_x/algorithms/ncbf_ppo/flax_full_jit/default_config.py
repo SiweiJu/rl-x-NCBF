@@ -35,6 +35,11 @@ def get_config(algorithm_name):
     config.use_history_latent_for_policy = False
     config.use_history_latent_for_value = False
     config.use_decoder_output_for_policy = False
+    # T06c (paper_compat.py): PPO-side differences to the paper code (ncbf-q); defaults = pncbf-v2, paper values in comments
+    config.policy_layer_norm = False  # paper True: LayerNorm after the first hidden layer of the policy
+    config.value_layer_norm = False  # paper True: same for the value network
+    config.gae_stop_at_truncation = True  # paper False: GAE recursion cut only at terminations, not at truncations
+    config.policy_logstd_clip = True  # paper False: no clip of the policy log-std to [-5, 2]
     config.evaluation_and_save_frequency = 17301504  # -1 to disable
     config.evaluation_active = True
 
@@ -86,6 +91,7 @@ def get_config(algorithm_name):
     config.ncbf.tighten_uncertainty = "total"  # sigma used in beta*sigma: none, total, epistemic, aleatoric
     config.ncbf.slack_uncertainty = "none"  # sigma scaling the QP slack (paper eq. 13): none (legacy 1/lambda), total, epistemic, aleatoric
     config.ncbf.anticipation_through_shield = False  # True: backprop the anticipation loss through the shield (paper); False: stop_gradient
+    config.ncbf.anticipation_style = "mean_action"  # T06c; paper "sampled_action": shield the sampled rollout action, mean over action dims
 
     config.ncbf_buffer = config_dict.ConfigDict()
     # note this is in unit of nr_steps * nr_envs, with default params this is 128* 200 * 4096 = 104,857,600 transitions

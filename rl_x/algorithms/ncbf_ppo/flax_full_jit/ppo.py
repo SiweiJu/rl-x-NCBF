@@ -40,6 +40,12 @@ from rl_x.algorithms.ncbf_ppo.flax_full_jit.ncbf import (
     split_ncbf_output,
 )
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.history_encoder import get_history_encoder
+from rl_x.algorithms.ncbf_ppo.flax_full_jit.paper_compat import (
+    ANTICIPATION_STYLES,
+    anticipation_squared_error,
+    gae_advantages,
+    maybe_clip_logstd,
+)
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.decoder import get_decoder
 
 
@@ -344,6 +350,12 @@ class PPO:
         self.ncbf_lipschitz_state_only = bool(config.algorithm.ncbf.get("lipschitz_state_only", True))
         self.ncbf_gamma_c_scaled_by_eta = bool(config.algorithm.ncbf.get("gamma_c_scaled_by_eta", True))
         self.anticipation_through_shield = bool(config.algorithm.ncbf.get("anticipation_through_shield", False))
+        # T06c switches (paper_compat.py): default = pncbf-v2 behavior.
+        self.anticipation_style = config.algorithm.ncbf.get("anticipation_style", "mean_action")
+        if self.anticipation_style not in ANTICIPATION_STYLES:
+            raise ValueError(f"algorithm.ncbf.anticipation_style must be one of {ANTICIPATION_STYLES}")
+        self.gae_stop_at_truncation = bool(config.algorithm.get("gae_stop_at_truncation", True))
+        self.policy_logstd_clip = bool(config.algorithm.get("policy_logstd_clip", True))
         # Critic labels: "env_targets" = min of the env safety indicator dims over s_{t+1..t+H}, one head each;
         # "termination_window" = paper code (ncbf-q): one head, no termination at transitions t..t+H;
         # ncbf.safe_fall_H >= 0 switches the latter to the SafeFall rule (branch ncbf-q-safefall).
@@ -603,7 +615,7 @@ class PPO:
                 observation_input = self._mask_policy_ball_plate_inputs(observation)
                 policy_decoder_output = self._get_policy_decoder_output(decoder_state.params, latent_z, last_state, last_action, observation)
                 action_mean, action_logstd = self.policy.apply(policy_state.params, observation_input, latent_z, policy_decoder_output)
-                action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
+                action_logstd = maybe_clip_logstd(action_logstd, self.policy_logstd_clip)
                 action_std = jnp.exp(action_logstd)
                 action = action_mean + action_std * jax.random.normal(subkey, shape=action_mean.shape)
                 log_prob = (-0.5 * ((action - action_mean) / action_std) ** 2 - 0.5 * jnp.log(
@@ -1035,11 +1047,6 @@ class PPO:
                         terminations = terminations.astype(jnp.float32)
                         dones = dones.astype(jnp.float32)
 
-                        def compute_advantages(carry, t):
-                            prev_advantage = carry[0]
-                            advantage = delta[t] + self.gamma * self.gae_lambda * (1.0 - dones[t]) * prev_advantage
-                            return (advantage,), advantage
-
                         next_history_stacks = jnp.roll(history_stacks, -1, axis=2)
                         next_history_stacks = next_history_stacks.at[:, :, -1, :].set(next_states)
                         next_latents = jax.lax.stop_gradient(encoder_state.apply_fn(encoder_state.params, next_history_stacks))
@@ -1047,9 +1054,9 @@ class PPO:
                         next_decoder_output = self._get_policy_decoder_output(decoder_state.params, next_latents, states, env_actions, next_states)
                         next_values = self.critic.apply(critic_state.params, next_state_inputs, next_latents, next_decoder_output).squeeze(-1)
                         delta = rewards + self.gamma * next_values * (1.0 - terminations) - values
-                        init_advantages = delta[-1]
-                        _, advantages = jax.lax.scan(compute_advantages, (init_advantages,), jnp.arange(self.nr_steps - 2, -1, -1))
-                        advantages = jnp.concatenate([advantages[::-1], jnp.array([init_advantages])])
+                        # T06c: algorithm.gae_stop_at_truncation=False reproduces the paper code (cut at terminations only)
+                        advantages = gae_advantages(delta, terminations, dones, self.gamma, self.gae_lambda,
+                                                    self.gae_stop_at_truncation)
                         returns = advantages + values
                         return advantages, returns
 
@@ -1083,7 +1090,7 @@ class PPO:
                         )
                         state_input_b = self._mask_policy_ball_plate_inputs(state_b)
                         action_mean, action_logstd = self.policy.apply(policy_params, state_input_b, latent_b, decoder_output_b)
-                        action_logstd = jnp.clip(action_logstd, -5.0, 2.0)
+                        action_logstd = maybe_clip_logstd(action_logstd, self.policy_logstd_clip)
                         action_std = jnp.exp(action_logstd)
                         new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
                         new_log_prob = new_log_prob.sum(1)
@@ -1108,8 +1115,11 @@ class PPO:
                         # anticipation loss
                         if self.anticipation_coef > 0.0:
                             action_mean_processed = self.get_processed_action(action_mean)
+                            # T06c: the paper code shielded the sampled rollout action (anticipation_style=sampled_action)
+                            anticipation_input = (self.get_processed_action(action_b) if self.anticipation_style == "sampled_action"
+                                                  else action_mean_processed)
                             safe_action_b, constraint_active_b, delta_u_b, safety_diagnostics_b = self.batched_ncbf_safety_layer(
-                                action_mean_processed,
+                                anticipation_input,
                                 state_b,
                                 last_action_b,
                                 last_state_b,
@@ -1119,7 +1129,7 @@ class PPO:
                                 first_step_b,
                             )
                             safe_action_b, _, _, _ = self._bypass_post_drop_safety_layer(
-                                action_mean_processed,
+                                anticipation_input,
                                 safe_action_b,
                                 constraint_active_b,
                                 delta_u_b,
@@ -1127,11 +1137,11 @@ class PPO:
                                 state_b,
                             )
                             safe_action_is_finite = jnp.all(jnp.isfinite(safe_action_b), axis=-1)
-                            safe_action_b = jnp.where(safe_action_is_finite[:, None], safe_action_b, action_mean_processed)
+                            safe_action_b = jnp.where(safe_action_is_finite[:, None], safe_action_b, anticipation_input)
                             if not self.anticipation_through_shield:
                                 # Behavior cloning toward the shielded action (no gradient through the shield).
                                 safe_action_b = jax.lax.stop_gradient(safe_action_b)
-                            anticipation_loss = 0.5 * jnp.mean(jnp.sum(jnp.square(action_mean_processed - safe_action_b), axis=-1))
+                            anticipation_loss = 0.5 * jnp.mean(anticipation_squared_error(action_mean_processed, safe_action_b, self.anticipation_style))
                             anticipation_nonfinite_rate = 1.0 - jnp.mean(safe_action_is_finite.astype(jnp.float32))
                         else:
                             anticipation_loss = jnp.asarray(0.0, dtype=pg_loss.dtype)
@@ -1358,7 +1368,7 @@ class PPO:
                         initial_policy_latent,
                         initial_policy_decoder_output,
                     )
-                    initial_action_logstd = jnp.clip(initial_action_logstd, -5.0, 2.0)
+                    initial_action_logstd = maybe_clip_logstd(initial_action_logstd, self.policy_logstd_clip)
                     initial_action_std = jnp.exp(initial_action_logstd)
                     initial_new_log_probs = -0.5 * ((batch_actions - initial_action_mean) / initial_action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - initial_action_logstd
                     initial_new_log_probs = initial_new_log_probs.sum(1)
@@ -1486,7 +1496,7 @@ class PPO:
                         optimization_metrics["lr/adaptive_lr_multiplier"] = next_lr / (current_lr + 1e-12)
                     optimization_metrics["lr/learning_rate"] = policy_state.opt_state[1].hyperparams["learning_rate"]
                     optimization_metrics["v_value/explained_variance"] = 1 - jnp.var(returns - values) / (jnp.var(returns) + 1e-8)
-                    optimization_metrics["policy/std_dev"] = jnp.mean(jnp.exp(jnp.clip(policy_state.params["params"]["policy_logstd"], -5.0, 2.0)))
+                    optimization_metrics["policy/std_dev"] = jnp.mean(jnp.exp(maybe_clip_logstd(policy_state.params["params"]["policy_logstd"], self.policy_logstd_clip)))
                     optimization_metrics["policy_ratio/initial_approx_kl"] = initial_approx_kl
                     optimization_metrics["policy_ratio/initial_abs_logratio"] = initial_abs_logratio
                     optimization_metrics["rollout/advantages_mean"] = jnp.mean(advantages)

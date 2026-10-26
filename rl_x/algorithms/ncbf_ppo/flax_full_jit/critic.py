@@ -14,7 +14,8 @@ def get_critic(config, env):
     use_decoder_output = getattr(config.algorithm, "use_decoder_output_for_policy", False)
 
     if observation_space_type == ObservationSpaceType.FLAT_VALUES:
-        return Critic(critic_observation_indices, config.algorithm.hidden_layers, use_history_latent, use_decoder_output)
+        return Critic(critic_observation_indices, config.algorithm.hidden_layers, use_history_latent, use_decoder_output,
+                      bool(getattr(config.algorithm, "value_layer_norm", False)))
 
 
 class Critic(nn.Module):
@@ -22,6 +23,7 @@ class Critic(nn.Module):
     hidden_layers: Sequence[int]
     use_history_latent: bool = False
     use_decoder_output: bool = False
+    layer_norm: bool = False  # T06c: paper code (ncbf-q) had LayerNorm after the first hidden layer
 
     @nn.compact
     def __call__(self, x, history_latent=None, decoder_output=None):
@@ -35,8 +37,10 @@ class Critic(nn.Module):
                 raise ValueError("Critic was configured with use_decoder_output_for_policy=True, but no decoder_output was passed.")
             x = jnp.concatenate([x, decoder_output], axis=-1)
         critic = x
-        for hidden_units in self.hidden_layers:
+        for layer_index, hidden_units in enumerate(self.hidden_layers):
             critic = nn.Dense(hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(critic)
+            if self.layer_norm and layer_index == 0:
+                critic = nn.LayerNorm()(critic)
             critic = nn.elu(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1), bias_init=constant(0.0))(critic)
         return critic

@@ -17,7 +17,8 @@ def get_policy(config, env):
     use_decoder_output = getattr(config.algorithm, "use_decoder_output_for_policy", False)
 
     if action_space_type == ActionSpaceType.CONTINUOUS and observation_space_type == ObservationSpaceType.FLAT_VALUES:
-        return (Policy(env.single_action_space.shape, config.algorithm.std_dev, policy_observation_indices, config.algorithm.hidden_layers, use_history_latent, use_decoder_output),
+        return (Policy(env.single_action_space.shape, config.algorithm.std_dev, policy_observation_indices, config.algorithm.hidden_layers, use_history_latent, use_decoder_output,
+                       bool(getattr(config.algorithm, "policy_layer_norm", False))),
                 get_processed_action_function(
                     config.algorithm.action_clipping_and_rescaling,
                     getattr(config.algorithm, "action_clip", 0.0),
@@ -32,6 +33,7 @@ class Policy(nn.Module):
     hidden_layers: Sequence[int]
     use_history_latent: bool = False
     use_decoder_output: bool = False
+    layer_norm: bool = False  # T06c: paper code (ncbf-q) had LayerNorm after the first hidden layer
 
     @nn.compact
     def __call__(self, x, history_latent=None, decoder_output=None):
@@ -45,8 +47,10 @@ class Policy(nn.Module):
                 raise ValueError("Policy was configured with use_decoder_output_for_policy=True, but no decoder_output was passed.")
             x = jnp.concatenate([x, decoder_output], axis=-1)
         policy_mean = x
-        for hidden_units in self.hidden_layers:
+        for layer_index, hidden_units in enumerate(self.hidden_layers):
             policy_mean = nn.Dense(hidden_units, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(policy_mean)
+            if self.layer_norm and layer_index == 0:
+                policy_mean = nn.LayerNorm()(policy_mean)
             policy_mean = nn.elu(policy_mean)
         policy_mean = nn.Dense(np.prod(self.as_shape).item(), kernel_init=orthogonal(0.01), bias_init=constant(0.0))(policy_mean)
         policy_logstd = self.param("policy_logstd", constant(jnp.log(self.std_dev)), (1, np.prod(self.as_shape).item()))
