@@ -144,6 +144,8 @@ def main(argv=None):
         log(f"check: max |last_action(x-_(t+1)) - u_chosen_t| = {la_err:.3g} on {len(rows)} rows")
     del nx, nu, nuc, nxi, nxm
     dev = WD.to_device(train)
+    for f in ("x_plus", "u_applied", "u_chosen", "xm_vals", "xi_table", "x_minus_next", "x_plus_next", "xi"):
+        train.pop(f, None)     # on the GPU now; the host keeps only the index fields
     held_dev = WD.to_device(held) if held is not None else None
     if held is not None:
         hpos, hneg = WD.split_window_starts(held, args.k_train, args.near_failure_window)

@@ -298,14 +298,39 @@ def load_wmdata(pattern, heldout_patterns=(), max_envs_per_shard=0, seed=0, whic
         groups["heldout" if held else "train"].append((d, m))
     out = {}
     for name in which:
-        parts, info = [], []
+        info, data = [], None
+        sizes = []
+        for d, m in groups[name]:
+            T, N = np.load(os.path.join(d, "done.npy"), mmap_mode="r").shape
+            sizes.append(T * (min(N, max_envs_per_shard) if max_envs_per_shard else N))
+        total, row = int(sum(sizes)), 0
+        sparse = {"xm_rows": [], "xm_vals": [], "xi_table": []}
+        track_off = xi_off = 0
         for i, (d, m) in enumerate(groups[name]):
             part, st = load_wmdata_shard(d, max_envs_per_shard, seed + i)
-            parts.append(part)
+            n = n_rows(part)
+            if data is None:   # preallocate the dense fields once (no 2x peak from a final concatenate)
+                data = {f: np.empty((total,) + part[f].shape[1:], part[f].dtype) for f in part if f not in sparse}
+            for f in data:
+                v = part[f]
+                if f == "track_id":
+                    v = v + track_off
+                elif f == "xi_idx":
+                    v = v + xi_off
+                data[f][row:row + n] = v
+            sparse["xm_rows"].append(part["xm_rows"] + row)
+            sparse["xm_vals"].append(part["xm_vals"])
+            sparse["xi_table"].append(part["xi_table"])
+            track_off += int(part["track_id"].max()) + 1
+            xi_off += len(part["xi_table"])
+            row += n
+            del part
             info.append({"path": d, **{k: m[k] for k in ("checkpoint", "checkpoint_label", "method", "train_seed",
                                                          "split", "setting", "p") if k in m}, **st})
-            log(f"loaded {name} shard {d}: {st}")
-        out[name] = (concat_data(parts) if parts else None, info)
+            log(f"loaded {name} shard {i + 1}/{len(groups[name])} {d}: {st}")
+        if data is not None:
+            data.update({f: np.concatenate(v) for f, v in sparse.items()})
+        out[name] = (data, info)
     return out
 
 
