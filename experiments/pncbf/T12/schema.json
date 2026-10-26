@@ -1,0 +1,687 @@
+{
+ "schema": "pncbf-p1-wmdata/v1",
+ "state": {
+  "dim": 51,
+  "groups": {
+   "joint_pos": [
+    0,
+    12
+   ],
+   "joint_vel": [
+    12,
+    24
+   ],
+   "imu_ang_vel": [
+    24,
+    27
+   ],
+   "projected_gravity": [
+    27,
+    30
+   ],
+   "last_action": [
+    30,
+    42
+   ],
+   "base_lin_vel": [
+    42,
+    45
+   ],
+   "imu_height": [
+    45,
+    46
+   ],
+   "roll_pitch": [
+    46,
+    48
+   ],
+   "base_xy": [
+    48,
+    50
+   ],
+   "base_yaw": [
+    50,
+    51
+   ]
+  },
+  "units": {
+   "joint_pos": "rad (absolute qpos of the actuated joints, not minus nominal)",
+   "joint_vel": "rad/s",
+   "imu_ang_vel": "rad/s, IMU frame (gyro sensordata)",
+   "projected_gravity": "unit vector, IMU frame: R_imu^T (0, 0, -1)",
+   "last_action": "policy action units (the chosen, undelayed action of the previous step; = obs prev-action * 10)",
+   "base_lin_vel": "m/s, trunk-origin linear velocity qvel[0:3] expressed in the IMU frame",
+   "imu_height": "m, IMU site height over the ground (env robot_imu_height_over_ground)",
+   "roll_pitch": "rad, euler 'xyz' of the IMU orientation (env imu_orientation_euler[0:2])",
+   "base_xy": "m, world frame, trunk origin qpos[0:2]",
+   "base_yaw": "rad, world frame, euler 'xyz'[2] of the IMU orientation"
+  },
+  "notes": {
+   "imu_ang_vel": "from data of the last physics substep start; unchanged by shocks (see module doc)",
+   "projected_gravity": "redundant with roll_pitch (g = [sin p, -cos p sin r, -cos p cos r]); kept because the policy reads it",
+   "base_xy": "absolute; use to_window_frame for the window-start frame",
+   "base_yaw": "absolute, wrapped to (-pi, pi]; use to_window_frame"
+  }
+ },
+ "action_dim": 12,
+ "xi": {
+  "dim": 507,
+  "groups": {
+   "body_mass": [
+    0,
+    13
+   ],
+   "body_inertia": [
+    13,
+    52
+   ],
+   "body_ipos": [
+    52,
+    91
+   ],
+   "body_iquat": [
+    91,
+    143
+   ],
+   "body_pos": [
+    143,
+    182
+   ],
+   "body_quat": [
+    182,
+    234
+   ],
+   "imu_site_pos": [
+    234,
+    237
+   ],
+   "foot_geom_size": [
+    237,
+    249
+   ],
+   "jnt_axis": [
+    249,
+    285
+   ],
+   "torque_limit": [
+    285,
+    297
+   ],
+   "jnt_range": [
+    297,
+    321
+   ],
+   "dof_damping": [
+    321,
+    333
+   ],
+   "dof_armature": [
+    333,
+    345
+   ],
+   "jnt_stiffness": [
+    345,
+    357
+   ],
+   "dof_frictionloss": [
+    357,
+    369
+   ],
+   "kp": [
+    369,
+    381
+   ],
+   "kd": [
+    381,
+    393
+   ],
+   "foot_friction": [
+    393,
+    405
+   ],
+   "contact_solref": [
+    405,
+    415
+   ],
+   "foot_solimp": [
+    415,
+    435
+   ],
+   "opt_impratio": [
+    435,
+    436
+   ],
+   "opt_gravity": [
+    436,
+    439
+   ],
+   "opt_density": [
+    439,
+    440
+   ],
+   "opt_viscosity": [
+    440,
+    441
+   ],
+   "nominal_joint_pos": [
+    441,
+    453
+   ],
+   "joint_max_vel": [
+    453,
+    465
+   ],
+   "joint_position_offset": [
+    465,
+    477
+   ],
+   "action_scaling": [
+    477,
+    478
+   ],
+   "dropout_open_mask": [
+    478,
+    490
+   ],
+   "dropout_lock_mask": [
+    490,
+    502
+   ],
+   "delay_mixed": [
+    502,
+    503
+   ],
+   "delay_nr_steps": [
+    503,
+    504
+   ],
+   "curriculum_coeff": [
+    504,
+    505
+   ],
+   "nominal_imu_height": [
+    505,
+    506
+   ],
+   "ground_height": [
+    506,
+    507
+   ]
+  },
+  "units": {
+   "body_mass": "kg, bodies 1..nbody-1",
+   "body_inertia": "kg m^2 (diag, body-major)",
+   "body_ipos": "m (CoM)",
+   "body_iquat": "wxyz",
+   "body_pos": "m",
+   "body_quat": "wxyz",
+   "imu_site_pos": "m",
+   "foot_geom_size": "m (sphere: [0] = radius)",
+   "jnt_axis": "unit vectors of the hinge joints",
+   "torque_limit": "Nm (actuator_forcerange[:, 1])",
+   "jnt_range": "rad, [lo, hi] per hinge joint (locked joints: nominal +- 0.001)",
+   "dof_damping": "",
+   "dof_armature": "",
+   "jnt_stiffness": "",
+   "dof_frictionloss": "",
+   "kp": "Nm/rad (actuator_gainprm[:, 0], 0 for open-dropout joints)",
+   "kd": "Nms/rad (-actuator_biasprm[:, 2])",
+   "foot_friction": "[tangential, torsional, rolling] per foot",
+   "contact_solref": "[timeconst, dampratio] of floor + feet",
+   "foot_solimp": "5 per foot",
+   "opt_impratio": "",
+   "opt_gravity": "m/s^2 (xy randomized too)",
+   "opt_density": "",
+   "opt_viscosity": "",
+   "nominal_joint_pos": "rad (PD target = nominal + action * action_scaling + joint_position_offset)",
+   "joint_max_vel": "rad/s (joint qvel clip after each control step)",
+   "joint_position_offset": "rad (unseen PD target offset)",
+   "action_scaling": "rad per action unit",
+   "dropout_open_mask": "1 = actuator works, 0 = open (no torque)",
+   "dropout_lock_mask": "1 = free, 0 = locked at nominal",
+   "delay_mixed": "1 = per-step random delay in {0..max}",
+   "delay_nr_steps": "fixed delay when not mixed",
+   "curriculum_coeff": "env curriculum (1 in eval)",
+   "nominal_imu_height": "m (termination threshold base)",
+   "ground_height": "m (plane center height)"
+  },
+  "notes": {}
+ },
+ "delay_buffer_shape": [
+  2,
+  12
+ ],
+ "policy_obs": {
+  "dim": 45,
+  "blocks": [
+   "joint_pos",
+   "joint_vel",
+   "last_action",
+   "imu_ang_vel",
+   "command",
+   "projected_gravity"
+  ],
+  "scales": {
+   "joint_pos": "(q - nominal) / 3.14",
+   "joint_vel": "/ 100.0",
+   "last_action": "/ 10.0",
+   "imu_ang_vel": "clip(/ 50.0, -1, 1)",
+   "command": "raw (vx, vy, yaw rate)",
+   "projected_gravity": "raw",
+   "all": "clip +-10.0"
+  },
+  "full_obs_dim": 104,
+  "policy_observation_indices": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24,
+   25,
+   26,
+   27,
+   28,
+   29,
+   30,
+   31,
+   32,
+   33,
+   34,
+   35,
+   51,
+   52,
+   53,
+   54,
+   55,
+   56,
+   57,
+   58,
+   59
+  ]
+ },
+ "dt": 0.02,
+ "margin": {
+  "height_percentage_threshold": 0.8,
+  "height_curriculum_scaled": true,
+  "use_tilt": false,
+  "tilt_threshold": 1000000.0,
+  "use_qvel": true,
+  "qvel_tolerance": 0.001,
+  "height_scale": 0.05,
+  "tilt_scale": 0.2,
+  "qvel_scale": 10.0
+ },
+ "label_horizons": [
+  1,
+  10,
+  25,
+  50
+ ],
+ "layout": "one directory per shard (checkpoint x setting); every field is <name>.npy (np.load(mmap_mode='r'))",
+ "time_major": true,
+ "fields": {
+  "x_plus": {
+   "shape": [
+    "T",
+    "N",
+    "S"
+   ],
+   "dtype": "float32",
+   "doc": "x^+_t: state the policy acted on at t (after the reset if t starts an episode)"
+  },
+  "x_minus_next": {
+   "shape": [
+    "T",
+    "N",
+    "S"
+   ],
+   "dtype": "float32",
+   "doc": "x^-_{t+1}: after physics + qvel clip, before shock / DR (recorded before any reset)"
+  },
+  "x_plus_next": {
+   "shape": [
+    "T",
+    "N",
+    "S"
+   ],
+   "dtype": "float32",
+   "doc": "x^+_{t+1}: after shock / DR, before any reset (= x_plus[t+1] unless done[t])"
+  },
+  "u_policy": {
+   "shape": [
+    "T",
+    "N",
+    "A"
+   ],
+   "dtype": "float32",
+   "doc": "deterministic policy action at t (on the noisy observation obs[t])"
+  },
+  "u_cmd": {
+   "shape": [
+    "T",
+    "N",
+    "A"
+   ],
+   "dtype": "float32",
+   "doc": "action sent to the env = u_policy + action noise (chosen, undelayed; = last_action of x at t+1)"
+  },
+  "u_applied": {
+   "shape": [
+    "T",
+    "N",
+    "A"
+   ],
+   "dtype": "float32",
+   "doc": "u~_t: delayed action the PD controller used = delay_step(delay_buffer[t], u_cmd[t], delay_steps[t])[0]"
+  },
+  "delay_buffer": {
+   "shape": [
+    "T",
+    "N",
+    "B",
+    "A"
+   ],
+   "dtype": "float32",
+   "doc": "env action_history before step t (oldest first)"
+  },
+  "delay_steps": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "int8",
+   "doc": "realized delay of step t (control steps)"
+  },
+  "xi_idx": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "int32",
+   "doc": "row of xi_table active during the physics of step t"
+  },
+  "xi_next_idx": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "int32",
+   "doc": "row of xi_table after the DR step of t (before any reset); differs from xi_idx iff dr_resampled_next"
+  },
+  "command": {
+   "shape": [
+    "T",
+    "N",
+    "3"
+   ],
+   "dtype": "float32",
+   "doc": "velocity command in the observation at t (vx, vy, yaw rate)"
+  },
+  "obs": {
+   "shape": [
+    "T",
+    "N",
+    "O"
+   ],
+   "dtype": "float32",
+   "doc": "policy observation at t as the policy saw it (with observation noise)"
+  },
+  "perturbed_next": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "bool",
+   "doc": "shock (push) between x^-_{t+1} and x^+_{t+1}"
+  },
+  "dr_resampled_next": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "bool",
+   "doc": "DR resampled between x^-_{t+1} and x^+_{t+1}"
+  },
+  "terminated": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "bool",
+   "doc": "transition t ended in a termination (fall / qvel limit)"
+  },
+  "truncated": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "bool",
+   "doc": "transition t hit the episode time limit (and did not terminate)"
+  },
+  "done": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "bool",
+   "doc": "terminated | truncated (the env reset after t)"
+  },
+  "noise_on": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "bool",
+   "doc": "action noise was added at t"
+  },
+  "episode_id": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "int32",
+   "doc": "episode counter per env (0 = first episode of the shard)"
+  },
+  "episode_step": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "int32",
+   "doc": "step index within the episode (0 = first state after a reset; mask this transition, see wm_state doc)"
+  },
+  "margin_next": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "float32",
+   "doc": "wm_state.margin_fall(x_plus_next, xi_table[xi_next_idx]); < 0 iff terminated"
+  },
+  "fail_within": {
+   "shape": [
+    "T",
+    "N",
+    "L"
+   ],
+   "dtype": "bool",
+   "doc": "actual: a termination in transitions t..t+H-1 of the same episode, H in label_horizons"
+  },
+  "fail_within_mask": {
+   "shape": [
+    "T",
+    "N",
+    "L"
+   ],
+   "dtype": "bool",
+   "doc": "label known (failure seen, or H transitions observed before truncation / window end)"
+  },
+  "xi_table": {
+   "shape": [
+    "M",
+    "X"
+   ],
+   "dtype": "float32",
+   "doc": "distinct xi vectors of the shard"
+  },
+  "oracle_t": {
+   "shape": [
+    "P"
+   ],
+   "dtype": "int32",
+   "doc": "decision steps t (index into T)"
+  },
+  "oracle_env": {
+   "shape": [
+    "K"
+   ],
+   "dtype": "int32",
+   "doc": "branched env indices"
+  },
+  "oracle_u0": {
+   "shape": [
+    "P",
+    "K",
+    "A"
+   ],
+   "dtype": "float32",
+   "doc": "first oracle action = policy on the noise-free o(x_plus[t])"
+  },
+  "oracle_u": {
+   "shape": [
+    "P",
+    "K",
+    "H",
+    "A"
+   ],
+   "dtype": "float32",
+   "doc": "oracle actions (index 0 = oracle_u0)"
+  },
+  "oracle_x_plus_next": {
+   "shape": [
+    "P",
+    "K",
+    "H",
+    "S"
+   ],
+   "dtype": "float32",
+   "doc": "oracle states after each branch step (no shocks, so x^+ == x^-)"
+  },
+  "oracle_margin": {
+   "shape": [
+    "P",
+    "K",
+    "H"
+   ],
+   "dtype": "float32",
+   "doc": "margin_fall of oracle_x_plus_next"
+  },
+  "oracle_terminated": {
+   "shape": [
+    "P",
+    "K",
+    "H"
+   ],
+   "dtype": "bool",
+   "doc": "oracle step k terminated (only the first one matters)"
+  },
+  "oracle_truncated": {
+   "shape": [
+    "P",
+    "K",
+    "H"
+   ],
+   "dtype": "bool",
+   "doc": "oracle step k truncated"
+  },
+  "oracle_first_failure": {
+   "shape": [
+    "P",
+    "K"
+   ],
+   "dtype": "int32",
+   "doc": "first terminated step k (0 = the first transition); H if none"
+  },
+  "oracle_fail_within": {
+   "shape": [
+    "P",
+    "K",
+    "L"
+   ],
+   "dtype": "bool",
+   "doc": "oracle: first_failure < H"
+  },
+  "oracle_fail_within_mask": {
+   "shape": [
+    "P",
+    "K",
+    "L"
+   ],
+   "dtype": "bool",
+   "doc": "oracle label known (not truncated before H)"
+  },
+  "oracle_critic_p_safe": {
+   "shape": [
+    "P",
+    "K"
+   ],
+   "dtype": "float32",
+   "doc": "this checkpoint's safety critic: ensemble-mean P(safe) for (obs[t], u_policy[t]) (NaN without critic)"
+  },
+  "oracle_critic_p_safe_std": {
+   "shape": [
+    "P",
+    "K"
+   ],
+   "dtype": "float32",
+   "doc": "ensemble std of the above"
+  },
+  "oracle_critic_p_safe_cmd": {
+   "shape": [
+    "P",
+    "K"
+   ],
+   "dtype": "float32",
+   "doc": "critic P(safe) for (obs[t], u_cmd[t])"
+  },
+  "oracle_obs_full": {
+   "shape": [
+    "P",
+    "K",
+    "F"
+   ],
+   "dtype": "float32",
+   "doc": "full env observation at t (noisy; critic input together with history)"
+  },
+  "oracle_history_stack": {
+   "shape": [
+    "P",
+    "K",
+    "Z",
+    "F"
+   ],
+   "dtype": "float32",
+   "doc": "env history stack at t (input of the history encoder -> latent z of any critic)"
+  }
+ }
+}
