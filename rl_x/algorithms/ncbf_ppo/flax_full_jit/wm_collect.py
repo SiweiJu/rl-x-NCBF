@@ -64,6 +64,9 @@ SHARD_FIELDS = {
     "episode_id": (["T", "N"], "int32", "episode counter per env (0 = first episode of the shard)"),
     "episode_step": (["T", "N"], "int32", "step index within the episode (0 = first state after a reset; mask this transition, see wm_state doc)"),
     "margin_next": (["T", "N"], "float32", "wm_state.margin_fall(x_plus_next, xi_table[xi_next_idx]); < 0 iff terminated"),
+    "margin_height_next": (["T", "N"], "float32", "height term of the termination margin (m); < 0 iff the env's height termination fired"),
+    "margin_qvel_next": (["T", "N"], "float32", "qvel-limit term (m/s); < 0 iff the qvel-limit termination fired"),
+    "margin_physical_next": (["T", "N"], "float32", "wm_state.margin_fall_physical(x_plus_next, xi_next): < 0 = physically fallen (height < frac * nominal or tilt > thr), not a termination"),
     "fail_within": (["T", "N", "L"], "bool", "actual: a termination in transitions t..t+H-1 of the same episode, H in label_horizons"),
     "fail_within_mask": (["T", "N", "L"], "bool", "label known (failure seen, or H transitions observed before truncation / window end)"),
     "xi_table": (["M", "X"], "float32", "distinct xi vectors of the shard"),
@@ -73,6 +76,7 @@ SHARD_FIELDS = {
     "oracle_u": (["P", "K", "H", "A"], "float32", "oracle actions (index 0 = oracle_u0)"),
     "oracle_x_plus_next": (["P", "K", "H", "S"], "float32", "oracle states after each branch step (no shocks, so x^+ == x^-)"),
     "oracle_margin": (["P", "K", "H"], "float32", "margin_fall of oracle_x_plus_next"),
+    "oracle_margin_physical": (["P", "K", "H"], "float32", "margin_fall_physical of oracle_x_plus_next"),
     "oracle_terminated": (["P", "K", "H"], "bool", "oracle step k terminated (only the first one matters)"),
     "oracle_truncated": (["P", "K", "H"], "bool", "oracle step k truncated"),
     "oracle_first_failure": (["P", "K"], "int32", "first terminated step k (0 = the first transition); H if none"),
@@ -120,6 +124,9 @@ def read_collect_config(config):
         "oracle_store_states": bool(get("oracle_store_states", True)),
         "chunk_blocks": int(get("chunk_blocks", 5)),
         "skip_existing": bool(get("skip_existing", True)),
+        "physical_height_fraction": float(get("physical_height_fraction", 0.5)),
+        "physical_tilt_threshold": float(get("physical_tilt_threshold", 1.0)),
+        "physical_min_steps": int(get("physical_min_steps", 25)),
     }
 
 
@@ -231,6 +238,7 @@ def make_chunk_runner(model, env, cfg, nr_blocks):
     agent = make_agent(model)
     lay, xl = wm_state.state_layout(env), wm_state.xi_layout(env)
     margin_cfg = wm_state.margin_config_from_env(env)
+    phys_cfg = wm_state.PhysicalFallConfig(height_fraction=cfg["physical_height_fraction"], tilt_threshold=cfg["physical_tilt_threshold"])
     obs_fn, _ = wm_state.make_policy_obs_fn(env)
     pidx = jnp.asarray(env.policy_observation_indices)
     interval, K, H = cfg["oracle_interval"], cfg["oracle_nr_envs"], cfg["oracle_horizon"]
@@ -242,6 +250,9 @@ def make_chunk_runner(model, env, cfg, nr_blocks):
 
     def margin(x, xi):
         return wm_state.margin_fall(x, xi, margin_cfg, lay, xl)
+
+    def margin_phys(x, xi):
+        return wm_state.margin_fall_physical(x, xi, phys_cfg, lay, xl)
 
     def critic(env_state, action):
         if not has_critic:
@@ -266,7 +277,7 @@ def make_chunk_runner(model, env, cfg, nr_blocks):
                 state, u = carry
                 state = step(state, u)
                 x_next, xi_next = state.info["wm/x_plus"], state.info["wm/xi_next"]
-                rec = {"u": u, "x": x_next, "margin": margin(x_next, xi_next),
+                rec = {"u": u, "x": x_next, "margin": margin(x_next, xi_next), "margin_physical": margin_phys(x_next, xi_next),
                        "terminated": state.terminated, "truncated": state.truncated}
                 u_new, _ = agent.policy(state)
                 return (state, u_new), rec
@@ -276,6 +287,7 @@ def make_chunk_runner(model, env, cfg, nr_blocks):
             "oracle_u0": u0,
             "oracle_u": jnp.swapaxes(recs["u"], 0, 1),
             "oracle_margin": jnp.swapaxes(recs["margin"], 0, 1),
+            "oracle_margin_physical": jnp.swapaxes(recs["margin_physical"], 0, 1),
             "oracle_terminated": jnp.swapaxes(recs["terminated"], 0, 1),
             "oracle_truncated": jnp.swapaxes(recs["truncated"], 0, 1),
             "oracle_critic_p_safe": p_safe, "oracle_critic_p_safe_std": p_std, "oracle_critic_p_safe_cmd": p_cmd,
@@ -315,7 +327,10 @@ def make_chunk_runner(model, env, cfg, nr_blocks):
             "perturbed_next": info["shock/perturbed"] > 0.5, "dr_resampled_next": info["shock/dr_resampled"] > 0.5,
             "terminated": env_state.terminated.astype(bool), "truncated": env_state.truncated.astype(bool) & ~env_state.terminated.astype(bool),
             "margin_next": margin(info["wm/x_plus"], info["wm/xi_next"]),
+            "margin_physical_next": margin_phys(info["wm/x_plus"], info["wm/xi_next"]),
         })
+        terms = wm_state.margins(info["wm/x_plus"], info["wm/xi_next"], margin_cfg, lay, xl)
+        rec["margin_height_next"], rec["margin_qvel_next"] = terms["height"], terms["qvel"]
         return (env_state, noise_key, noise_prob, noise_std), rec
 
     def block(carry, block_index):
@@ -336,7 +351,43 @@ def make_chunk_runner(model, env, cfg, nr_blocks):
     return run_chunk
 
 
-def _summary(arrays, nr_envs, nr_steps, oracle_k):
+def fall_episode_stats(fallen, terminated, done, min_steps):
+    """Episodes with >= min_steps consecutive physically fallen steps, by episode outcome. fallen / terminated / done
+    are [T, N] bool (transition t; fallen = margin_physical_next < 0)."""
+    T, N = fallen.shape
+    run = np.zeros(N, np.int64)
+    fell = np.zeros(N, bool)
+    first_long = np.full(N, -1, np.int64)
+    ep_start = np.zeros(N, np.int64)
+    out = {"episodes": 0, "episodes_terminated": 0, "fell_long_and_terminated": 0, "fell_long_not_terminated": 0,
+           "fell_long_not_terminated_truncated": 0, "fell_long_not_terminated_window_end": 0,
+           "steps_fallen_long_before_termination": [], "fallen_steps_not_terminated": 0}
+    for t in range(T):
+        run = np.where(fallen[t], run + 1, 0)
+        newly = (run >= min_steps) & ~fell
+        first_long = np.where(newly, t, first_long)
+        fell |= run >= min_steps
+        end = done[t] | (t == T - 1)
+        for n in np.nonzero(end)[0]:
+            out["episodes"] += 1
+            if terminated[t, n]:
+                out["episodes_terminated"] += 1
+                if fell[n]:
+                    out["fell_long_and_terminated"] += 1
+                    out["steps_fallen_long_before_termination"].append(int(t - first_long[n] + min_steps))
+            elif fell[n]:
+                out["fell_long_not_terminated"] += 1
+                out["fell_long_not_terminated_truncated" if done[t, n] else "fell_long_not_terminated_window_end"] += 1
+        out["fallen_steps_not_terminated"] += int(np.sum(fallen[t] & ~terminated[t]))
+        run = np.where(end, 0, run)
+        fell = np.where(end, False, fell)
+        first_long = np.where(end, -1, first_long)
+    d = out.pop("steps_fallen_long_before_termination")
+    out["median_fallen_steps_before_termination"] = float(np.median(d)) if d else None
+    return out
+
+
+def _summary(arrays, nr_envs, nr_steps, oracle_k, min_steps=25):
     term, trunc = arrays["terminated"], arrays["truncated"]
     fail, mask = arrays["fail_within"], arrays["fail_within_mask"]
     out = {
@@ -351,6 +402,13 @@ def _summary(arrays, nr_envs, nr_steps, oracle_k):
         "xi_table_rows": int(arrays["xi_table"].shape[0]),
         "margin_consistent": bool(np.array_equal(arrays["margin_next"] < 0, term)),
         "nr_margin_mismatch": int(np.sum((arrays["margin_next"] < 0) != term)),
+        "termination_causes": {
+            "imu_height_below_threshold": int(np.sum(term & (arrays["margin_height_next"] < 0))),
+            "qvel_limit_only": int(np.sum(term & (arrays["margin_height_next"] >= 0) & (arrays["margin_qvel_next"] < 0))),
+            "other": int(np.sum(term & (arrays["margin_height_next"] >= 0) & (arrays["margin_qvel_next"] >= 0))),
+        },
+        "physical_fall_steps": int(np.sum(arrays["margin_physical_next"] < 0)),
+        "physical_fall": fall_episode_stats(arrays["margin_physical_next"] < 0, term, term | trunc, min_steps),
     }
     for i, h in enumerate(LABEL_HORIZONS):
         out[f"actual_fail_within_{h}_rate"] = float(fail[..., i][mask[..., i]].mean()) if mask[..., i].any() else None
@@ -462,7 +520,7 @@ def run_wm_collect(model):
         arrays["oracle_env"] = np.arange(cfg["oracle_nr_envs"], dtype=np.int32)
         arrays["oracle_first_failure"], arrays["oracle_fail_within"], arrays["oracle_fail_within_mask"] = oracle_labels(
             arrays["oracle_terminated"], arrays["oracle_truncated"])
-        summary = _summary(arrays, nr_envs, T, cfg["oracle_nr_envs"])
+        summary = _summary(arrays, nr_envs, T, cfg["oracle_nr_envs"], cfg["physical_min_steps"])
         summary.update({"wall_time_s": wall, "first_chunk_s_incl_compile": compile_s})
         meta = {
             "schema": wm_state.SCHEMA_VERSION,
@@ -481,6 +539,8 @@ def run_wm_collect(model):
             "terrain": config.environment.terrain.type,
             "termination": {k: config.environment.termination[k] for k in config.environment.termination},
             "margin": wm_state.margin_config_from_env(env).to_json(),
+            "margin_physical": {**wm_state.PhysicalFallConfig(height_fraction=cfg["physical_height_fraction"], tilt_threshold=cfg["physical_tilt_threshold"]).to_json(),
+                                "min_steps_for_episode_stats": cfg["physical_min_steps"]},
             "git_commit": commit, "rl_x_path": RL_X_PATH,
             "fields": sorted(arrays),
         }

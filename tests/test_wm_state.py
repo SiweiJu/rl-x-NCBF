@@ -199,3 +199,14 @@ def test_tilt_switch_and_window_frame(env, roll):
     shift = lambda x: x.at[:, s["base_xy"]].add(jnp.array([3.0, -1.0])).at[:, s["base_yaw"]].add(0.0)
     xw2 = wm_state.to_window_frame(shift(jnp.asarray(roll["x"][11])), *wm_state.window_origin(shift(x0), lay), lay)
     np.testing.assert_allclose(np.asarray(xw2), np.asarray(xw), atol=1e-5)
+
+
+def test_physical_fall_margin(env, roll):
+    lay, xl = wm_state.state_layout(env), wm_state.xi_layout(env)
+    cfg = wm_state.PhysicalFallConfig()
+    m = np.asarray(wm_state.margin_fall_physical(jnp.asarray(roll["x_plus_next"]), jnp.asarray(roll["xi_next"]), cfg, lay, xl))
+    assert np.all(m[roll["terminated"]] < 0)  # IMU below ground -> also physically fallen
+    # flipped envs are physically fallen right after the flip, before the termination
+    assert np.all(m[FLIP_STEP + 1, :2] < 0)
+    upright = roll["x"][3:10, 2:]
+    assert np.all(np.asarray(wm_state.margin_fall_physical(jnp.asarray(upright), jnp.asarray(roll["xi"][3:10, 2:]), cfg, lay, xl)) > 0)

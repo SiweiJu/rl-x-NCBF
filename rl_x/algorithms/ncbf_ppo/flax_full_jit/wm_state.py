@@ -404,6 +404,30 @@ def margin_fall(x, xi, cfg: MarginConfig, lay: Layout, xl: Layout, softmin_tempe
     return jnp.min(stacked, axis=-1)
 
 
+@dataclass(frozen=True)
+class PhysicalFallConfig:
+    """A physical fall event, independent of the env termination (T06b at eval terminates only when the IMU is
+    below the ground): IMU height < height_fraction * nominal IMU height, or tilt sqrt(roll^2 + pitch^2) > tilt."""
+    enabled: bool = True
+    height_fraction: float = 0.5
+    tilt_threshold: float = 1.0  # rad
+    height_scale: float = 0.05
+    tilt_scale: float = 0.2
+
+    def to_json(self):
+        return dict(self.__dict__)
+
+
+def margin_fall_physical(x, xi, cfg: PhysicalFallConfig, lay: Layout, xl: Layout, softmin_temperature=0.0):
+    """l_phys(x) > 0 upright, < 0 physically fallen (fixed-fraction height or tilt); not an env termination."""
+    height = lay.get(x, "imu_height")[..., 0] - cfg.height_fraction * xl.get(xi, "nominal_imu_height")[..., 0]
+    tilt = cfg.tilt_threshold - jnp.sqrt(jnp.sum(lay.get(x, "roll_pitch") ** 2, axis=-1))
+    stacked = jnp.stack([height / cfg.height_scale, tilt / cfg.tilt_scale], axis=-1)
+    if softmin_temperature > 0.0:
+        return -softmin_temperature * jax.nn.logsumexp(-stacked / softmin_temperature, axis=-1)
+    return jnp.min(stacked, axis=-1)
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # Schema
 # ----------------------------------------------------------------------------------------------------------------
@@ -424,6 +448,7 @@ def schema_dict(env, margin_cfg=None, extra=None):
                        "policy_observation_indices": [int(i) for i in np.asarray(env.policy_observation_indices)]},
         "dt": float(env.dt),
         "margin": (margin_cfg or margin_config_from_env(env)).to_json(),
+        "margin_physical": PhysicalFallConfig().to_json(),
     }
     if extra:
         out.update(extra)

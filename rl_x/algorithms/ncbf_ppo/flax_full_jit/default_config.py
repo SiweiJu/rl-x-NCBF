@@ -137,6 +137,9 @@ def get_config(algorithm_name):
     config.wm_collect.oracle_store_states = True  # store the oracle trajectories (states)
     config.wm_collect.chunk_blocks = 5  # oracle_interval-step blocks per device->host transfer
     config.wm_collect.skip_existing = True
+    config.wm_collect.physical_height_fraction = 0.5  # margin_fall_physical: IMU height < fraction * nominal ...
+    config.wm_collect.physical_tilt_threshold = 1.0  # ... or tilt > this (rad) = physically fallen (not a termination)
+    config.wm_collect.physical_min_steps = 25  # summary: episodes fallen for >= this many consecutive steps (0.5 s)
 
     config.eval_sweep = config_dict.ConfigDict()
     config.eval_sweep.enabled = False  # True: test() runs the sweep instead of the batch evaluation
