@@ -105,21 +105,49 @@ def wm_bench(wm, bundle, policy_fn, obs_fn, margin_fn, N, H, key, reps, open_loo
     u0 = (jax.random.normal(k3, (N, L.action_dim)) * 0.3).astype(dtype)
     command = jax.random.normal(k4, (N, 3)).astype(dtype)
     bundle = jax.tree_util.tree_map(lambda a: a.astype(dtype), bundle)
-    pf = lambda x: policy_fn(obs_fn(x, command)).astype(dtype)
 
-    @jax.jit
-    def fwd(x0, xi, u0):
-        traj = W.rollout(wm, bundle, x0, xi, None, u0, pf, H, open_loop=open_loop)
+    def vfn(u, x0, xi, command):
+        pf = lambda x: policy_fn(obs_fn(x, command)).astype(dtype)
+        traj = W.rollout(wm, bundle, x0, xi, None, u, pf, H, open_loop=open_loop)
         return safety_value(margin_fn(traj))
 
-    @jax.jit
-    def fwd_vjp(x0, xi, u0):
-        def v(u):
-            traj = W.rollout(wm, bundle, x0, xi, None, u, pf, H, open_loop=open_loop)
-            return jnp.sum(safety_value(margin_fn(traj)))
-        return jax.value_and_grad(v)(u0)
+    fwd = jax.jit(lambda x0, xi, u0, c: vfn(u0, x0, xi, c))
+    fwd_vjp = jax.jit(lambda x0, xi, u0, c: jax.value_and_grad(lambda u: jnp.sum(vfn(u, x0, xi, c)))(u0))
+    out = {"rollout_ms": timeit(fwd, x0, xi, u0, command, reps=reps),
+           "rollout_vjp_ms": timeit(fwd_vjp, x0, xi, u0, command, reps=reps)}
+    for frac in [float(f) for f in str(B("gate_fracs", "0.25,0.5")).split(",") if f]:
+        k = max(1, int(round(frac * N)))
+        gated = jax.jit(lambda x0, xi, u0, c, k=k: W.gated_value_and_grad(vfn, u0, (x0, xi, c), k)[:2])
+        out[f"gated{int(round(frac * 100))}_ms"] = timeit(gated, x0, xi, u0, command, reps=reps)
+    return out
 
-    return {"rollout_ms": timeit(fwd, x0, xi, u0, reps=reps), "rollout_vjp_ms": timeit(fwd_vjp, x0, xi, u0, reps=reps)}
+
+def train_update_bench(wm, batch, k, reps, n_scan=10):
+    """ms per world-model training update (k-step loss + grad + Adam) on random windows of the layout's sizes."""
+    import optax
+    L = wm.layout
+    key = jax.random.PRNGKey(3)
+    ks = jax.random.split(key, 6)
+    b = {"x_plus": jax.random.normal(ks[0], (batch, k, L.state_dim)) * 0.1,
+         "x_minus_next": jax.random.normal(ks[1], (batch, k, L.state_dim)) * 0.1,
+         "x_plus_next": jax.random.normal(ks[2], (batch, k, L.state_dim)) * 0.1,
+         "u_applied": jax.random.normal(ks[3], (batch, k, L.action_dim)),
+         "u_chosen": jax.random.normal(ks[4], (batch, k, L.action_dim)),
+         "xi": jax.random.normal(ks[5], (batch, k, L.xi_dim)),
+         "shock_next": jnp.zeros((batch, k))}
+    bundle = wm.init(jax.random.PRNGKey(0))
+    tx = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(2e-4))
+    opt = tx.init(bundle["params"])
+
+    @jax.jit
+    def run(params, opt):
+        def one(c, _):
+            p, o = c
+            g = jax.grad(lambda q: W.k_step_loss(wm, q, bundle["norm"], b, "A")[0])(p)
+            u, o = tx.update(g, o, p)
+            return (optax.apply_updates(p, u), o), None
+        return jax.lax.scan(one, (params, opt), None, length=n_scan)[0]
+    return timeit(run, bundle["params"], opt, reps=max(reps // 4, 3)) / n_scan
 
 
 def random_policy(obs_dim, action_dim, hidden=(512, 256, 128), seed=0):
@@ -133,7 +161,8 @@ def random_policy(obs_dim, action_dim, hidden=(512, 256, 128), seed=0):
 def common_setup():
     schema = json.load(open(BENCH["bench_schema"])) if "bench_schema" in BENCH else STUB_GO2_SCHEMA
     layout = W.WMLayout.from_schema(schema)
-    cfg = W.WMConfig(width=B("width", 512), depth=B("depth", 3), ensemble_size=B("ensemble", 1))
+    cfg = W.WMConfig(width=B("width", 512), depth=B("depth", 3), ensemble_size=B("ensemble", 1),
+                     matmul_dtype=B("matmul_dtype", "float32"))
     wm = W.WorldModel(layout, cfg)
     bundle = wm.init(jax.random.PRNGKey(0))
     if "bench_wm_file" in BENCH:
@@ -163,7 +192,11 @@ def run_no_env():
     obs_fn = stub_obs_fn(layout, off, obs_groups)
     policy_fn = random_policy(off, layout.action_dim)
     res = {"wm": {}, "schema_stub": schema.get("stub", False), "wm_width": wm.cfg.width, "wm_depth": wm.cfg.depth,
-           "open_loop": int(B("open_loop", 0)), "dtype": B("dtype", "float32"), "ensemble": wm.cfg.ensemble_size}
+           "open_loop": int(B("open_loop", 0)), "dtype": B("dtype", "float32"), "ensemble": wm.cfg.ensemble_size,
+           "matmul_dtype": wm.cfg.matmul_dtype}
+    for bs in [int(x) for x in str(B("train_batches", "4096")).split(",") if x]:
+        res[f"train_update_ms_b{bs}_k8"] = train_update_bench(wm, bs, 8, B("reps", 20))
+        print(f"train update batch {bs} k=8: {res[f'train_update_ms_b{bs}_k8']:.2f} ms", flush=True)
     for N in [int(n) for n in B("wm_envs", "1024,4096").split(",")]:
         for H in [int(h) for h in B("H", "25").split(",")]:
             res["wm"][f"N{N}_H{H}"] = wm_bench(wm, bundle, policy_fn, obs_fn, stub_margin(layout), N, H,

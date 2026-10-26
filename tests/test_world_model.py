@@ -288,3 +288,27 @@ def test_wmdata_shard_loader_matches_dense(toy, tmp_path):
         np.testing.assert_allclose(a, b, atol=0)
     act = WD.active_xi_dims(comp)
     assert len(act) == layout.xi_dim
+
+
+def test_gated_grad_and_bf16(toy):
+    data, schema, layout = toy
+    wm = _wm(layout)
+    bundle = wm.init(jax.random.PRNGKey(5))
+    N, A = 12, layout.action_dim
+    x0, xi, u0 = (jnp.asarray(data[f][:N]) for f in ("x_plus", "xi", "u_chosen"))
+    pf = lambda x: jnp.tanh(x[:, :A])
+    vfn = lambda u, x0, xi: jnp.sum(W.rollout(wm, bundle, x0, xi, None, u, pf, 4) ** 2, axis=(0, 2))
+    v, g, idx = W.gated_value_and_grad(vfn, u0, (x0, xi), 5)
+    g_full = jax.grad(lambda u: jnp.sum(vfn(u, x0, xi)))(u0)
+    order = np.argsort(np.array(v))[:5]
+    assert set(np.array(idx)) == set(order)
+    np.testing.assert_allclose(g[idx], g_full[idx], rtol=1e-5, atol=1e-6)
+    mask = np.ones(N, bool)
+    mask[np.array(idx)] = False
+    assert float(jnp.abs(g[mask]).max()) == 0.0
+    # bf16 matmuls (f32 accumulation) give the same parameters' predictions up to bf16 rounding
+    wm16 = _wm(layout, matmul_dtype="bfloat16")
+    x16 = wm16.step(bundle, x0, u0, xi, u0)
+    x32 = wm.step(bundle, x0, u0, xi, u0)
+    assert x16.dtype == jnp.float32
+    np.testing.assert_allclose(x16, x32, atol=5e-2)

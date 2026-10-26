@@ -68,6 +68,7 @@ class WMConfig:
     use_xi: bool = True
     last_action_source: str = "chosen"     # chosen | applied | predict
     std_floor: float = 1e-6                # normalization std floor (inputs and deltas)
+    matmul_dtype: str = "float32"          # "bfloat16": bf16 matmul inputs with f32 accumulation/output
     err_std_floor: float = 1e-3            # floor of the per-dim loss scale (delta std), physical units
 
 
@@ -144,22 +145,36 @@ def state_error(layout, x_hat, x_true):
 _ACT = {"elu": nn.elu, "silu": nn.silu, "relu": nn.relu, "gelu": nn.gelu, "tanh": jnp.tanh}
 
 
+def _f32_acc_dot_general(lhs, rhs, dimension_numbers, precision=None, preferred_element_type=None, **kw):
+    return jax.lax.dot_general(lhs, rhs, dimension_numbers, precision=precision, preferred_element_type=jnp.float32)
+
+
 class DeltaMLP(nn.Module):
     out_dim: int
     width: int = 512
     depth: int = 3
     layer_norm: bool = True
     activation: str = "elu"
+    matmul_dtype: str = "float32"
 
     @nn.compact
     def __call__(self, z):
         act = _ACT[self.activation]
+        low = self.matmul_dtype != "float32"
+        cast = (lambda a: a.astype(jnp.float32)) if low else (lambda a: a)
+        if not low:
+            dense = nn.Dense
+        else:   # params stay f32; inputs/kernels are cast for the matmul, accumulation and output in f32
+            dt = jnp.dtype(self.matmul_dtype)
+            dense = lambda n, **kw: nn.Dense(n, dtype=dt, param_dtype=jnp.float32, dot_general=_f32_acc_dot_general, **kw)
         for _ in range(self.depth):
-            z = nn.Dense(self.width)(z)
+            z = dense(self.width)(z)
+            z = cast(z)
             if self.layer_norm:
                 z = nn.LayerNorm()(z)
             z = act(z)
-        return nn.Dense(self.out_dim, kernel_init=nn.initializers.variance_scaling(0.01, "fan_in", "truncated_normal"))(z)
+        out = dense(self.out_dim, kernel_init=nn.initializers.variance_scaling(0.01, "fan_in", "truncated_normal"))(z)
+        return cast(out)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -210,7 +225,7 @@ class WorldModel:
         self.layout, self.cfg = layout, cfg
         self.n_out = len(pred_idx(layout, cfg))
         self.n_in = len(input_state_idx(layout)) + layout.action_dim + (layout.xi_dim if cfg.use_xi else 0)
-        self.net = DeltaMLP(self.n_out, cfg.width, cfg.depth, cfg.layer_norm, cfg.activation)
+        self.net = DeltaMLP(self.n_out, cfg.width, cfg.depth, cfg.layer_norm, cfg.activation, cfg.matmul_dtype)
 
     def init(self, key, norm=None):
         keys = jax.random.split(key, self.cfg.ensemble_size)
@@ -335,3 +350,17 @@ def rollout(wm: WorldModel, bundle, x0, xi, delay_buffer0, u0, policy_fn: Callab
     else:
         traj, actions = x1[None], u0[None]
     return (traj, actions) if return_actions else traj
+
+
+def gated_value_and_grad(value_fn: Callable, u0, args, k: int):
+    """Forward value for all N envs, gradient only for the k envs with the lowest value (static shapes).
+
+    value_fn(u0, *args) -> (N,) values (e.g. the H-step safety value V of `rollout`); args are arrays with leading
+    axis N. Returns (v (N,), grad (N, A) with zeros outside the selected envs, selected indices (k,)).
+    For the shield: the constraint can only be active where V is low, so the VJP is spent there.
+    """
+    v = value_fn(u0, *args)
+    _, idx = jax.lax.top_k(-jax.lax.stop_gradient(v), k)
+    sub = [a[idx] for a in args]
+    g_sub = jax.grad(lambda u: jnp.sum(value_fn(u, *sub)))(u0[idx])
+    return v, jnp.zeros_like(u0).at[idx].set(g_sub), idx
