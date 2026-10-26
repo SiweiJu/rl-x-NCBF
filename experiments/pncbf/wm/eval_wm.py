@@ -41,19 +41,24 @@ def main():
     p.add_argument("--table_ks", default="1,8,25,50")
     p.add_argument("--near_failure_window", type=int, default=50)
     p.add_argument("--max_windows", type=int, default=50000)
+    p.add_argument("--max_envs_per_shard", type=int, default=0)
     p.add_argument("--out", required=True)
     args = p.parse_args()
     wm, bundle, meta = WE.load_bundle(args.wm)
     if args.data == "synthetic":
         a = meta["args"]
         held, _ = WD.synthetic_dataset(n_envs=max(a["synthetic_envs"] // 4, 8), T=a["synthetic_T"], seed=a["seed"] + 1000)
+    elif WD.find_shard_dirs(args.data):
+        held, _ = WD.load_wmdata(args.data, args.heldout_pattern.split(","), args.max_envs_per_shard,
+                                 which=("heldout",))["heldout"]
+        held = WD.select_xi_dims(held, np.asarray(meta["schema"]["xi_active"]))
     else:
         pats = [q for q in (meta["schema"].get("heldout_patterns") or args.heldout_pattern.split(",")) if q]
         paths = [q for q in WD.find_shards(args.data) if any(t in q for t in pats)]
         held, _ = WD.load_shards(paths, meta["schema"].get("field_map"))
     ks = [int(k) for k in args.ks.split(",")]
     res = WE.evaluate(wm, bundle, held, ks, args.near_failure_window, args.max_windows)
-    res["meta"] = {"wm": args.wm, "heldout_pattern": args.heldout_pattern, "rows": int(len(held["done"])),
+    res["meta"] = {"wm": args.wm, "heldout_pattern": args.heldout_pattern, "rows": int(WD.n_rows(held)),
                    "terminations": int(held["terminated"].sum()), "train_args": meta.get("args")}
     with open(args.out, "w") as f:
         json.dump(res, f, indent=1)

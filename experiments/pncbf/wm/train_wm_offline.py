@@ -35,7 +35,7 @@ def parse_args(argv=None):
     p.add_argument("--heldout_pattern", default="seed_145/,seed_245/,seed_1342/,seed_1442/",
                    help="comma-separated substrings; shards whose path contains one are held out (default: the last two "
                         "seeds per method; use the split from schema.json when it states one)")
-    p.add_argument("--max_train_rows", type=int, default=0, help="0 = all")
+    p.add_argument("--max_envs_per_shard", type=int, default=0, help="0 = all envs of every shard")
     # model
     p.add_argument("--width", type=int, default=512)
     p.add_argument("--depth", type=int, default=3)
@@ -89,7 +89,18 @@ def load_data(args):
         train, schema = WD.synthetic_dataset(n_envs=args.synthetic_envs, T=args.synthetic_T, seed=args.seed)
         held, _ = WD.synthetic_dataset(n_envs=max(args.synthetic_envs // 4, 8), T=args.synthetic_T, seed=args.seed + 1000)
         return train, held, schema, {"train": ["synthetic"], "heldout": ["synthetic_heldout"]}
-    schema = WD.load_schema(args.schema)
+    if WD.find_shard_dirs(args.data):   # wm-data shard directories (schema pncbf-p1-wmdata/v1)
+        L = WD.load_wmdata(args.data, args.heldout_pattern.split(","), args.max_envs_per_shard, args.seed, log=log)
+        (train, tr_info), (held, he_info) = L["train"], L["heldout"]
+        schema_path = args.schema or os.path.join(tr_info[0]["path"], "schema.json")
+        raw = WD.load_schema(schema_path)
+        act = WD.active_xi_dims(train)
+        train = WD.select_xi_dims(train, act)
+        held = WD.select_xi_dims(held, act) if held is not None else None
+        schema = WD.wm_schema_from_wmdata(raw, act)
+        log(f"xi: {len(act)} of {raw['xi']['dim']} dims vary on the training data")
+        return train, held, schema, {"train": tr_info, "heldout": he_info}
+    schema = WD.load_schema(args.schema)       # legacy single-file .npz shards
     field_map = json.loads(args.field_map) if args.field_map else schema.get("field_map")
     paths = WD.find_shards(args.data)
     if not paths:
@@ -104,18 +115,6 @@ def load_data(args):
     return train, held, schema, {"train": tr_src, "heldout": he_src}
 
 
-def subsample_tracks(data, max_rows, seed):
-    if not max_rows or len(data["done"]) <= max_rows:
-        return data
-    tracks = np.unique(data["track_id"])
-    rng = np.random.default_rng(seed)
-    rng.shuffle(tracks)
-    lens = np.bincount(data["track_id"])[tracks]
-    keep = np.sort(tracks[np.cumsum(lens) <= max_rows])
-    m = np.isin(data["track_id"], keep)
-    return {f: v[m] for f, v in data.items()}
-
-
 def main(argv=None):
     args = parse_args(argv)
     os.makedirs(args.run_dir, exist_ok=True)
@@ -127,8 +126,7 @@ def main(argv=None):
 
     t0 = time.time()
     train, held, schema, sources = load_data(args)
-    train = subsample_tracks(train, args.max_train_rows, args.seed)
-    log(f"data loaded in {time.time() - t0:.0f}s: train rows {len(train['done'])}, held rows "
+    log(f"data loaded in {time.time() - t0:.0f}s: train rows {WD.n_rows(train)}, held rows "
         f"{0 if held is None else len(held['done'])}")
     layout = W.WMLayout.from_schema(schema)
     cfg = W.WMConfig(width=args.width, depth=args.depth, layer_norm=bool(args.layer_norm), activation=args.activation,
@@ -139,8 +137,12 @@ def main(argv=None):
     log(f"windows k={args.k_train}: {len(pos)} valid, {len(neg)} near-failure; shock rows "
         f"{int(train['shock_next'].sum())}, terminations {int(train['terminated'].sum())}")
     rows = WD.transition_rows_for_norm(train, seed=args.seed)
-    norm = W.fit_norm(layout, cfg, train["x_plus"][rows], train["u_applied"][rows], train["xi"][rows],
-                      train["x_minus_next"][rows])
+    nx, nu, nuc, nxi, nxm = WD.rows_arrays(train, rows)
+    norm = W.fit_norm(layout, cfg, nx, nu, nxi, nxm)
+    if layout.last_action_idx:   # the last_action group of x-_{t+1} must be the chosen action u_t
+        la_err = float(np.abs(nxm[:, list(layout.last_action_idx)] - nuc).max())
+        log(f"check: max |last_action(x-_(t+1)) - u_chosen_t| = {la_err:.3g} on {len(rows)} rows")
+    del nx, nu, nuc, nxi, nxm
     dev = WD.to_device(train)
     held_dev = WD.to_device(held) if held is not None else None
     if held is not None:
@@ -190,7 +192,7 @@ def main(argv=None):
         wb = wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=run_name, id=wid, resume="allow",
                         tags=[t for t in args.wandb_tags.split(",") if t] + [f"method/wm{args.method}"],
                         config={**vars(args), "commit": commit, "schema": schema, "sources": sources,
-                                "n_train_rows": int(len(train["done"])), "n_pos_windows": int(len(pos)),
+                                "n_train_rows": int(WD.n_rows(train)), "n_pos_windows": int(len(pos)),
                                 "n_neg_windows": int(len(neg))}, dir=args.run_dir)
 
     def save():

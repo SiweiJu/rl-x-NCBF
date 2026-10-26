@@ -24,25 +24,28 @@ import jax.numpy as jnp
 
 FIELDS = ("x_plus", "u_applied", "u_chosen", "xi", "x_minus_next", "x_plus_next", "shock_next", "done", "terminated")
 WINDOW_FIELDS = ("x_plus", "u_applied", "u_chosen", "xi", "x_minus_next", "x_plus_next", "shock_next")
+# Compact format (real data): x_plus_next is not stored (inside a valid window it equals x_plus of the next row),
+# x_minus_next only on the rows where it differs from x_plus[s+1] (shock / DR / episode end): xm_rows (sorted row ids)
+# + xm_vals; xi is xi_table[xi_idx]. Optional start_ok (bool, S): rows that may start a window.
 
 
 # ---------------------------------------------------------------------------------------------------------------
 # Indexing
 # ---------------------------------------------------------------------------------------------------------------
-def valid_window_starts(track_id, done, k):
-    """Rows s such that s..s+k-1 lie in one track and no episode ends before the last step (done[s..s+k-2] == 0).
-    An episode may end AT the last step: its target x-_{t+k} is recorded before the reset."""
+def valid_window_starts(track_id, done, k, start_ok=None):
+    """Rows s such that s..s+k-1 lie in one track and no episode ends before the last step (done[s..s+k-2] == 0),
+    and start_ok[s] if given. An episode may end AT the last step: its target x-_{t+k} is recorded before the reset."""
     S = len(track_id)
     if S < k:
         return np.zeros(0, np.int64)
     s = np.arange(S - k + 1)
-    same = track_id[s] == track_id[s + k - 1]
+    ok = track_id[s] == track_id[s + k - 1]
     if k > 1:
         c = np.concatenate([[0], np.cumsum(done.astype(np.int64))])
-        no_done = (c[s + k - 1] - c[s]) == 0
-    else:
-        no_done = np.ones_like(same)
-    return s[same & no_done].astype(np.int64)
+        ok &= (c[s + k - 1] - c[s]) == 0
+    if start_ok is not None:
+        ok &= start_ok[s].astype(bool)
+    return s[ok].astype(np.int64)
 
 
 def steps_to_termination(track_id, done, terminated):
@@ -63,24 +66,74 @@ def near_failure_rows(track_id, done, terminated, window=50):
     return steps_to_termination(track_id, done, terminated) < window
 
 
+def data_window_starts(data, k):
+    return valid_window_starts(data["track_id"], data["done"], k, data.get("start_ok"))
+
+
 def split_window_starts(data, k, near_failure_window=50):
     """(pos_starts, neg_starts): all valid starts, and those whose last step is a near-failure row."""
-    starts = valid_window_starts(data["track_id"], data["done"], k)
+    starts = data_window_starts(data, k)
     nf = near_failure_rows(data["track_id"], data["done"], data["terminated"], near_failure_window)
     return starts, starts[nf[starts + k - 1]]
+
+
+def n_rows(data):
+    return len(data["done"])
+
+
+def rows_arrays(data, rows):
+    """Numpy (x_plus, u_applied, u_chosen, xi, x_minus_next) at the given rows, for either format."""
+    rows = np.asarray(rows)
+    xi = data["xi"][rows] if "xi" in data else data["xi_table"][data["xi_idx"][rows]]
+    if "x_minus_next" in data:
+        xm = data["x_minus_next"][rows]
+    else:
+        nxt = np.minimum(rows + 1, n_rows(data) - 1)
+        xm = data["x_plus"][nxt].copy()
+        pos = np.searchsorted(data["xm_rows"], rows)
+        pos_c = np.minimum(pos, max(len(data["xm_rows"]) - 1, 0))
+        hit = (len(data["xm_rows"]) > 0) & (data["xm_rows"][pos_c] == rows)
+        xm[hit] = data["xm_vals"][pos_c[hit]]
+    return data["x_plus"][rows], data["u_applied"][rows], data["u_chosen"][rows], xi, xm
 
 
 # ---------------------------------------------------------------------------------------------------------------
 # Sampling
 # ---------------------------------------------------------------------------------------------------------------
 def to_device(data, dtype=jnp.float32):
-    return {f: jnp.asarray(data[f], dtype) for f in WINDOW_FIELDS}
+    """Device copy of what gather_windows needs (either format)."""
+    dev = {f: jnp.asarray(data[f], dtype) for f in ("x_plus", "u_applied", "u_chosen", "shock_next")}
+    if "x_plus_next" in data:
+        dev["x_plus_next"] = jnp.asarray(data["x_plus_next"], dtype)
+    if "x_minus_next" in data:
+        dev["x_minus_next"] = jnp.asarray(data["x_minus_next"], dtype)
+    else:   # dense pointer row -> index into xm_vals (-1: x_plus of the next row)
+        ptr = np.full(n_rows(data), -1, np.int32)
+        ptr[data["xm_rows"]] = np.arange(len(data["xm_rows"]), dtype=np.int32)
+        dev["xm_ptr"] = jnp.asarray(ptr)
+        dev["xm_vals"] = jnp.asarray(data["xm_vals"] if len(data["xm_vals"]) else np.zeros((1, data["x_plus"].shape[1])), dtype)
+    if "xi" in data:
+        dev["xi"] = jnp.asarray(data["xi"], dtype)
+    else:
+        dev["xi_idx"] = jnp.asarray(data["xi_idx"], jnp.int32)
+        dev["xi_table"] = jnp.asarray(data["xi_table"], dtype)
+    return dev
 
 
 def gather_windows(dev, starts, k):
-    """dev: device dict of (S, ...) arrays; starts (B,) -> dict of (B, k, ...)."""
+    """dev: device dict from to_device; starts (B,) -> dict of (B, k, ...) with all WINDOW_FIELDS."""
     rows = starts[:, None] + jnp.arange(k)[None, :]
-    return {f: dev[f][rows] for f in WINDOW_FIELDS}
+    S = dev["x_plus"].shape[0]
+    nxt = jnp.minimum(rows + 1, S - 1)
+    out = {f: dev[f][rows] for f in ("x_plus", "u_applied", "u_chosen", "shock_next")}
+    out["x_plus_next"] = dev["x_plus_next"][rows] if "x_plus_next" in dev else dev["x_plus"][nxt]
+    if "x_minus_next" in dev:
+        out["x_minus_next"] = dev["x_minus_next"][rows]
+    else:
+        ptr = dev["xm_ptr"][rows]
+        out["x_minus_next"] = jnp.where((ptr >= 0)[..., None], dev["xm_vals"][jnp.maximum(ptr, 0)], dev["x_plus"][nxt])
+    out["xi"] = dev["xi"][rows] if "xi" in dev else dev["xi_table"][dev["xi_idx"][rows]]
+    return out
 
 
 def make_window_sampler(pos_starts, neg_starts, k, batch_size, neg_ratio):
@@ -100,59 +153,177 @@ def make_window_sampler(pos_starts, neg_starts, k, batch_size, neg_ratio):
     return sample
 
 
-def transition_rows_for_norm(data, max_rows=2_000_000, seed=0):
-    """Non-shock rows (x-_{t+1} reachable by physics only) for the normalization fit."""
-    rows = np.nonzero(data["shock_next"] < 0.5)[0]
+def transition_rows_for_norm(data, max_rows=1_000_000, seed=0):
+    """Rows for the normalization fit: no shock (x-_{t+1} reachable by physics only) and start_ok."""
+    ok = data["shock_next"] < 0.5
+    if "start_ok" in data:
+        ok &= data["start_ok"].astype(bool)
+    rows = np.nonzero(ok)[0]
     if len(rows) > max_rows:
         rows = np.sort(np.random.default_rng(seed).choice(rows, max_rows, replace=False))
     return rows
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# Shard loader (real T12 data)
+# Loader for the T12 shards (wm-data schema pncbf-p1-wmdata/v1: one directory per shard, <field>.npy time-major
+# [T, N, ...], meta.json with checkpoint / method / split)
 # ---------------------------------------------------------------------------------------------------------------
+def find_shard_dirs(pattern):
+    """Shard directories matching a glob (a directory counts if it holds x_plus.npy)."""
+    out = []
+    for p in sorted(glob.glob(pattern)):
+        if os.path.isfile(os.path.join(p, "x_plus.npy")):
+            out.append(p)
+        elif os.path.isdir(p):
+            out += sorted(os.path.dirname(q) for q in glob.glob(os.path.join(p, "**", "x_plus.npy"), recursive=True))
+    return sorted(set(out))
+
+
+def shard_meta(path):
+    f = os.path.join(path, "meta.json")
+    return json.load(open(f)) if os.path.exists(f) else {}
+
+
+def _tm(a, envs):
+    """[T, N, ...] mmap -> env-major flat [n*T, ...] for the selected envs."""
+    a = np.asarray(a[:, envs])
+    return np.ascontiguousarray(np.swapaxes(a, 0, 1)).reshape((-1,) + a.shape[2:])
+
+
+def load_wmdata_shard(path, max_envs=0, seed=0, check=False):
+    """One shard in the compact track format. max_envs > 0 keeps a random subset of envs."""
+    ld = lambda f: np.load(os.path.join(path, f + ".npy"), mmap_mode="r")
+    done_tm = ld("done")
+    T, N = done_tm.shape
+    envs = np.arange(N)
+    if max_envs and max_envs < N:
+        envs = np.sort(np.random.default_rng(seed).choice(N, max_envs, replace=False))
+    d = {"x_plus": _tm(ld("x_plus"), envs).astype(np.float32),
+         "u_applied": _tm(ld("u_applied"), envs).astype(np.float32),
+         "u_chosen": _tm(ld("u_cmd"), envs).astype(np.float32),
+         "xi_idx": _tm(ld("xi_idx"), envs).astype(np.int32),
+         "done": _tm(done_tm, envs).astype(np.float32),
+         "terminated": _tm(ld("terminated"), envs).astype(np.float32),
+         "shock_next": (_tm(ld("perturbed_next"), envs) | _tm(ld("dr_resampled_next"), envs)).astype(np.float32),
+         "start_ok": _tm(ld("episode_step"), envs) != 0,      # the first transition of an episode has stale IMU values
+         "track_id": np.repeat(np.arange(len(envs)), T)}
+    xm = _tm(ld("x_minus_next"), envs).astype(np.float32)
+    S = len(d["done"])
+    last_of_track = np.zeros(S, bool)
+    last_of_track[T - 1::T] = True
+    keep = (d["shock_next"] > 0) | (d["done"] > 0) | last_of_track
+    nxt = np.minimum(np.arange(S) + 1, S - 1)
+    differs = np.any(xm != d["x_plus"][nxt], axis=1)
+    stats = {"rows": S, "rows_kept_x_minus": int(keep.sum()),
+             "x_minus_ne_next_x_plus_outside_kept": int((differs & ~keep).sum())}
+    keep |= differs     # never lose information: store every row where the shortcut would be wrong
+    d["xm_rows"] = np.nonzero(keep)[0].astype(np.int64)
+    d["xm_vals"] = xm[keep]
+    d["xi_table"] = np.asarray(ld("xi_table"), np.float32)
+    if check:
+        xpn = _tm(ld("x_plus_next"), envs)
+        inner = (d["done"] < 0.5) & ~last_of_track
+        stats["x_plus_next_ne_next_x_plus"] = int(np.any(xpn[inner] != d["x_plus"][nxt][inner], axis=1).sum())
+    return d, stats
+
+
 def _to_tracks(arrs):
-    """Time-major (T, N, ...) shard -> env-major flat (N*T, ...)."""
+    """Time-major (T, N, ...) arrays -> env-major flat (N*T, ...)."""
     return {f: np.swapaxes(a, 0, 1).reshape((-1,) + a.shape[2:]) for f, a in arrs.items()}
 
 
+def concat_data(parts):
+    """Concatenate track-format datasets (renumbering tracks; offsetting xi_idx / xm_rows in the compact format)."""
+    out = {}
+    row_off = track_off = xi_off = 0
+    acc = {}
+    for d in parts:
+        d = dict(d)
+        d["track_id"] = d["track_id"] + track_off
+        if "xm_rows" in d:
+            d["xm_rows"] = d["xm_rows"] + row_off
+        if "xi_idx" in d:
+            d["xi_idx"] = d["xi_idx"] + xi_off
+            xi_off += len(d["xi_table"])
+        track_off = int(d["track_id"].max()) + 1
+        row_off += len(d["done"])
+        for f, v in d.items():
+            acc.setdefault(f, []).append(v)
+    for f, v in acc.items():
+        out[f] = np.concatenate(v)
+    return out
+
+
+def select_xi_dims(data, idx):
+    """Keep only xi dims `idx` (in xi_table or xi)."""
+    d = dict(data)
+    if "xi_table" in d:
+        d["xi_table"] = d["xi_table"][:, idx]
+    else:
+        d["xi"] = d["xi"][:, idx]
+    return d
+
+
+def active_xi_dims(data, tol=1e-6):
+    """xi dims that vary over the rows of `data` (std > tol, weighted by how often each table row is used)."""
+    if "xi_table" in data:
+        w = np.bincount(data["xi_idx"], minlength=len(data["xi_table"])).astype(np.float64)
+        t = data["xi_table"].astype(np.float64)
+        m = (w[:, None] * t).sum(0) / w.sum()
+        var = (w[:, None] * (t - m) ** 2).sum(0) / w.sum()
+    else:
+        var = data["xi"].astype(np.float64).var(0)
+    return np.nonzero(np.sqrt(var) > tol)[0]
+
+
+def wm_schema_from_wmdata(schema, xi_active):
+    """The world model's layout schema from the wm-data schema (pncbf-p1-wmdata/v1) and the kept xi dims."""
+    return {"state_dim": int(schema["state"]["dim"]), "action_dim": int(schema["action_dim"]),
+            "xi_dim": int(len(xi_active)), "groups": schema["state"]["groups"],
+            "xi_active": [int(i) for i in xi_active], "xi_full_dim": int(schema["xi"]["dim"]),
+            "source_schema": schema.get("schema")}
+
+
+def load_wmdata(pattern, heldout_patterns=(), max_envs_per_shard=0, seed=0, which=("train", "heldout"), log=print):
+    """Load the shard directories matching `pattern`, split into train / heldout by meta.json "split" (anything but
+    "train" is held out); shards without a split are held out if their path contains one of heldout_patterns.
+    Returns {name: (data or None, [per-shard info])}."""
+    dirs = find_shard_dirs(pattern)
+    if not dirs:
+        raise FileNotFoundError(f"no shard directories (with x_plus.npy) match {pattern}")
+    groups = {"train": [], "heldout": []}
+    for d in dirs:
+        m = shard_meta(d)
+        held = (m["split"] != "train") if "split" in m else any(q and q in d for q in heldout_patterns)
+        groups["heldout" if held else "train"].append((d, m))
+    out = {}
+    for name in which:
+        parts, info = [], []
+        for i, (d, m) in enumerate(groups[name]):
+            part, st = load_wmdata_shard(d, max_envs_per_shard, seed + i)
+            parts.append(part)
+            info.append({"path": d, **{k: m[k] for k in ("checkpoint", "checkpoint_label", "method", "train_seed",
+                                                         "split", "setting", "p") if k in m}, **st})
+            log(f"loaded {name} shard {d}: {st}")
+        out[name] = (concat_data(parts) if parts else None, info)
+    return out
+
+
 def load_shards(paths, field_map=None, time_major=True, track_offset=0):
-    """Load .npz shards into the canonical track format. field_map maps canonical names to shard keys.
-    Each shard is (T, N, ...) time-major (time_major=True) and its envs become new tracks.
-    Returns (data, source) where source[i] is the shard's "source" entry (checkpoint id) if present."""
+    """Legacy loader for single-file .npz shards with canonical field names (tests / synthetic exports)."""
     field_map = field_map or {}
-    out = {f: [] for f in FIELDS + ("track_id",)}
-    sources = []
-    nxt = track_offset
+    parts, sources = [], []
     for p in paths:
         z = np.load(p, allow_pickle=False)
         arrs = {f: np.asarray(z[field_map.get(f, f)]) for f in FIELDS}
-        if time_major:
-            T, N = arrs["done"].shape[:2]
-            arrs = _to_tracks(arrs)
-            tid = np.repeat(np.arange(nxt, nxt + N), T)
-            nxt += N
-        else:
-            tid = np.asarray(z[field_map.get("track_id", "track_id")]) + nxt
-            nxt = tid.max() + 1
-        for f in FIELDS:
-            out[f].append(arrs[f])
-        out["track_id"].append(tid)
+        T, N = arrs["done"].shape[:2]
+        d = {f: np.swapaxes(a, 0, 1).reshape((-1,) + a.shape[2:]) for f, a in arrs.items()}
+        for f in ("shock_next", "done", "terminated"):
+            d[f] = d[f].astype(np.float32).reshape(-1)
+        d["track_id"] = np.repeat(np.arange(N), T)
+        parts.append(d)
         sources.append(str(z["source"]) if "source" in z.files else os.path.basename(p))
-    data = {f: np.concatenate(v) for f, v in out.items()}
-    for f in ("shock_next", "done", "terminated"):
-        data[f] = data[f].astype(np.float32).reshape(-1)
-    return data, sources
-
-
-def concat_data(parts):
-    off, out = 0, []
-    for d in parts:
-        d = dict(d)
-        d["track_id"] = d["track_id"] + off
-        off = int(d["track_id"].max()) + 1
-        out.append(d)
-    return {f: np.concatenate([d[f] for d in out]) for f in out[0]}
+    return concat_data(parts), sources
 
 
 # ---------------------------------------------------------------------------------------------------------------

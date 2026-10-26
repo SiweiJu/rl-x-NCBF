@@ -235,3 +235,56 @@ def test_training_reduces_loss_and_resumes(tmp_path):
     res = json.load(open(tmp_path / "run" / "eval_heldout.json"))
     g = res["overall"]["1"]
     assert g["q"]["model"] < g["q"]["persist"]
+
+
+def _write_wmdata_shard(path, data, T, split="train"):
+    """Write track-format synthetic data as a wm-data shard directory (time-major .npy files + meta.json)."""
+    import json
+    os.makedirs(path, exist_ok=True)
+    N = len(data["done"]) // T
+    tm = lambda a: np.swapaxes(a.reshape((N, T) + a.shape[1:]), 0, 1)
+    table, inv = np.unique(data["xi"], axis=0, return_inverse=True)
+    ep_step = np.zeros(len(data["done"]), np.int32)
+    for i in range(1, len(ep_step)):
+        ep_step[i] = 0 if (data["done"][i - 1] > 0 or data["track_id"][i] != data["track_id"][i - 1]) else ep_step[i - 1] + 1
+    files = {"x_plus": data["x_plus"], "x_minus_next": data["x_minus_next"], "x_plus_next": data["x_plus_next"],
+             "u_applied": data["u_applied"], "u_cmd": data["u_chosen"], "xi_idx": inv.reshape(-1).astype(np.int32),
+             "done": data["done"] > 0, "terminated": data["terminated"] > 0, "perturbed_next": data["shock_next"] > 0,
+             "dr_resampled_next": np.zeros(len(data["done"]), bool), "episode_step": ep_step}
+    for f, v in files.items():
+        np.save(os.path.join(path, f + ".npy"), tm(np.asarray(v)))
+    np.save(os.path.join(path, "xi_table.npy"), table.astype(np.float32))
+    json.dump({"split": split, "checkpoint": "toy"}, open(os.path.join(path, "meta.json"), "w"))
+    return ep_step
+
+
+def test_wmdata_shard_loader_matches_dense(toy, tmp_path):
+    data, schema, layout = toy
+    T = 300
+    ep_step = _write_wmdata_shard(str(tmp_path / "train" / "a"), data, T)
+    _write_wmdata_shard(str(tmp_path / "test" / "b"), data, T, split="test")
+    L = WD.load_wmdata(str(tmp_path / "*" / "*"), log=lambda *a: None)
+    comp, info = L["train"]
+    assert L["heldout"][0] is not None and info[0]["x_minus_ne_next_x_plus_outside_kept"] == 0
+    assert "x_minus_next" not in comp and "xi_table" in comp
+    # window starts: same as dense except starts at episode_step == 0
+    k = 8
+    dense_starts = WD.valid_window_starts(data["track_id"], data["done"], k)
+    np.testing.assert_array_equal(WD.data_window_starts(comp, k), dense_starts[ep_step[dense_starts] != 0])
+    s = jnp.asarray(dense_starts[::7], jnp.int32)
+    bd = WD.gather_windows(WD.to_device(data), s, k)
+    bc = WD.gather_windows(WD.to_device(comp), s, k)
+    for f in ("x_plus", "u_applied", "u_chosen", "xi", "x_minus_next", "shock_next"):
+        np.testing.assert_allclose(bc[f], bd[f], atol=0, err_msg=f)
+    # x_plus_next agrees wherever teacher forcing can use it (inside the window, before its last step)
+    np.testing.assert_allclose(bc["x_plus_next"][:, :-1], bd["x_plus_next"][:, :-1], atol=0)
+    rows = np.arange(0, len(data["done"]), 5)
+    for a, b in zip(WD.rows_arrays(comp, rows), WD.rows_arrays(data, rows)):
+        np.testing.assert_allclose(a, b, atol=0)
+    # concatenation of two shards keeps xi_idx / xm_rows consistent
+    both = WD.concat_data([comp, L["heldout"][0]])
+    n = WD.n_rows(comp)
+    for a, b in zip(WD.rows_arrays(both, rows + n), WD.rows_arrays(data, rows)):
+        np.testing.assert_allclose(a, b, atol=0)
+    act = WD.active_xi_dims(comp)
+    assert len(act) == layout.xi_dim

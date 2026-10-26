@@ -48,10 +48,10 @@ B = lambda k, d: type(d)(BENCH.get(f"bench_{k}", d)) if not isinstance(d, str) e
 
 from rl_x.algorithms.ncbf_ppo.flax_full_jit import world_model as W  # noqa: E402
 
-STUB_GO2_SCHEMA = {
-    "state_dim": 51, "action_dim": 12, "xi_dim": 32, "stub": True,
-    "groups": {"joint_pos": [0, 12], "joint_vel": [12, 24], "last_action": [24, 36], "imu_ang_vel": [36, 39],
-               "gravity": [39, 42], "base_lin_vel": [42, 45], "imu_height": [45, 46], "roll_pitch": [46, 48],
+STUB_GO2_SCHEMA = {   # the wm-data v1 state layout; xi_dim = number of varying xi dims (unknown before training)
+    "state_dim": 51, "action_dim": 12, "xi_dim": int(BENCH.get("bench_xi_dim", 128)), "stub": True,
+    "groups": {"joint_pos": [0, 12], "joint_vel": [12, 24], "imu_ang_vel": [24, 27], "projected_gravity": [27, 30],
+               "last_action": [30, 42], "base_lin_vel": [42, 45], "imu_height": [45, 46], "roll_pitch": [46, 48],
                "base_xy": [48, 50], "base_yaw": [50, 51]},
 }
 
@@ -94,14 +94,18 @@ def safety_value(margins, T_l=0.1):
     return logp - log1mp
 
 
-def wm_bench(wm, bundle, policy_fn, obs_fn, margin_fn, N, H, key, reps, open_loop=False):
+def wm_bench(wm, bundle, policy_fn, obs_fn, margin_fn, N, H, key, reps, open_loop=None, dtype=None):
+    """Median ms of the jitted H-step rollout and of rollout + value_and_grad w.r.t. u0 (N envs)."""
     L = wm.layout
+    open_loop = bool(int(B("open_loop", 0))) if open_loop is None else open_loop
+    dtype = jnp.dtype(B("dtype", "float32")) if dtype is None else jnp.dtype(dtype)
     k1, k2, k3, k4 = jax.random.split(key, 4)
-    x0 = jax.random.normal(k1, (N, L.state_dim)) * 0.1
-    xi = jax.random.normal(k2, (N, L.xi_dim))
-    u0 = jax.random.normal(k3, (N, L.action_dim)) * 0.3
-    command = jax.random.normal(k4, (N, 3))
-    pf = lambda x: policy_fn(obs_fn(x, command))
+    x0 = (jax.random.normal(k1, (N, L.state_dim)) * 0.1).astype(dtype)
+    xi = jax.random.normal(k2, (N, L.xi_dim)).astype(dtype)
+    u0 = (jax.random.normal(k3, (N, L.action_dim)) * 0.3).astype(dtype)
+    command = jax.random.normal(k4, (N, 3)).astype(dtype)
+    bundle = jax.tree_util.tree_map(lambda a: a.astype(dtype), bundle)
+    pf = lambda x: policy_fn(obs_fn(x, command)).astype(dtype)
 
     @jax.jit
     def fwd(x0, xi, u0):
@@ -122,6 +126,7 @@ def random_policy(obs_dim, action_dim, hidden=(512, 256, 128), seed=0):
     from rl_x.algorithms.ncbf_ppo.flax_full_jit.policy import Policy
     pol = Policy((action_dim,), 1.0, jnp.arange(obs_dim), hidden)
     params = pol.init(jax.random.PRNGKey(seed), jnp.zeros((1, obs_dim)))
+    params = jax.tree_util.tree_map(lambda a: a.astype(jnp.dtype(B("dtype", "float32"))), params)
     return lambda o: pol.apply(params, o)[0]
 
 
@@ -151,13 +156,14 @@ def run_no_env():
     schema, layout, wm, bundle = common_setup()
     obs_groups = []
     off = 0
-    for g in ("joint_pos", "joint_vel", "last_action", "imu_ang_vel", "command", "gravity"):
+    for g in ("joint_pos", "joint_vel", "last_action", "imu_ang_vel", "command", "projected_gravity"):
         n = 3 if g == "command" else len(layout.group_index()[g])
         obs_groups.append((g, np.arange(off, off + n)))
         off += n
     obs_fn = stub_obs_fn(layout, off, obs_groups)
     policy_fn = random_policy(off, layout.action_dim)
-    res = {"wm": {}, "schema_stub": schema.get("stub", False), "wm_width": wm.cfg.width, "wm_depth": wm.cfg.depth}
+    res = {"wm": {}, "schema_stub": schema.get("stub", False), "wm_width": wm.cfg.width, "wm_depth": wm.cfg.depth,
+           "open_loop": int(B("open_loop", 0)), "dtype": B("dtype", "float32"), "ensemble": wm.cfg.ensemble_size}
     for N in [int(n) for n in B("wm_envs", "1024,4096").split(",")]:
         for H in [int(h) for h in B("H", "25").split(",")]:
             res["wm"][f"N{N}_H{H}"] = wm_bench(wm, bundle, policy_fn, obs_fn, stub_margin(layout), N, H,
@@ -203,13 +209,18 @@ def run_with_env(model, _episodes):
     schema, layout, wm, bundle = common_setup()
     try:
         from rl_x.algorithms.ncbf_ppo.flax_full_jit import wm_state
-        obs_fn = lambda x, command: wm_state.policy_obs_from_state(x, command, env)  # signature per wm-data
-        margin_fn = lambda x: wm_state.margin_fall(x, env)
+        _, full_obs_fn = wm_state.make_policy_obs_fn(env)
+        lay_s, xl = wm_state.state_layout(env), wm_state.xi_layout(env)
+        mcfg = wm_state.margin_config_from_env(env)
+        xi_full = jnp.zeros((xl.dim,))   # the policy obs needs nominal_joint_pos from the full xi
+        bx = lambda x: jnp.broadcast_to(xi_full, x.shape[:-1] + (xl.dim,))
+        obs_fn = lambda x, command: full_obs_fn(x, command, bx(x))
+        margin_fn = lambda x: wm_state.margin_fall(x, bx(x), mcfg, lay_s, xl)
         res["obs_fn"] = "wm_state"
     except Exception as e:  # stub until wm_state lands
         obs_groups = [("joint_pos", env.joint_positions_obs_idx), ("joint_vel", env.joint_velocities_obs_idx),
                       ("last_action", env.joint_previous_actions_obs_idx), ("imu_ang_vel", env.imu_angular_vel_obs_idx),
-                      ("command", env.goal_velocities_obs_idx), ("gravity", env.gravity_vector_obs_idx)]
+                      ("command", env.goal_velocities_obs_idx), ("projected_gravity", env.gravity_vector_obs_idx)]
         obs_fn = stub_obs_fn(layout, env.single_observation_space.shape[0], obs_groups)
         margin_fn = stub_margin(layout)
         res["obs_fn"] = f"stub ({type(e).__name__})"
