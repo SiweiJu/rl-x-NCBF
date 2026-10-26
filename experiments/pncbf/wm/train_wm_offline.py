@@ -92,7 +92,8 @@ def load_data(args):
     if WD.find_shard_dirs(args.data):   # wm-data shard directories (schema pncbf-p1-wmdata/v1)
         L = WD.load_wmdata(args.data, args.heldout_pattern.split(","), args.max_envs_per_shard, args.seed, log=log)
         (train, tr_info), (held, he_info) = L["train"], L["heldout"]
-        schema_path = args.schema or os.path.join(tr_info[0]["path"], "schema.json")
+        schema_path = args.schema or WD.find_schema(tr_info[0]["path"])
+        log(f"schema: {schema_path}")
         raw = WD.load_schema(schema_path)
         act = WD.active_xi_dims(train)
         train = WD.select_xi_dims(train, act)

@@ -179,6 +179,19 @@ def find_shard_dirs(pattern):
     return sorted(set(out))
 
 
+def find_schema(shard_path):
+    """schema.json in the shard directory or the nearest parent directory."""
+    d = os.path.abspath(shard_path)
+    while True:
+        f = os.path.join(d, "schema.json")
+        if os.path.exists(f):
+            return f
+        parent = os.path.dirname(d)
+        if parent == d:
+            raise FileNotFoundError(f"no schema.json in {shard_path} or its parents")
+        d = parent
+
+
 def shard_meta(path):
     f = os.path.join(path, "meta.json")
     return json.load(open(f)) if os.path.exists(f) else {}
