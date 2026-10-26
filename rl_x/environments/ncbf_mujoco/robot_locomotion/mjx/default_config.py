@@ -13,6 +13,9 @@ def get_config(environment_name):
         # Record the physics state before (x^-) and after (x^+) the shock / domain-randomization step in
         # info["transition/..."] (project plan 4.4 method A). The perturbed / dr_resampled flags are always recorded.
         "record_transition_physics_state": False,
+        # T11: record the world-model state x^-/x^+, xi after the DR step, the applied (delayed) action and the realized
+        # delay in info["wm/..."] (rl_x/algorithms/ncbf_ppo/flax_full_jit/wm_state.py).
+        "record_wm_state": False,
         "ball_plate": {
             "enabled": False,
             "include_observations": True,

@@ -113,6 +113,31 @@ def get_config(algorithm_name):
 
     # Perturbation-sweep evaluation (runner.mode=test, see eval_sweep.py and experiments/pncbf/eval/run_eval_sweep.py).
     # Off by default: test() then runs the old batch evaluation. Training never reads these values.
+    # T12 world-model data collection (runner.mode=test, see wm_collect.py and experiments/pncbf/T12/).
+    config.wm_collect = config_dict.ConfigDict()
+    config.wm_collect.enabled = False  # True: test() collects world-model data instead of the batch evaluation
+    config.wm_collect.out_dir = ""  # "" -> <run_path>/wm_data
+    config.wm_collect.checkpoint_label = ""
+    config.wm_collect.checkpoint_source = ""
+    config.wm_collect.method = ""
+    config.wm_collect.train_seed = -1
+    config.wm_collect.split = "train"  # train / test (held out by checkpoint seed)
+    config.wm_collect.settings = "action_noise:0,action_noise:0.4,action_noise:0.8,push:0.005,push:0.02"
+    config.wm_collect.nr_steps = 1000  # control steps per env (auto-reset)
+    config.wm_collect.eval_seed = 7  # setting i uses seed eval_seed * 1000 + i (same for every checkpoint)
+    config.wm_collect.noise_std = 1.0
+    config.wm_collect.push_scale = 2.0
+    config.wm_collect.push_scale_joints = True
+    config.wm_collect.background_push_prob = -1.0  # < 0: env config value during the action-noise settings
+    config.wm_collect.initial_command_zero_prob = 0.25
+    config.wm_collect.oracle_interval = 10  # MJX oracle branch every this many steps
+    config.wm_collect.oracle_nr_envs = 256  # the first this many envs are branched
+    config.wm_collect.oracle_horizon = 50
+    config.wm_collect.oracle_obs_noise = False  # False: oracle policy acts on noise-free observations (like imagination)
+    config.wm_collect.oracle_store_states = True  # store the oracle trajectories (states)
+    config.wm_collect.chunk_blocks = 5  # oracle_interval-step blocks per device->host transfer
+    config.wm_collect.skip_existing = True
+
     config.eval_sweep = config_dict.ConfigDict()
     config.eval_sweep.enabled = False  # True: test() runs the sweep instead of the batch evaluation
     config.eval_sweep.out_dir = ""  # "" -> <run_path>/eval_sweep

@@ -1831,7 +1831,7 @@ class PPO:
         }
         for key, value in loaded_algorithm_config.items():
             if isinstance(value, dict):
-                if key not in config.algorithm or key == "eval_sweep":  # eval settings come from the command line only
+                if key not in config.algorithm or key in ("eval_sweep", "wm_collect"):  # eval / data settings come from the command line only
                     continue
                 parent = config.algorithm[key]
                 for sub_key, sub_value in value.items():
@@ -2053,6 +2053,10 @@ class PPO:
 
         if self.counterfactual_enabled:
             return self.counterfactual_check()
+
+        if self.config.algorithm.get("wm_collect", {}).get("enabled", False):
+            from rl_x.algorithms.ncbf_ppo.flax_full_jit.wm_collect import run_wm_collect
+            return run_wm_collect(self)
 
         if self.config.algorithm.get("eval_sweep", {}).get("enabled", False):
             from rl_x.algorithms.ncbf_ppo.flax_full_jit.eval_sweep import run_eval_sweep
