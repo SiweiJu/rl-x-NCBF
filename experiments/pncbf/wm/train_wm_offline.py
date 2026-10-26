@@ -32,7 +32,9 @@ def parse_args(argv=None):
     p.add_argument("--data", required=True, help="glob of .npz shards, or 'synthetic'")
     p.add_argument("--schema", default=None)
     p.add_argument("--field_map", default=None, help="JSON {canonical: shard_key}")
-    p.add_argument("--heldout_pattern", default="seed_245", help="shards whose source/path contains this are held out")
+    p.add_argument("--heldout_pattern", default="seed_145/,seed_245/,seed_1342/,seed_1442/",
+                   help="comma-separated substrings; shards whose path contains one are held out (default: the last two "
+                        "seeds per method; use the split from schema.json when it states one)")
     p.add_argument("--max_train_rows", type=int, default=0, help="0 = all")
     # model
     p.add_argument("--width", type=int, default=512)
@@ -92,7 +94,8 @@ def load_data(args):
     paths = WD.find_shards(args.data)
     if not paths:
         raise FileNotFoundError(args.data)
-    is_held = [args.heldout_pattern and args.heldout_pattern in p for p in paths]
+    pats = [q for q in (schema.get("heldout_patterns") or args.heldout_pattern.split(",")) if q]
+    is_held = [any(q in p for q in pats) for p in paths]
     tr_paths = [p for p, h in zip(paths, is_held) if not h]
     he_paths = [p for p, h in zip(paths, is_held) if h]
     log(f"shards: {len(tr_paths)} train, {len(he_paths)} held out ({args.heldout_pattern})")

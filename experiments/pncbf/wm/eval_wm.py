@@ -36,7 +36,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--wm", required=True)
     p.add_argument("--data", required=True)
-    p.add_argument("--heldout_pattern", default="seed_245")
+    p.add_argument("--heldout_pattern", default="seed_145/,seed_245/,seed_1342/,seed_1442/")
     p.add_argument("--ks", default="1,2,4,8,16,25,32,50")
     p.add_argument("--table_ks", default="1,8,25,50")
     p.add_argument("--near_failure_window", type=int, default=50)
@@ -48,7 +48,8 @@ def main():
         a = meta["args"]
         held, _ = WD.synthetic_dataset(n_envs=max(a["synthetic_envs"] // 4, 8), T=a["synthetic_T"], seed=a["seed"] + 1000)
     else:
-        paths = [q for q in WD.find_shards(args.data) if args.heldout_pattern in q]
+        pats = [q for q in (meta["schema"].get("heldout_patterns") or args.heldout_pattern.split(",")) if q]
+        paths = [q for q in WD.find_shards(args.data) if any(t in q for t in pats)]
         held, _ = WD.load_shards(paths, meta["schema"].get("field_map"))
     ks = [int(k) for k in args.ks.split(",")]
     res = WE.evaluate(wm, bundle, held, ks, args.near_failure_window, args.max_windows)
