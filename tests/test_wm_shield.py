@@ -328,3 +328,20 @@ def test_softmin_reduces_to_min():
     np.testing.assert_allclose(float(WS.combine_residual(cfg, v, vp)[0]), min(1.0, 0.0 - 2.0), atol=1e-4)
     cfg2 = WS.ShieldConfig(tau=1e-5, combine="value")
     np.testing.assert_allclose(float(WS.combine_residual(cfg2, v, vp)[0]), 0.0 - 0.5 * 0.0, atol=1e-4)
+
+
+def test_shield_grad_finite_on_uncorrected_rows():
+    """d-train repro: rows with G(u0) >= 0 inside the gate must not give NaN gradients w.r.t. u0."""
+    def vf(params, inputs, u):
+        v = jnp.sum(u, axis=-1) - 1.0
+        return v[:, None], {"logp": v[:, None], "min_margin": v[:, None]}
+    n = 6
+    u0 = jnp.array([[0.0, 0.0], [1.0, 1.0], [0.2, 0.1], [2.0, 0.0], [-1.0, 0.5], [0.5, 0.5]])
+    for gate, frac in (("gated", 1.0), ("gated", 0.5), ("full", 1.0)):
+        for relin in (0, 1):
+            fn = WS.make_shield_fn(WS.ShieldConfig(gate=gate, gate_frac=frac, relinearize=relin), vf)
+            loss = lambda u: jnp.sum((u - fn({}, _scalar_inputs(n), u, jnp.zeros((n, 1)))[0]) ** 2)
+            g = jax.grad(loss)(u0)
+            assert jnp.all(jnp.isfinite(g)), (gate, frac, relin, g)
+            _, _, d = fn({}, _scalar_inputs(n), u0, jnp.zeros((n, 1)))
+            assert bool(jnp.any(d["active"])) and not bool(jnp.all(d["active"]))
