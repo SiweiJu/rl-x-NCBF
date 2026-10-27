@@ -47,6 +47,7 @@ from rl_x.algorithms.ncbf_ppo.flax_full_jit.paper_compat import (
     maybe_clip_logstd,
 )
 from rl_x.algorithms.ncbf_ppo.flax_full_jit.decoder import get_decoder
+from rl_x.algorithms.ncbf_ppo.flax_full_jit.d_training import DTrainer, METHODS as D_METHODS
 
 
 rlx_logger = logging.getLogger("rl_x")
@@ -496,6 +497,12 @@ class PPO:
             )
         )
 
+        # P2 / T17: method D (online world model + WM shield, d_training.py); "default" = the code path above unchanged.
+        self.method = str(config.algorithm.get("method", "default"))
+        if self.method not in D_METHODS:
+            raise ValueError(f"algorithm.method must be one of {D_METHODS}, got {self.method}")
+        self.d = DTrainer(self, config, env) if self.method == "d" else None
+
         if self.save_model:
             os.makedirs(self.save_path, exist_ok=self.resume)
             self.latest_model_file_name = "latest.model"
@@ -604,7 +611,7 @@ class PPO:
 
             # Single step rollout, shared by policy and NCBF training.
             def single_rollout(single_rollout_carry, _):
-                policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff = single_rollout_carry
+                policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff, d_roll = single_rollout_carry
 
                 key, subkey = jax.random.split(key)
                 observation = env_state.next_observation
@@ -641,10 +648,20 @@ class PPO:
                 value = self.critic.apply(critic_state.params, observation_input, latent_z, policy_decoder_output).squeeze(-1)
 
                 env_action = processed_action
+                if self.d is not None:
+                    # method D: the WM shield replaces the critic shield (use_safety_layer is False in D runs)
+                    env_action, d_inputs, d_v_prev, d_v_exec, d_diag = self.d.shield_step(
+                        d_roll, policy_state.params, env_state, env_action)
+                    constraint_active = d_diag["active"] > 0.5
+                    delta_u = d_diag["delta_u_norm"]
                 env_state = self.env.step(env_state, env_action)
                 done = env_state.terminated | env_state.truncated
+                d_rec = {}
+                if self.d is not None:
+                    d_rec = self.d.record(d_inputs, env_action, d_v_prev, env_state, d_diag)
+                    d_roll = {**d_roll, "v_prev": d_v_exec}
                 transition = (observation, env_state.actual_next_observation, action, env_action, env_state.reward, value,
-                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, last_state, last_action, history_stack, safety_diagnostics, first_step)
+                              env_state.terminated, done, log_prob, env_state.info, constraint_active, delta_u, last_state, last_action, history_stack, safety_diagnostics, first_step, d_rec)
 
                 if self.render:
                     def render(env_state):
@@ -652,7 +669,7 @@ class PPO:
 
                     env_state = jax.experimental.io_callback(render, env_state, env_state)
 
-                return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff), transition
+                return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff, d_roll), transition
 
             @jax.jit
             @jax.jit
@@ -753,10 +770,10 @@ class PPO:
             ncbf_replay_buffer = _init_buffer(self.ncbf_neg_buffer_size)
 
             def multi_learning_and_eval_save_iteration(multi_learning_and_eval_save_iteration_carry, multi_learning_iteration_step, first_learning_iteration_step=0):
-                policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = multi_learning_and_eval_save_iteration_carry
+                policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key, d_state = multi_learning_and_eval_save_iteration_carry
 
                 def learning_iteration(learning_iteration_carry, learning_iteration_step):
-                    policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
+                    policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key, d_state = learning_iteration_carry
                     ncbf_neg_buffer = ncbf_replay_buffer
                     current_learning_update = (multi_learning_iteration_step * self.nr_updates_per_multi_learning_iteration) + learning_iteration_step
                     curriculum_denominator = jnp.maximum(jnp.asarray(self.nr_updates - 1, dtype=jnp.float32), 1.0)
@@ -775,10 +792,21 @@ class PPO:
                         safety_layer_curriculum_coeff,
                         jnp.asarray(0.0, dtype=jnp.float32),
                     )
-                    rollout_carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff)
+                    d_roll = self.d.rollout_carry(d_state, current_learning_update) if self.d is not None else {}
+                    rollout_carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, safety_layer_curriculum_coeff, d_roll)
                     single_rollout_carry, batch = jax.lax.scan(single_rollout, rollout_carry, None, self.nr_steps)
-                    policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, _ = single_rollout_carry
-                    states, next_states, actions, env_actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks, safety_diagnostics, first_steps = batch
+                    policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, key, _, d_roll = single_rollout_carry
+                    states, next_states, actions, env_actions, rewards, values, terminations, dones, log_probs, infos, constraints_active, delta_u, last_states, last_actions, history_stacks, safety_diagnostics, first_steps, d_recs = batch
+                    d_metrics, d_ppo_batch, d_strength = {}, {}, jnp.asarray(0.0, jnp.float32)
+                    if self.d is not None:
+                        # D (plan 4.9 step 2): eval on the new rollout, normalizers, replay, WM updates, warm start.
+                        d_state = {**d_state, "v_prev": d_roll["v_prev"]}
+                        d_strength = d_roll["s"]
+                        key, d_key = jax.random.split(key)
+                        d_state, d_metrics = self.d.iteration_update(d_state, policy_state.params, d_recs,
+                                                                     current_learning_update, d_key)
+                        d_ppo_batch = self.d.ppo_batch(d_recs)
+                        del d_recs
                     # Per-step physics-state records (env option record_transition_physics_state) are data, not metrics.
                     infos = {k: v for k, v in infos.items() if not k.startswith("transition/")}
 
@@ -1078,7 +1106,7 @@ class PPO:
                     def ppo_loss_fn(policy_params, critic_params, encoder_params, decoder_params,
                                     ncbf_params,
                                     state_b, action_b, log_prob_b, return_b, advantage_b,
-                                    last_state_b, last_action_b, history_stack_b, first_step_b):
+                                    last_state_b, last_action_b, history_stack_b, first_step_b, d_b=None):
                         # Policy loss
                         latent_b = jax.lax.stop_gradient(self.encoder.apply(encoder_params, history_stack_b))
                         decoder_output_b = self._get_policy_decoder_output(
@@ -1113,7 +1141,20 @@ class PPO:
                         critic_loss = 0.5 * jnp.mean((new_value.squeeze(-1) - return_b) ** 2)
 
                         # anticipation loss
-                        if self.anticipation_coef > 0.0:
+                        d2_loss = jnp.asarray(0.0, dtype=pg_loss.dtype)
+                        d_anticipation_active = jnp.asarray(0.0, dtype=pg_loss.dtype)
+                        if self.d is not None:
+                            # method D (T16): anticipation through the WM shield (plan 4.7.1) and D2 (4.7.3)
+                            action_mean_processed = self.get_processed_action(action_mean)
+                            if self.d.cfg.anticipation_coef > 0.0:
+                                anticipation_loss, d_anticipation_active = self.d.anticipation_loss(
+                                    d_state, policy_params, d_b, action_mean_processed, d_strength, self.anticipation_style)
+                            else:
+                                anticipation_loss = jnp.asarray(0.0, dtype=pg_loss.dtype)
+                            if self.d.cfg.d2_coef > 0.0:
+                                d2_loss = self.d.d2_loss(d_state, policy_params, d_b, action_mean_processed)
+                            anticipation_nonfinite_rate = jnp.asarray(0.0, dtype=pg_loss.dtype)
+                        elif self.anticipation_coef > 0.0:
                             action_mean_processed = self.get_processed_action(action_mean)
                             # T06c: the paper code shielded the sampled rollout action (anticipation_style=sampled_action)
                             anticipation_input = (self.get_processed_action(action_b) if self.anticipation_style == "sampled_action"
@@ -1147,12 +1188,15 @@ class PPO:
                             anticipation_loss = jnp.asarray(0.0, dtype=pg_loss.dtype)
                             anticipation_nonfinite_rate = jnp.asarray(0.0, dtype=pg_loss.dtype)
 
+                        anticipation_coef = self.d.cfg.anticipation_coef if self.d is not None else self.anticipation_coef
                         loss = (
                             pg_loss -
                             self.entropy_coef * entropy_loss +
                             self.critic_coef * critic_loss +
-                            self.anticipation_coef * anticipation_loss
+                            anticipation_coef * anticipation_loss
                         )
+                        if self.d is not None and self.d.cfg.d2_coef > 0.0:
+                            loss = loss + self.d.cfg.d2_coef * d2_loss
 
                         metrics = {
                             "loss/policy_gradient_loss": pg_loss,
@@ -1160,6 +1204,8 @@ class PPO:
                             "loss/entropy_loss": entropy_loss,
                             "loss/anticipation_loss": anticipation_loss,
                             "loss/anticipation_nonfinite_rate": anticipation_nonfinite_rate,
+                            "loss/d2_wm_safe_loss": d2_loss,
+                            "d/anticipation_shield_active_rate": d_anticipation_active,
                             "policy_ratio/approx_kl": approx_kl_div,
                             "policy_ratio/clip_fraction": clip_fraction,
                         }
@@ -1409,6 +1455,7 @@ class PPO:
                             batch_last_actions[minibatch_indices],
                             batch_history_stack[minibatch_indices],
                             batch_first_steps[minibatch_indices],
+                            jax.tree_util.tree_map(lambda a: a[minibatch_indices], d_ppo_batch),
                         )
                         (auxiliary_loss, auxiliary_metrics), (encoder_gradients, decoder_gradients, ncbf_gradients) = auxiliary_grad_loss_fn(
                             encoder_state.params,
@@ -1439,6 +1486,14 @@ class PPO:
                         )
                         metrics = {**ppo_metrics, **auxiliary_metrics}
                         metrics["loss/ppo_loss"] = ppo_loss
+                        if self.d is not None:
+                            # D safety net: a non-finite policy / value gradient (from the WM terms) skips this
+                            # minibatch's policy and value step instead of poisoning the networks
+                            grads_finite = jnp.all(jnp.stack([jnp.all(jnp.isfinite(g)) for g in
+                                                              jax.tree_util.tree_leaves((policy_gradients, critic_gradients))]))
+                            policy_gradients = jax.tree_util.tree_map(lambda g: jnp.where(grads_finite, g, 0.0), policy_gradients)
+                            critic_gradients = jax.tree_util.tree_map(lambda g: jnp.where(grads_finite, g, 0.0), critic_gradients)
+                            metrics["d/nonfinite_ppo_grad_rate"] = 1.0 - grads_finite.astype(jnp.float32)
                         metrics["loss/auxiliary_loss"] = auxiliary_loss
 
                         if self.adaptive_lr:
@@ -1511,13 +1566,14 @@ class PPO:
                         "steps/nr_updates": combined_learning_iteration_step * self.nr_epochs * self.nr_minibatches,
                     }
 
-                    combined_metrics = {**infos, **steps_metrics, **optimization_metrics, **ncbf_metrics}
+                    combined_metrics = {**infos, **steps_metrics, **optimization_metrics, **ncbf_metrics, **d_metrics}
                     combined_metrics = tree.map_structure(lambda x: jnp.mean(x), combined_metrics)
 
                     def callback(carry):
                         metrics, parallel_seed_id = carry
                         current_time = time.time()
                         metrics["time/sps"] = int((self.nr_steps * self.nr_envs) / (current_time - self.last_time[parallel_seed_id]))
+                        metrics["time/iteration_seconds"] = current_time - self.last_time[parallel_seed_id]
                         self.last_time[parallel_seed_id] = current_time
                         global_step = int(metrics["steps/nr_env_steps"])
                         self.start_logging(global_step)
@@ -1531,21 +1587,23 @@ class PPO:
                     ncbf_replay_buffer = ncbf_neg_buffer
 
                     if self.resume:
-                        def resume_callback(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates):
-                            self._maybe_save_resume_checkpoint(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates)
+                        def resume_callback(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates, d_persist):
+                            self._maybe_save_resume_checkpoint(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates,
+                                                               d_persist=d_persist if self.d is not None else None)
                         env_curriculum = {
                             k: env_state.internal_state[k]
                             for k in ("env_curriculum_coeff", "env_curriculum_levels_in_a_row")
                             if k in env_state.internal_state
                         }
                         jax.debug.callback(resume_callback, policy_state, critic_state, ncbf_state, encoder_state, decoder_state,
-                                           env_curriculum, combined_learning_iteration_step)
+                                           env_curriculum, combined_learning_iteration_step,
+                                           self.d.persistent(d_state) if self.d is not None else {})
 
-                    return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key), None
+                    return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key, d_state), None
 
                 key, subkey = jax.random.split(key)
-                learning_iteration_carry, _ = jax.lax.scan(learning_iteration, (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, subkey), jnp.arange(first_learning_iteration_step, self.nr_updates_per_multi_learning_iteration))
-                policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key = learning_iteration_carry
+                learning_iteration_carry, _ = jax.lax.scan(learning_iteration, (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, subkey, d_state), jnp.arange(first_learning_iteration_step, self.nr_updates_per_multi_learning_iteration))
+                policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key, d_state = learning_iteration_carry
 
                 # Evaluating
                 if self.evaluation_active:
@@ -1629,14 +1687,18 @@ class PPO:
 
                 # Saving
                 if self.save_model:
-                    def save_with_check(policy_state, critic_state, ncbf_state, encoder_state, decoder_state):
+                    def save_with_check(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, d_persist):
                         self.save(policy_state, critic_state, ncbf_state, encoder_state, decoder_state)
-                    jax.debug.callback(save_with_check, policy_state, critic_state, ncbf_state, encoder_state, decoder_state)
+                        if self.d is not None:
+                            self.d.save_bundle(f"{self.save_path}/wm_latest.msgpack", d_persist)
+                    jax.debug.callback(save_with_check, policy_state, critic_state, ncbf_state, encoder_state, decoder_state,
+                                       self.d.persistent(d_state) if self.d is not None else {})
 
 
-                return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key), None
+                return (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key, d_state), None
 
-            carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key)
+            d_state = self.d.init_state() if self.d is not None else {}
+            carry = (policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_state, ncbf_replay_buffer, key, d_state)
             # Resume: finish the partially done multi iteration first, then scan over the remaining ones.
             start_multi, start_learning = divmod(self.resume_start_update, self.nr_updates_per_multi_learning_iteration)
             if start_learning > 0:
@@ -1708,26 +1770,29 @@ class PPO:
 
 
     def _resume_checkpoint_target(self):
-        return {
+        target = {
             "policy": self.policy_state,
             "critic": self.critic_state,
             "ncbf": self.ncbf_state,
             "encoder": self.encoder_state,
             "decoder": self.decoder_state,
         }
+        if getattr(self, "d", None) is not None:
+            target["d"] = self.d.persist0
+        return target
 
 
-    def _maybe_save_resume_checkpoint(self, policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates):
+    def _maybe_save_resume_checkpoint(self, policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates, d_persist=None):
         nr_completed_updates = int(np.asarray(nr_completed_updates))
         nr_total_updates = self.nr_multi_learning_and_eval_save_iterations * self.nr_updates_per_multi_learning_iteration
         due_by_iterations = self.save_interval_iterations > 0 and nr_completed_updates - self.resume_last_save_update >= self.save_interval_iterations
         due_by_time = self.save_interval_minutes > 0 and (time.time() - self.resume_last_save_time) >= 60.0 * self.save_interval_minutes
         if not (due_by_iterations or due_by_time or nr_completed_updates >= nr_total_updates):
             return
-        self._save_resume_checkpoint(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates)
+        self._save_resume_checkpoint(policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates, d_persist=d_persist)
 
 
-    def _save_resume_checkpoint(self, policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates):
+    def _save_resume_checkpoint(self, policy_state, critic_state, ncbf_state, encoder_state, decoder_state, env_curriculum, nr_completed_updates, d_persist=None):
         """Atomic resume checkpoint: write a new step directory, then atomically repoint resume/LATEST to it.
         A kill during the save leaves LATEST on the previous complete checkpoint. Older step dirs are removed
         only after the pointer has been switched."""
@@ -1745,6 +1810,8 @@ class PPO:
             "encoder": encoder_state,
             "decoder": decoder_state,
         }
+        if d_persist is not None:   # method D: WM params, Adam state, normalizers, warm-start state (not the replay)
+            checkpoint["d"] = d_persist
         save_args = orbax_utils.save_args_from_target(checkpoint)
         orbax.checkpoint.PyTreeCheckpointer().save(os.path.join(partial_dir, "states"), checkpoint, save_args=save_args)
         np.savez(os.path.join(partial_dir, "env_curriculum.npz"), **{k: np.asarray(v) for k, v in env_curriculum.items()})
@@ -1780,7 +1847,9 @@ class PPO:
     def _restore_resume_checkpoint(self):
         """Restore params + optimizer states, the update counter and the env curriculum from resume/LATEST.
         Not restored: the env state (all envs are re-reset), the NCBF negative replay buffer (refilled by the
-        next rollout with the default neg_buffer_size=1) and the RNG stream (re-derived from the seed + step)."""
+        next rollout with the default neg_buffer_size=1) and the RNG stream (re-derived from the seed + step).
+        Method D: the WM state ("d": params, Adam, normalizers, warm-start state) is restored; its replay ring,
+        negative buffer and V^prev are not (they refill from the next rollouts)."""
         restart_count = int(os.environ.get("SLURM_RESTART_COUNT", "0") or 0)
         pointer = os.path.join(self.resume_path, "LATEST")
         if not os.path.exists(pointer):
@@ -1796,6 +1865,8 @@ class PPO:
         self.ncbf_state = checkpoint["ncbf"]
         self.encoder_state = checkpoint["encoder"]
         self.decoder_state = checkpoint["decoder"]
+        if getattr(self, "d", None) is not None:
+            self.d.persist = checkpoint["d"]
         with open(os.path.join(step_dir, "meta.json")) as f:
             meta = json.load(f)
         curriculum_file = os.path.join(step_dir, "env_curriculum.npz")
@@ -1871,6 +1942,10 @@ class PPO:
             if sub_key not in loaded_ncbf_config and f"algorithm.ncbf.{sub_key}" not in explicitly_set_algorithm_params:
                 rlx_logger.info(f"Legacy checkpoint: setting algorithm.ncbf.{sub_key}={legacy_value}")
                 config.algorithm.ncbf[sub_key] = legacy_value
+        # Method D checkpoints load as plain policies (mode A eval, wm_collect): the WM / shield is training-only and its
+        # bundle is models/wm_latest.msgpack. --algorithm.method=d on the command line keeps it (needs record_wm_state).
+        if config.algorithm.get("method", "default") == "d" and "algorithm.method" not in explicitly_set_algorithm_params:
+            config.algorithm.method = "default"
         model = PPO(config, env, run_path, writer)
 
         target_ncbf = model.ncbf_state

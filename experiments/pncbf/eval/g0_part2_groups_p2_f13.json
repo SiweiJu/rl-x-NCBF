@@ -1,0 +1,82 @@
+{
+  "_comment": "P2 F13 check (experiments/pncbf/T17/f13_check.sbatch @ ba4066b): T06b ppo + default policy LayerNorm trained with environment.forward_after_state_writes=True (F13on), evaluated with the G0 part 2 protocol (mode A) with F13 on in the eval env (-evon) and off (-evoff, the T06c eval env). T06cb-evon: the T06c b checkpoints (F13 off in training) evaluated with F13 on, from the d-train tree (regress-3608236 has no F13 switch). The T06c b numbers with F13 off are in the same out_dir (group T06c-b).",
+  "out_dir": "/home/ju/repo/pncbf/g0_part2/out",
+  "protocol": "g0_part2_protocol.json",
+  "groups": {
+    "F13on-evon": {
+      "tree": "/home/ju/repo/pncbf/d-train-ba4066b",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0",
+        "--environment.forward_after_state_writes=True"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/p2_runs/runs/pncbf-2026/P2-F13-f13on/F13_f13on_seed_{seed}/models/latest.model"
+        }
+      }
+    },
+    "F13on-evoff": {
+      "tree": "/home/ju/repo/pncbf/d-train-ba4066b",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0",
+        "--environment.forward_after_state_writes=False"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/p2_runs/runs/pncbf-2026/P2-F13-f13on/F13_f13on_seed_{seed}/models/latest.model"
+        }
+      }
+    },
+    "T06cb-evon": {
+      "tree": "/home/ju/repo/pncbf/d-train-ba4066b",
+      "conda_env": "rlx-ncbf",
+      "env_args": [
+        "--environment.ncbf_use_policy_observations=True",
+        "--environment.env_curriculum_level_success_episode_return=8",
+        "--environment.command.max_velocity_per_m_factor=2.0",
+        "--environment.command.clip_max_velocity=2.0",
+        "--environment.command.velocity_ratio=(1.0,1.0,1.0)",
+        "--environment.termination.height_curriculum_scaled=True",
+        "--environment.termination.body_tilt_threshold=1000000.0",
+        "--environment.forward_after_state_writes=True"
+      ],
+      "methods": {
+        "ppo": {
+          "seeds": [
+            1042,
+            1142,
+            1242
+          ],
+          "shield": false,
+          "path": "/home/ju/repo/pncbf/regress-3608236/experiments/runs/pncbf-2026/T06c-b/T06c_b_seed_{seed}/models/latest.model"
+        }
+      }
+    }
+  }
+}

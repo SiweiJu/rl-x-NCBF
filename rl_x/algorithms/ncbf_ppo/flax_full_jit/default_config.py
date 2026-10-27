@@ -119,6 +119,13 @@ def get_config(algorithm_name):
 
     # Perturbation-sweep evaluation (runner.mode=test, see eval_sweep.py and experiments/pncbf/eval/run_eval_sweep.py).
     # Off by default: test() then runs the old batch evaluation. Training never reads these values.
+    # P2 / T17 + T16: method D (online world model + WM shield + internalization), see d_training.py.
+    # "default" = the code path before P2 (critic shield per ncbf.*); "d" needs environment.record_wm_state=True and
+    # should run with ncbf.use_safety_layer=False (the WM shield replaces the critic shield).
+    config.method = "default"
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.d_training import config_defaults as _d_config_defaults
+    config.d = _d_config_defaults(config_dict)
+
     # T12 world-model data collection (runner.mode=test, see wm_collect.py and experiments/pncbf/T12/).
     config.wm_collect = config_dict.ConfigDict()
     config.wm_collect.enabled = False  # True: test() collects world-model data instead of the batch evaluation
