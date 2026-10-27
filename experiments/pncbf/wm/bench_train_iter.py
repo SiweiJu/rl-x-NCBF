@@ -81,6 +81,31 @@ def wrap_shield(model, orig, mode):
         xf = jnp.broadcast_to(xi_full, traj.shape[:-1] + (xl.dim,))
         return safety_value(wm_state.margin_fall(traj, xf, mcfg, lay_s, xl))
 
+    if mode == "t15":   # T15: the full WM shield (safety_value + wm_shield), ShieldConfig / SafetyValueConfig overrides
+        import dataclasses
+        from rl_x.algorithms.ncbf_ppo.flax_full_jit import safety_value as SV
+        from rl_x.algorithms.ncbf_ppo.flax_full_jit import wm_shield as WS
+
+        def kv(text):
+            out = {}
+            for item in [t for t in str(text).split(",") if t]:
+                key, val = item.split("=")
+                out[key] = {"True": True, "False": False}.get(val, val)
+                for typ in (int, float):
+                    try:
+                        out[key] = typ(val)
+                        break
+                    except ValueError:
+                        pass
+            return out
+        spec = SV.ImaginationSpec.from_env(env, xi_active=np.arange(layout.xi_dim))
+        sv_cfg = dataclasses.replace(SV.SafetyValueConfig(H=H, matmul_dtype=B("matmul_dtype", "float32")),
+                                     **kv(B("t15_sv", "")))
+        sh_cfg = dataclasses.replace(WS.ShieldConfig(p_c=float(B("t15_p_c", 0.9))), **kv(B("t15_sh", "")))
+        vf = SV.make_safety_value_fn(sv_cfg, spec, wm=wm, policy_fn=lambda p, o: pol(o))
+        shield_fn = WS.make_shield_fn(sh_cfg, vf)
+        print(f"t15 shield: {sv_cfg} {sh_cfg}", flush=True)
+
     def wrapped(raw_action, observation, last_action, last_state, latent_z, coeff, params_stack, first_step):
         out = orig(raw_action, observation, last_action, last_state, latent_z, coeff, params_stack, first_step)
         if raw_action.shape[0] != N:      # PPO-update call (anticipation loss): unchanged
@@ -90,6 +115,13 @@ def wrap_shield(model, orig, mode):
         xi_full = jnp.zeros((N, xl.dim)) + 0.01 * jnp.mean(observation)
         command = observation[:, env.goal_velocities_obs_idx]
         u = raw_action
+        if mode == "t15":   # stand-in state (cost only); real shapes, gating / relinearization have static shapes
+            A_ = layout.action_dim
+            inputs = SV.ShieldInputs(x0=x0, xi_full=xi_full, delay_buffer=jnp.zeros((N, 2, A_)) + 0.0 * u[:, None, :],
+                                     delay_steps=jnp.zeros((N,), jnp.int32), command=command,
+                                     first_step=first_step, stale=jnp.zeros((N,), bool))
+            u_safe, v_exec, _ = shield_fn({"wm": bundle, "policy": {}}, inputs, u, jnp.zeros((N, 1)) + 0.5)
+            return (out[0] + 1e-12 * (u_safe - u) + 1e-12 * jnp.mean(v_exec),) + tuple(out[1:])
         if mode == "full":
             v, g = jax.value_and_grad(lambda uu: jnp.sum(vfn(uu, x0, xi_full, command)))(u)
         elif mode == "gated":
