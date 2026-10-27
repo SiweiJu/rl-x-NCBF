@@ -218,8 +218,9 @@ def load_wmdata_shard(path, max_envs=0, seed=0, check=False):
          "done": _tm(done_tm, envs).astype(np.float32),
          "terminated": _tm(ld("terminated"), envs).astype(np.float32),
          "shock_next": (_tm(ld("perturbed_next"), envs) | _tm(ld("dr_resampled_next"), envs)).astype(np.float32),
-         "start_ok": _tm(ld("episode_step"), envs) != 0,      # the first transition of an episode has stale IMU values
+         "episode_step": np.minimum(_tm(ld("episode_step"), envs), 32767).astype(np.int16),
          "track_id": np.repeat(np.arange(len(envs)), T)}
+    d["start_ok"] = d["episode_step"] != 0       # the first transition of an episode has stale IMU values
     xm = _tm(ld("x_minus_next"), envs).astype(np.float32)
     S = len(d["done"])
     last_of_track = np.zeros(S, bool)

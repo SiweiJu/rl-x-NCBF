@@ -22,6 +22,11 @@ export TMPDIR=/home/ju/repo/pncbf/tmp/${SLURM_JOB_ID:-$$}; mkdir -p "$TMPDIR"
 test "$(git -C "$TREE" rev-parse HEAD)" = "$COMMIT"
 python -c "import rl_x; assert rl_x.__file__.startswith('$TREE'), rl_x.__file__; print('rl_x:', rl_x.__file__)"
 echo "=== $(date -Is) job ${SLURM_JOB_ID:-none} host=$(hostname) gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) commit=$COMMIT"
-python experiments/pncbf/wm/eval_wm.py --wm "${WM:?}" --data "${DATA:?}" --out "${OUT:?}" --split "${SPLIT:-heldout}" \
-  --max_envs_per_shard "${MAX_ENVS:-0}" --max_windows "${MAX_WINDOWS:-50000}"
+if [[ "${TOOL:-eval}" == diag ]]; then   # error breakdown by row category (diag_wm.py)
+  python experiments/pncbf/wm/diag_wm.py --wm "${WM:?}" --data "${DATA:?}" --out "${OUT:?}" --split "${SPLIT:-heldout}" \
+    --max_envs_per_shard "${MAX_ENVS:-0}" --max_windows "${MAX_WINDOWS:-50000}" --ks "${KS:-1,2,8,25}"
+else
+  python experiments/pncbf/wm/eval_wm.py --wm "${WM:?}" --data "${DATA:?}" --out "${OUT:?}" --split "${SPLIT:-heldout}" \
+    --max_envs_per_shard "${MAX_ENVS:-0}" --max_windows "${MAX_WINDOWS:-50000}" ${MATMUL:+--matmul_dtype $MATMUL}
+fi
 echo "=== $(date -Is) finished"

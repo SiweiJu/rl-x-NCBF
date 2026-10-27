@@ -43,9 +43,14 @@ def main():
     p.add_argument("--max_windows", type=int, default=50000)
     p.add_argument("--max_envs_per_shard", type=int, default=0)
     p.add_argument("--split", default="heldout", choices=["heldout", "train"], help="train = in-sample (dev checks)")
+    p.add_argument("--matmul_dtype", default="", help="override the forward's matmul dtype, e.g. bfloat16")
     p.add_argument("--out", required=True)
     args = p.parse_args()
     wm, bundle, meta = WE.load_bundle(args.wm)
+    if args.matmul_dtype:   # same params, forward with bf16 matmuls (f32 accumulation)
+        import dataclasses
+        from rl_x.algorithms.ncbf_ppo.flax_full_jit import world_model as W
+        wm = W.WorldModel(wm.layout, dataclasses.replace(wm.cfg, matmul_dtype=args.matmul_dtype))
     if args.data == "synthetic":
         a = meta["args"]
         held, _ = WD.synthetic_dataset(n_envs=max(a["synthetic_envs"] // 4, 8), T=a["synthetic_T"], seed=a["seed"] + 1000)
@@ -59,7 +64,7 @@ def main():
         held, _ = WD.load_shards(paths, meta["schema"].get("field_map"))
     ks = [int(k) for k in args.ks.split(",")]
     res = WE.evaluate(wm, bundle, held, ks, args.near_failure_window, args.max_windows)
-    res["meta"] = {"wm": args.wm, "split": args.split, "heldout_pattern": args.heldout_pattern, "rows": int(WD.n_rows(held)),
+    res["meta"] = {"wm": args.wm, "split": args.split, "matmul_dtype": wm.cfg.matmul_dtype, "heldout_pattern": args.heldout_pattern, "rows": int(WD.n_rows(held)),
                    "terminations": int(held["terminated"].sum()), "train_args": meta.get("args")}
     with open(args.out, "w") as f:
         json.dump(res, f, indent=1)
