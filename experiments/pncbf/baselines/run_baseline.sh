@@ -1,6 +1,10 @@
 #!/bin/bash
 # Launches one constrained-baseline training run (T07/T08). Configure with environment variables:
-#   METHOD      ppo_lag_gradient | ppo_lag_pid | cpo | ppo (plain PPO reference)
+#   METHOD      ppo_lag_gradient | ppo_lag_pid | cpo | ppo (plain PPO reference) | p3o (T09) | ppo_cat (T10, PPO + CaT)
+#   KAPPA       P3O penalty factor (default 20, paper)        CAT_SOURCE / CAT_P_MAX  CaT constraint (collision, 1.0)
+#   OBSTACLES_ENABLED=True + OBSTACLES_* / OBSTACLES_PRESET  moving obstacles (../../cluster_runner/obstacle_args.sh);
+#               ppo_cat sets OBSTACLES_TERMINATE_ON_COLLISION=False unless given (CaT replaces the hard termination)
+#   PHASE, TASK wandb tags phase/<PHASE>, task/<TASK>, exp/<TASK> (default P0, T08)
 #   COST_LIMIT  expected failures per episode (cost = 1 on the failure step), e.g. 0, 0.01, 0.05
 #   SEED, NR_ENVS, TOTAL_TIMESTEPS, MINIBATCH_SIZE, NR_EPOCHS, NR_STEPS, LEARNING_RATE, TAG_EXTRA, RUN_SUFFIX
 # Defaults = paper training scale for Go2 locomotion (wandb 202601_paper: 1024 envs, 128 steps,
@@ -12,7 +16,7 @@ SCRIPT_DIR="${BASELINES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 EXPERIMENTS_DIR="${REPO_DIR}/experiments"
 
-: "${METHOD:?METHOD must be ppo_lag_gradient, ppo_lag_pid, cpo or ppo}"
+: "${METHOD:?METHOD must be ppo_lag_gradient, ppo_lag_pid, cpo, ppo, p3o or ppo_cat}"
 COST_LIMIT="${COST_LIMIT:-0.0}"
 SEED="${SEED:-0}"
 NR_ENVS="${NR_ENVS:-1024}"
@@ -51,18 +55,39 @@ case "${METHOD}" in
     ppo)
         ALGORITHM_NAME="ppo.flax_full_jit"
         ;;
+    p3o)
+        ALGORITHM_NAME="p3o.flax_full_jit"
+        method_args+=(--algorithm.cost_measure=episode --algorithm.p3o.kappa="${KAPPA:-20.0}")
+        ;;
+    ppo_cat)
+        ALGORITHM_NAME="p3o.flax_full_jit"
+        method_args+=(--algorithm.p3o.enabled=False --algorithm.cat.enabled=True
+                      --algorithm.cat.constraint_source="${CAT_SOURCE:-collision}" --algorithm.cat.p_max="${CAT_P_MAX:-1.0}")
+        if [[ "${OBSTACLES_ENABLED:-False}" == "True" ]]; then
+            export OBSTACLES_TERMINATE_ON_COLLISION="${OBSTACLES_TERMINATE_ON_COLLISION:-False}"
+        fi
+        ;;
     *)
         echo "Unknown METHOD ${METHOD}" >&2; exit 1 ;;
 esac
-if [[ "${METHOD}" != "ppo" ]]; then
+if [[ "${METHOD}" != "ppo" && "${METHOD}" != "ppo_cat" ]]; then
     method_args+=(--algorithm.cost_limit="${COST_LIMIT}")
 fi
 
+extra_args=()
+TASK_KIND="locomotion"
+if [[ "${OBSTACLES_ENABLED:-False}" == "True" ]]; then
+    source "${REPO_DIR}/experiments/cluster_runner/obstacle_args.sh"
+    TASK_KIND="obstacles"
+fi
+PHASE="${PHASE:-P0}"
+TASK="${TASK:-T08}"
+
 GIT_COMMIT="$(git -C "${REPO_DIR}" rev-parse HEAD)"
 RUN_NAME="${RUN_NAME:-${METHOD}_go2_d${COST_LIMIT}_seed${SEED}${RUN_SUFFIX:-}}"
-export WANDB_TAGS="phase/P0,task/T08,method/${METHOD},robot/go2,task/locomotion,cost_limit/${COST_LIMIT}${TAG_EXTRA:+,${TAG_EXTRA}}"
+export WANDB_TAGS="phase/${PHASE},task/${TASK},exp/${TASK},method/${METHOD},robot/go2,task/${TASK_KIND},cost_limit/${COST_LIMIT}${TAG_EXTRA:+,${TAG_EXTRA}}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_DIR}"  # set, not prepend (P2 brief)
 
 if [[ -z "${PYTHON_EXE:-}" ]]; then
     PYTHON_EXE="${HOME}/miniconda3/envs/${CONDA_ENV}/bin/python"
@@ -87,6 +112,7 @@ cd "${EXPERIMENTS_DIR}"
     --algorithm.nr_epochs="${NR_EPOCHS}" \
     --algorithm.evaluation_and_save_frequency="${EVALUATION_AND_SAVE_FREQUENCY}" \
     "${method_args[@]}" \
+    "${extra_args[@]}" \
     --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
     --environment.seed="${SEED}" \
     --environment.nr_envs="${NR_ENVS}" \
