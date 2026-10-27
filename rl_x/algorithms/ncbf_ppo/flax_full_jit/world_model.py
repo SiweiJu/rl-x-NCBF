@@ -343,7 +343,8 @@ def no_delay_step(buffer, u):
 
 
 def rollout(wm: WorldModel, bundle, x0, xi, delay_buffer0, u0, policy_fn: Callable, H: int,
-            delay_step_fn: Optional[Callable] = None, open_loop: bool = False, return_actions: bool = False):
+            delay_step_fn: Optional[Callable] = None, open_loop: bool = False, return_actions: bool = False,
+            unroll: int = 1):
     """H-step imagination from x0 = x+_t (batched, (N, D)) with xi (N, P).
 
     Step t applies the candidate action u0 (N, A) through the delay buffer: (u~_t, buf) = delay_step_fn(buf, u0);
@@ -353,6 +354,7 @@ def rollout(wm: WorldModel, bundle, x0, xi, delay_buffer0, u0, policy_fn: Callab
     jax.grad w.r.t. u0 flows through the dynamics and the delay buffer, and (closed loop, default) through the policy's
     reaction to the imagined states. open_loop=True stops the gradient at the policy's outputs, so the later actions
     keep their values but are treated as constants (gradient through the dynamics only).
+    unroll: lax.scan unroll factor (T15 speed switch; same values).
     """
     delay_step_fn = delay_step_fn or no_delay_step
     u_tilde, buf = delay_step_fn(delay_buffer0, u0)
@@ -368,7 +370,7 @@ def rollout(wm: WorldModel, bundle, x0, xi, delay_buffer0, u0, policy_fn: Callab
         return (xn, buf), (xn, u)
 
     if H > 1:
-        _, (xs, us) = jax.lax.scan(body, (x1, buf), None, length=H - 1)
+        _, (xs, us) = jax.lax.scan(body, (x1, buf), None, length=H - 1, unroll=unroll)
         traj = jnp.concatenate([x1[None], xs], axis=0)
         actions = jnp.concatenate([u0[None], us], axis=0)
     else:

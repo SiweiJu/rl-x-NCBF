@@ -345,3 +345,59 @@ def test_shield_grad_finite_on_uncorrected_rows():
             assert jnp.all(jnp.isfinite(g)), (gate, frac, relin, g)
             _, _, d = fn({}, _scalar_inputs(n), u0, jnp.zeros((n, 1)))
             assert bool(jnp.any(d["active"])) and not bool(jnp.all(d["active"]))
+
+
+def test_speed_switches_equivalent():
+    """gate_vjp=residuals and relin_frac=gate_frac give the default shield's result; scan_unroll keeps V."""
+    import dataclasses
+    s = _setup(n=32, H=6)
+    base = WS.ShieldConfig(p_c=0.95, gate="gated", gate_frac=0.25, relinearize=1, max_delta_u=0.5)
+    st = {"v_prev": jnp.zeros((32, 1))}
+    ref = WS.make_shield(s["vf"], base).apply(s["params"], s["inputs"], s["u0"], st)
+    for kw in ({"gate_vjp": "residuals"}, {"relin_frac": 0.25}, {"gate_vjp": "residuals", "relin_frac": 0.25}):
+        out = WS.make_shield(s["vf"], dataclasses.replace(base, **kw)).apply(s["params"], s["inputs"], s["u0"], st)
+        np.testing.assert_allclose(np.asarray(out[0]), np.asarray(ref[0]), rtol=1e-4, atol=1e-5, err_msg=str(kw))
+        for k in ("G_before", "G_after", "gate_mask", "active", "nr_projections"):
+            np.testing.assert_allclose(np.asarray(out[2][k]), np.asarray(ref[2][k]), rtol=1e-4, atol=1e-5,
+                                       err_msg=f"{kw} {k}")
+    assert np.asarray(ref[2]["nr_projections"]).max() == 2
+    # relin_frac smaller than the number of still-violated envs: fewer second projections, same first step
+    small = WS.make_shield(s["vf"], dataclasses.replace(base, relin_frac=1 / 32)).apply(s["params"], s["inputs"],
+                                                                                      s["u0"], st)
+    assert int((np.asarray(small[2]["nr_projections"]) == 2).sum()) <= 1
+    np.testing.assert_array_equal(np.asarray(small[2]["active"]), np.asarray(ref[2]["active"]))
+    cfg5 = dataclasses.replace(s["cfg"], scan_unroll=5)
+    vf5 = SV.make_safety_value_fn(cfg5, s["spec"], wm=s["wm"], policy_fn=s["policy_fn"])
+    np.testing.assert_allclose(np.asarray(vf5(s["params"], s["inputs"], s["u0"])[0]),
+                               np.asarray(s["vf"](s["params"], s["inputs"], s["u0"])[0]), rtol=1e-5, atol=1e-6)
+
+
+def test_secant_relinearization():
+    n = 3
+    u0 = jnp.zeros((n, 2))
+    sh = WS.make_shield(_scalar_value_fn, WS.ShieldConfig(gate="full", relinearize=1, relin_mode="secant",
+                                                          max_delta_u=5.0))
+    u, _, out = sh.apply({}, _scalar_inputs(n), u0, sh.init_state(n))
+    s_star = -1.0 / (-1.0 - (math.log(2) - 1.0))   # G0 / (G0 - G1), G0 = -1, G1 = G(u=1) = log 2 - 1
+    np.testing.assert_allclose(np.asarray(u[:, 0]), s_star, rtol=1e-5)
+    np.testing.assert_allclose(float(out["G_after"][0]), math.log1p(s_star) - 1.0, rtol=1e-5)
+    assert math.log(2) - 1 < float(out["G_after"][0]) < 0.0
+    assert int(out["nr_projections"][0]) == 2
+    # cap binding at the first projection: no secant extension
+    sh2 = WS.make_shield(_scalar_value_fn, WS.ShieldConfig(gate="full", relinearize=1, relin_mode="secant",
+                                                           max_delta_u=0.5))
+    u2, _, out2 = sh2.apply({}, _scalar_inputs(n), u0, sh2.init_state(n))
+    np.testing.assert_allclose(np.asarray(u2[:, 0]), 0.5, rtol=1e-5)
+    assert int(out2["nr_projections"][0]) == 1
+
+
+def test_speed_switches_grad_finite():
+    def vf(params, inputs, u):
+        v = jnp.log1p(jnp.maximum(jnp.sum(u, axis=-1), -0.9)) - 0.5
+        return v[:, None], {"logp": v[:, None], "min_margin": v[:, None]}
+    n = 6
+    u0 = jnp.array([[0.0, 0.0], [1.0, 1.0], [0.2, 0.1], [2.0, 0.0], [-0.3, 0.1], [0.5, 0.5]])
+    for kw in ({"gate_vjp": "residuals"}, {"relin_mode": "secant"}, {"relin_frac": 0.2}, {"post_check": False}):
+        fn = WS.make_shield_fn(WS.ShieldConfig(gate="gated", gate_frac=1.0, **kw), vf)
+        g = jax.grad(lambda u: jnp.sum((u - fn({}, _scalar_inputs(n), u, jnp.zeros((n, 1)))[0]) ** 2))(u0)
+        assert jnp.all(jnp.isfinite(g)), kw

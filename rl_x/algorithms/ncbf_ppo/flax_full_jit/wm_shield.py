@@ -46,6 +46,13 @@ class ShieldConfig:
     action_clipping: bool = False     # clip u_safe to the action bounds given to make_shield
     skip_stale: bool = True           # no intervention where inputs.stale (stale IMU groups, F13)
     post_check: bool = True           # recompute G at the final action of the gated envs (G_after, V^prev)
+    # --- speed switches (T15 follow-up); defaults = the original behavior ---
+    gate_vjp: str = "recompute"       # recompute: forward all N, then value_and_grad on the gated subset
+                                      # residuals: one jax.vjp on the all-N forward, cotangent = gate mask (same a)
+    relin_mode: str = "gradient"      # gradient: VJP at u* and project again | secant: one forward at u*, then a
+                                      # secant step along the first correction direction (no second VJP)
+    relin_frac: float = 0.0           # gradient mode: > 0 relinearizes only the ceil(relin_frac*N) envs with the
+                                      # lowest G(u*) < 0 (needs one forward at u* on the gated subset); 0 = all gated
 
     @property
     def gamma_c(self):
@@ -62,6 +69,12 @@ class ShieldConfig:
             raise ValueError("p_c must be in (0, 1)")
         if self.relinearize < 0:
             raise ValueError("relinearize must be >= 0")
+        if self.gate_vjp not in ("recompute", "residuals"):
+            raise ValueError("gate_vjp must be recompute or residuals")
+        if self.relin_mode not in ("gradient", "secant"):
+            raise ValueError("relin_mode must be gradient or secant")
+        if self.relin_mode == "secant" and self.relinearize > 1:
+            raise ValueError("relin_mode=secant supports relinearize 0 or 1")
         return self
 
     def nr_gated(self, nr_envs):
@@ -160,21 +173,54 @@ class Shield:
         (_, (G, v, aux)), a = jax.value_and_grad(f, has_aux=True)(u)
         return (G, v, aux), a
 
-    def _correct(self, params, inputs, u0, v_prev, G0, a0, strength):
+    def _correct(self, params, inputs, u0, v_prev, G0, a0, strength, nr_envs):
         """Projection + relinearization + post-check on a (sub)batch whose G(u⁰), ∇G(u⁰) are known."""
         cfg = self.cfg
-        u, ok0 = project_halfspace(u0, a0, G0, cfg)
-        u = cap_correction(u0, u, cfg.max_delta_u)
+        u1, ok0 = project_halfspace(u0, a0, G0, cfg)
+        u1 = cap_correction(u0, u1, cfg.max_delta_u)
         need0 = ok0 & (G0 < 0.0)
+        u = jnp.where(need0[:, None], u1, u0)
         n_proj = need0.astype(jnp.int32)
         G_last, v_last = G0, None
-        for _ in range(cfg.relinearize):
-            (G_u, v_u, _), a_u = self.G_value_and_grad(params, inputs, u, v_prev)
-            G_last, v_last = G_u, v_u
-            u_new, ok = project_halfspace(u, a_u, G_u, cfg)
-            again = need0 & ok & (G_u < 0.0)
-            u = jnp.where(again[:, None], cap_correction(u0, u_new, cfg.max_delta_u), u)
+        if cfg.relinearize > 0 and cfg.relin_mode == "secant":
+            # φ(s) = G(u⁰ + s d), d = u* - u⁰: root of the secant through φ(0) = G⁰ and φ(1) = G(u*),
+            # s ∈ [1, cap / ‖d‖], only where G(u*) is still < 0 and improved on G⁰.
+            G1, v1, _ = self.G_and_V(params, inputs, u, v_prev)
+            d = u - u0
+            dn = jnp.sqrt(jnp.sum(d * d, axis=-1) + 1e-24)
+            s_max = (cfg.max_delta_u / dn) if cfg.max_delta_u > 0.0 else jnp.full_like(dn, 1e6)
+            again = need0 & jnp.isfinite(G1) & (G1 < 0.0) & (G1 > G0) & (s_max > 1.0 + 1e-6)
+            s = jnp.where(again, G0 / jnp.where(again, G0 - G1, 1.0), 1.0)
+            s = jnp.clip(s, 1.0, jnp.maximum(s_max, 1.0))
+            u = jnp.where(again[:, None], u0 + s[:, None] * d, u)
             n_proj = n_proj + again.astype(jnp.int32)
+            G_last, v_last = G1, v1
+        elif cfg.relinearize > 0 and cfg.relin_frac > 0.0:
+            G1, v1, _ = self.G_and_V(params, inputs, u, v_prev)
+            k2 = int(min(u0.shape[0], max(1, math.ceil(cfg.relin_frac * nr_envs))))
+            score = jnp.where(need0 & jnp.isfinite(G1) & (G1 < 0.0), jax.lax.stop_gradient(G1), jnp.inf)
+            s2, j2 = jax.lax.top_k(-score, k2)
+            valid2 = jnp.isfinite(s2)
+            sub = jax.tree_util.tree_map(lambda x: x[j2], inputs)
+            u_s, u0_s, vp_s = u[j2], u0[j2], v_prev[j2]
+            np_s = jnp.zeros((k2,), jnp.int32)
+            for _ in range(cfg.relinearize):
+                (G_u, _, _), a_u = self.G_value_and_grad(params, sub, u_s, vp_s)
+                u_new, ok = project_halfspace(u_s, a_u, G_u, cfg)
+                again = valid2 & ok & (G_u < 0.0)
+                u_s = jnp.where(again[:, None], cap_correction(u0_s, u_new, cfg.max_delta_u), u_s)
+                np_s = np_s + again.astype(jnp.int32)
+            u = u.at[j2].set(u_s)
+            n_proj = n_proj.at[j2].add(np_s)
+            G_last, v_last = G1, v1
+        else:
+            for _ in range(cfg.relinearize):
+                (G_u, v_u, _), a_u = self.G_value_and_grad(params, inputs, u, v_prev)
+                G_last, v_last = G_u, v_u
+                u_new, ok = project_halfspace(u, a_u, G_u, cfg)
+                again = need0 & ok & (G_u < 0.0)
+                u = jnp.where(again[:, None], cap_correction(u0, u_new, cfg.max_delta_u), u)
+                n_proj = n_proj + again.astype(jnp.int32)
         u = jnp.where(need0[:, None], u, u0)
         if cfg.action_clipping:
             u = jnp.clip(u, self.act_low, self.act_high)
@@ -199,6 +245,14 @@ class Shield:
         if cfg.gate == "full":
             (G0, v0, aux0), a0 = self.G_value_and_grad(params, inputs, u0, v_prev)
             idx = jnp.arange(n)
+        elif cfg.gate_vjp == "residuals":
+            def f(u_):
+                G_, v_, aux_ = self.G_and_V(params, inputs, u_, v_prev)
+                return G_, (v_, aux_)
+            G0, vjp_fn, (v0, aux0) = jax.vjp(f, u0, has_aux=True)
+            score = jnp.where(stale | ~jnp.isfinite(G0), jnp.inf, jax.lax.stop_gradient(G0))
+            _, idx = jax.lax.top_k(-score, k)
+            (a0,) = vjp_fn(jnp.zeros_like(G0).at[idx].set(1.0))   # rows are independent: per-env ∇G on the gate
         else:
             G0, v0, aux0 = self.G_and_V(params, inputs, u0, v_prev)
             score = jnp.where(stale | ~jnp.isfinite(G0), jnp.inf, jax.lax.stop_gradient(G0))
@@ -210,7 +264,7 @@ class Shield:
 
         sub = jax.tree_util.tree_map(lambda x: x[idx], inputs) if cfg.gate == "gated" else inputs
         G0s = jnp.where(stale[idx], jnp.inf, G0[idx])   # stale rows: no correction
-        u_s, act_s, nproj_s, Ga_s, va_s = self._correct(params, sub, u0[idx], v_prev[idx], G0s, a0[idx], strength)
+        u_s, act_s, nproj_s, Ga_s, va_s = self._correct(params, sub, u0[idx], v_prev[idx], G0s, a0[idx], strength, n)
         if va_s is None:   # relinearize = 0 and no post-check: last linearization point is u⁰
             va_s = v0[idx]
             Ga_s = G0[idx]

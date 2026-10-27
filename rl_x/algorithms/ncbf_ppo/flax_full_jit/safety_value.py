@@ -50,6 +50,7 @@ class SafetyValueConfig:
     margin_softmin_temperature: float = 0.0      # inside margin_fall / margin_fall_physical (0 = hard min over terms)
     delay_mode: str = "xi"                       # "xi": delay_steps_from_xi (fixed; worst case if mixed) | "given"
     logp_max: float = -1e-12                     # clamp of log P̂ before the logit (V <= ~27.6 at the default)
+    scan_unroll: int = 1                         # lax.scan unroll of the imagination (speed only; same values)
 
     def per_event(self, values, name):
         values = tuple(float(v) for v in values)
@@ -233,7 +234,7 @@ def make_safety_value_fn(cfg: SafetyValueConfig, spec: ImaginationSpec, wm: Opti
             params = dict(jax.lax.stop_gradient({k: v for k, v in params.items() if k != "policy"}), policy=pol_params)
             pol = lambda x: policy_fn(params["policy"], spec.obs_fn(x, inputs.command, inputs.xi_full))
             traj = W.rollout(wm, params["wm"], inputs.x0, spec.wm_xi(inputs.xi_full), inputs.delay_buffer, u, pol,
-                             cfg.H, delay_step_fn=delay_fn(inputs), open_loop=cfg.open_loop)
+                             cfg.H, delay_step_fn=delay_fn(inputs), open_loop=cfg.open_loop, unroll=cfg.scan_unroll)
             return from_traj(traj, inputs)
     elif cfg.source == "critic":
         if critic_fn is None:
@@ -268,7 +269,7 @@ def make_mjx_oracle_rollout(env, policy_fn, spec: ImaginationSpec):
 
     def rollout_fn(params, inputs, u, H):
         state0 = inputs.extra
-        with _oracle_env_patches(env, True):
+        with _oracle_env_patches(env, False):
             step = jax.vmap(lambda s, a: raw_step(env, s, a))
 
             def body(carry, _):

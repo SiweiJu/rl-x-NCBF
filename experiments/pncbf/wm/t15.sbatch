@@ -34,7 +34,7 @@ python pncbf/wm/t15_shield_check.py --gate_wm "$WM" --gate_out "$OUT" --gate_mod
   --runner.load_model="$TMPDIR/ckpt.model" --runner.run_name=t15_${SLURM_JOB_ID:-x} \
   --algorithm.name=ncbf_ppo.flax_full_jit --environment.name=ncbf_mujoco.robot_locomotion.mjx --runner.mode=test \
   --runner.track_console=False --runner.track_tb=False --runner.track_wandb=False --runner.save_model=False \
-  --runner.project_name=pncbf_t15 --runner.exp_name=T15 --environment.nr_envs=1024 --environment.terrain.type=plane \
+  --runner.project_name=pncbf_t15 --runner.exp_name=T15 --environment.nr_envs=${NR_ENVS:-1024} --environment.terrain.type=plane \
   --environment.ncbf_use_policy_observations=True --environment.env_curriculum_level_success_episode_return=8 \
   --environment.command.max_velocity_per_m_factor=2.0 --environment.command.clip_max_velocity=2.0 \
   "--environment.command.velocity_ratio=(1.0,1.0,1.0)" --environment.termination.height_curriculum_scaled=True \

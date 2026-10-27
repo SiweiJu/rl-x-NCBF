@@ -53,6 +53,8 @@ def run(model, _episodes):
     env = model.env
     if not env.record_wm_state:
         raise ValueError("needs --environment.record_wm_state=True")
+    if G.get("task", "check") == "bench":
+        return bench(model)
     agent = make_agent(model)
     wm, bundle, meta = _load_wm(env)
     xa = meta["schema"].get("xi_active")
@@ -75,14 +77,18 @@ def run(model, _episodes):
     def build(mode):
         if mode == "none":
             return None, 1
-        gate, dt = mode.split("_")
-        sv_cfg = SV.SafetyValueConfig(source="wm", H=H, events=events, T_l=(float(G.get("T_l", 1.0)),),
+        gate, dt = mode.split("_")[:2]
+        source = "mjx_oracle" if mode.endswith("_oracle") else "wm"
+        sv_cfg = SV.SafetyValueConfig(source=source, H=H, events=events, T_l=(float(G.get("T_l", 1.0)),),
                                       matmul_dtype={"f32": "float32", "bf16": "bfloat16"}[dt],
-                                      open_loop=G.get("open_loop", "0") == "1")
-        vf = SV.make_safety_value_fn(sv_cfg, spec, wm=wm, policy_fn=policy_fn)
+                                      open_loop=G.get("open_loop", "0") == "1", scan_unroll=int(G.get("unroll", 1)))
+        vf = SV.make_safety_value_fn(sv_cfg, spec, wm=wm, policy_fn=policy_fn,
+                                     mjx_rollout_fn=SV.make_mjx_oracle_rollout(env, policy_fn, spec))
         sh_cfg = WS.ShieldConfig(p_c=float(G.get("p_c", 0.5)), alpha=float(G.get("alpha", 0.5)),
                                  tau=float(G.get("tau", 0.1)), gate=gate, gate_frac=float(G.get("frac", 0.25)),
-                                 relinearize=int(G.get("relin", 1)), max_delta_u=float(G.get("max_delta_u", 0.5)))
+                                 relinearize=int(G.get("relin", 1)), max_delta_u=float(G.get("max_delta_u", 0.5)),
+                                 gate_vjp=G.get("gate_vjp", "recompute"), relin_mode=G.get("relin_mode", "gradient"),
+                                 relin_frac=float(G.get("relin_frac", 0.0)))
         return WS.make_shield_fn(sh_cfg, vf, nr_events=len(events)), len(events)
 
     STAT_KEYS = ("n_active", "sum_du", "n_resolved", "n_improved", "n_viol", "n_viol_gated", "n_stale", "sum_Gb",
@@ -105,10 +111,10 @@ def run(model, _episodes):
                                            spec.lay, spec.xl) < 0
         return env_state, alive & ~done, fell | (alive & term), phys | (alive & pf), jnp.sum(term.astype(jnp.float32))
 
-    def make_shield_step(shield_fn):
+    def make_shield_step(shield_fn, oracle=False):
         @jax.jit
         def shield_step(params, env_state, u_cmd, v_prev):
-            inputs = SV.inputs_from_env_state(env, env_state, spec)
+            inputs = SV.inputs_from_env_state(env, env_state, spec, extra=env_state if oracle else None)
             u, v_prev, d = shield_fn(params, inputs, u_cmd, v_prev)
             act, ok = d["active"], ~d["stale"]
             viol = (d["G_before"] < 0) & ok
@@ -125,7 +131,7 @@ def run(model, _episodes):
     for p in probs:
         for mode in modes:
             shield_fn, E = build(mode)
-            shield_step = make_shield_step(shield_fn) if shield_fn is not None else None
+            shield_step = make_shield_step(shield_fn, mode.endswith("_oracle")) if shield_fn is not None else None
             base = jax.random.PRNGKey(seed)
             env_state = env.reset(jax.random.split(jax.random.fold_in(base, 0), nr_envs), True)
             env_state = apply_initial_commands(env, env_state, jax.random.fold_in(base, 3), 0.25)
@@ -151,7 +157,7 @@ def run(model, _episodes):
                 t3 = time.perf_counter()
                 if t == 0:
                     compile_s = time.time() - t_c
-                elif t >= 5:
+                elif t >= min(5, T - 1):
                     step_ms.append((t3 - t0) * 1e3)
                     shield_ms.append((t2 - t1) * 1e3)
                 st = jax.device_get(st) if st is not None else {}
@@ -182,6 +188,126 @@ def run(model, _episodes):
                               if k != "intervention_rate_per_chunk"}), flush=True)
             with open(G["out"], "w") as fh:
                 json.dump({"wm": G["wm"], "config": G, "results": results}, fh, indent=1)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Speed bench (--gate_task bench): the shield alone, in-scan, per variant; references on the same GPU
+# ---------------------------------------------------------------------------------------------------------------
+BENCH_VARIANTS = [
+    # name, SafetyValueConfig overrides, ShieldConfig overrides
+    ("default_f32", {"matmul_dtype": "float32"}, {}),
+    ("default_bf16", {}, {}),
+    ("gatedvjp_only_bf16", {}, {"relinearize": 0, "post_check": False}),   # = T13's gated VJP
+    ("forward_only_bf16", {}, None),                                          # value of all N, no gradient
+    ("relin0_bf16", {}, {"relinearize": 0}),
+    ("residuals_bf16", {}, {"gate_vjp": "residuals"}),
+    ("secant_bf16", {}, {"relin_mode": "secant"}),
+    ("relinfrac05_bf16", {}, {"relin_frac": 0.05}),
+    ("unroll5_bf16", {"scan_unroll": 5}, {}),
+    ("unroll25_bf16", {"scan_unroll": 25}, {}),
+    ("secant_unroll5_bf16", {"scan_unroll": 5}, {"relin_mode": "secant"}),
+    ("secant_residuals_bf16", {}, {"relin_mode": "secant", "gate_vjp": "residuals"}),
+    ("secant_residuals_unroll5_bf16", {"scan_unroll": 5}, {"relin_mode": "secant", "gate_vjp": "residuals"}),
+    ("secant_nopost_bf16", {}, {"relin_mode": "secant", "post_check": False}),
+    ("full_f32", {"matmul_dtype": "float32"}, {"gate": "full"}),
+]
+
+
+def _time(fn, *args, reps=5):
+    out = fn(*args)
+    jax.block_until_ready(out)
+    ts = []
+    for _ in range(reps):
+        t = time.perf_counter()
+        jax.block_until_ready(fn(*args))
+        ts.append(time.perf_counter() - t)
+    return float(np.median(ts))
+
+
+def bench(model):
+    import dataclasses
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.eval_sweep import apply_initial_commands, make_agent
+    env = model.env
+    agent = make_agent(model)
+    wm, bundle, meta = _load_wm(env)
+    spec = SV.ImaginationSpec.from_env(env, xi_active=meta["schema"].get("xi_active"))
+    policy_fn = SV.make_imagined_policy(model.policy.apply, model.get_processed_action)
+    params = {"wm": bundle, "policy": model.policy_state.params}
+    nr_envs, A = int(env.nr_envs), int(env.nr_actuator_joints)
+    R = int(G.get("reps_in_scan", 20))
+    only = [v for v in G.get("variants", "").split(",") if v]
+    res = {"device": str(jax.devices()[0]), "nr_envs": nr_envs, "H": int(G.get("H", 25)), "reps_in_scan": R}
+
+    base = jax.random.PRNGKey(0)
+    env_state = env.reset(jax.random.split(jax.random.fold_in(base, 0), nr_envs), True)
+    env_state = apply_initial_commands(env, env_state, jax.random.fold_in(base, 3), 0.25)
+
+    @jax.jit
+    def ppo_steps(env_state, key):   # reference: policy + action noise + env step, fused scan of R steps
+        def body(c, _):
+            st, k = c
+            k, kb, kn = jax.random.split(k, 3)
+            u, _ = agent.policy(st)
+            on = jax.random.uniform(kb, (nr_envs,)) < 0.8
+            st = env.step(st, u + jax.random.normal(kn, (nr_envs, A)) * on[:, None])
+            return (st, k), None
+        return jax.lax.scan(body, (env_state, key), None, length=R)[0]
+
+    env_state, _ = ppo_steps(env_state, jax.random.fold_in(base, 1))   # also moves to a non-initial state
+    env_state, _ = ppo_steps(env_state, jax.random.fold_in(base, 2))
+    res["ppo_env_step_ms"] = _time(ppo_steps, env_state, jax.random.fold_in(base, 4)) / R * 1e3
+    print(f"ppo env step {res['ppo_env_step_ms']:.2f} ms", flush=True)
+
+    inputs_fn = jax.jit(lambda st: SV.inputs_from_env_state(env, st, spec))
+    res["inputs_ms_call"] = _time(inputs_fn, env_state, reps=20) * 1e3
+    inputs = inputs_fn(env_state)
+    u_pol = jax.jit(lambda st: agent.policy(st)[0])(env_state)
+    u0 = u_pol + jax.random.normal(jax.random.PRNGKey(7), u_pol.shape) * 0.5
+    v_prev = jnp.zeros((nr_envs, 1))
+    print(f"inputs_from_env_state {res['inputs_ms_call']:.2f} ms (jitted call)", flush=True)
+
+    base_sv = SV.SafetyValueConfig(H=int(G.get("H", 25)), matmul_dtype="bfloat16")
+    base_sh = WS.ShieldConfig()
+    res["variants"] = {}
+    for name, sv_kw, sh_kw in BENCH_VARIANTS:
+        if only and name not in only:
+            continue
+        vf = SV.make_safety_value_fn(dataclasses.replace(base_sv, **sv_kw), spec, wm=wm, policy_fn=policy_fn)
+        if sh_kw is None:
+            call = lambda u, vp: (vf(params, inputs, u)[0][:, 0], vp, {})
+        else:
+            fn = WS.make_shield_fn(dataclasses.replace(base_sh, **sh_kw), vf)
+            call = lambda u, vp, fn=fn: fn(params, inputs, u, vp)
+
+        @jax.jit
+        def run(u0, vp, call=call):
+            def body(c, i):
+                u, vp = c
+                us, vp2, d = call(u, vp)
+                # next candidate depends on this result (no hoisting), stays ~u0
+                return (u0 + 1e-6 * jnp.tanh(us), vp2), jnp.mean(d.get("active", jnp.zeros(1)).astype(jnp.float32))
+            (u, vp), act = jax.lax.scan(body, (u0, vp), jnp.arange(R))
+            return u, act
+        t_c = time.time()
+        jax.block_until_ready(run(u0, v_prev))
+        compile_s = time.time() - t_c
+        ms = _time(run, u0, v_prev) / R * 1e3
+        act = float(np.mean(np.asarray(run(u0, v_prev)[1])))
+        res["variants"][name] = {"ms": ms, "x_ppo_step": ms / res["ppo_env_step_ms"], "compile_s": compile_s,
+                                 "active_frac": act, "sv": sv_kw, "sh": sh_kw}
+        print(f"{name}: {ms:.2f} ms = {ms / res['ppo_env_step_ms']:.2f}x ppo step (active {act:.3f})", flush=True)
+        with open(G["out"], "w") as fh:
+            json.dump(res, fh, indent=1)
+
+    if G.get("wm_updates", "1") == "1":
+        from bench_wm_speed import train_update_bench
+        for k in (16,):
+            for dt in ("float32", "bfloat16"):
+                w2 = W.WorldModel(wm.layout, dataclasses.replace(wm.cfg, matmul_dtype=dt))
+                res[f"wm_update_ms_b4096_k{k}_{dt}"] = train_update_bench(w2, 4096, k, 12)
+                print(f"wm update b4096 k{k} {dt}: {res[f'wm_update_ms_b4096_k{k}_{dt}']:.1f} ms", flush=True)
+    with open(G["out"], "w") as fh:
+        json.dump(res, fh, indent=1)
 
 
 if __name__ == "__main__":
