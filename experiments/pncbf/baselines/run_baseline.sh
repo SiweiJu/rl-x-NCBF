@@ -4,6 +4,9 @@
 #   KAPPA       P3O penalty factor (default 20, paper)        CAT_SOURCE / CAT_P_MAX  CaT constraint (collision, 1.0)
 #   OBSTACLES_ENABLED=True + OBSTACLES_* / OBSTACLES_PRESET  moving obstacles (../../cluster_runner/obstacle_args.sh);
 #               ppo_cat sets OBSTACLES_TERMINATE_ON_COLLISION=False unless given (CaT replaces the hard termination)
+#   ENV_PRESET  t08 (default: T08 env, curriculum return 30, v2 default termination/command) |
+#               t06b (experiments/pncbf/T06/t06.sbatch: paper height termination, tilt off, curriculum return 8,
+#               command factors 2.0 / clip 2.0 / velocity_ratio (1,1,1)) -- the P2 setting, comparable with D
 #   PHASE, TASK wandb tags phase/<PHASE>, task/<TASK>, exp/<TASK> (default P0, T08)
 #   COST_LIMIT  expected failures per episode (cost = 1 on the failure step), e.g. 0, 0.01, 0.05
 #   SEED, NR_ENVS, TOTAL_TIMESTEPS, MINIBATCH_SIZE, NR_EPOCHS, NR_STEPS, LEARNING_RATE, TAG_EXTRA, RUN_SUFFIX
@@ -27,7 +30,19 @@ NR_STEPS="${NR_STEPS:-128}"
 LEARNING_RATE="${LEARNING_RATE:-4e-4}"
 EVALUATION_AND_SAVE_FREQUENCY="${EVALUATION_AND_SAVE_FREQUENCY:-17301504}"
 EPISODE_SECONDS="${EPISODE_SECONDS:-20}"
-CURRICULUM_RETURN="${CURRICULUM_RETURN:-30}"
+ENV_PRESET="${ENV_PRESET:-t08}"
+env_preset_args=()
+case "${ENV_PRESET}" in
+    t08) CURRICULUM_RETURN="${CURRICULUM_RETURN:-30}" ;;
+    t06b)
+        CURRICULUM_RETURN="${CURRICULUM_RETURN:-8}"
+        env_preset_args+=(--environment.command.max_velocity_per_m_factor=2.0 --environment.command.clip_max_velocity=2.0
+                          "--environment.command.velocity_ratio=(1.0,1.0,1.0)"
+                          --environment.termination.height_curriculum_scaled=True
+                          --environment.termination.body_tilt_threshold=1000000.0)
+        ;;
+    *) echo "Unknown ENV_PRESET ${ENV_PRESET}" >&2; exit 1 ;;
+esac
 TRAIN_ROBOT="${TRAIN_ROBOT:-unitree_go2}"
 PROJECT_NAME="${PROJECT_NAME:-pncbf-2026}"
 WANDB_ENTITY="${WANDB_ENTITY:-catherineju-rwth-aachen-university}"
@@ -85,7 +100,7 @@ TASK="${TASK:-T08}"
 
 GIT_COMMIT="$(git -C "${REPO_DIR}" rev-parse HEAD)"
 RUN_NAME="${RUN_NAME:-${METHOD}_go2_d${COST_LIMIT}_seed${SEED}${RUN_SUFFIX:-}}"
-export WANDB_TAGS="phase/${PHASE},task/${TASK},exp/${TASK},method/${METHOD},robot/go2,task/${TASK_KIND},cost_limit/${COST_LIMIT}${TAG_EXTRA:+,${TAG_EXTRA}}"
+export WANDB_TAGS="phase/${PHASE},task/${TASK},exp/${TASK},method/${METHOD},robot/go2,task/${TASK_KIND},env/${ENV_PRESET},cost_limit/${COST_LIMIT}${TAG_EXTRA:+,${TAG_EXTRA}}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONPATH="${REPO_DIR}"  # set, not prepend (P2 brief)
 
@@ -93,7 +108,7 @@ if [[ -z "${PYTHON_EXE:-}" ]]; then
     PYTHON_EXE="${HOME}/miniconda3/envs/${CONDA_ENV}/bin/python"
 fi
 
-echo "commit=${GIT_COMMIT} method=${METHOD} algorithm=${ALGORITHM_NAME} cost_limit=${COST_LIMIT} seed=${SEED} run=${RUN_NAME}"
+echo "commit=${GIT_COMMIT} env_preset=${ENV_PRESET} method=${METHOD} algorithm=${ALGORITHM_NAME} cost_limit=${COST_LIMIT} seed=${SEED} run=${RUN_NAME}"
 echo "tags=${WANDB_TAGS}"
 # The rlx-ncbf conda env has rl_x installed editable from /home/ju/repo/rl-x-NCBF; PYTHONPATH above makes this
 # checkout win. Fail loudly if it does not.
@@ -111,8 +126,9 @@ cd "${EXPERIMENTS_DIR}"
     --algorithm.nr_steps="${NR_STEPS}" \
     --algorithm.nr_epochs="${NR_EPOCHS}" \
     --algorithm.evaluation_and_save_frequency="${EVALUATION_AND_SAVE_FREQUENCY}" \
-    "${method_args[@]}" \
-    "${extra_args[@]}" \
+    ${method_args[@]+"${method_args[@]}"} \
+    ${env_preset_args[@]+"${env_preset_args[@]}"} \
+    ${extra_args[@]+"${extra_args[@]}"} \
     --environment.name="ncbf_mujoco.robot_locomotion.mjx" \
     --environment.seed="${SEED}" \
     --environment.nr_envs="${NR_ENVS}" \
@@ -130,5 +146,5 @@ cd "${EXPERIMENTS_DIR}"
     --runner.project_name="${PROJECT_NAME}" \
     --runner.exp_name="${EXP_NAME}" \
     --runner.run_name="${RUN_NAME}" \
-    --runner.notes="git_commit=${GIT_COMMIT} method=${METHOD} cost_limit=${COST_LIMIT}" \
+    --runner.notes="git_commit=${GIT_COMMIT} method=${METHOD} cost_limit=${COST_LIMIT} env_preset=${ENV_PRESET} kappa=${KAPPA:-}" \
     "$@"

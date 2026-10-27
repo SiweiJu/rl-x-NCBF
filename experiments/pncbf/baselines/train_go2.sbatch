@@ -10,5 +10,8 @@
 #SBATCH --mem-per-cpu=5G
 set -euo pipefail
 export BASELINES_DIR="${SLURM_SUBMIT_DIR}"
+# Own TMPDIR (node /tmp files have vanished under running jobs, P2 brief).
+export TMPDIR="${TMPDIR_ROOT:-/home/ju/repo/pncbf/p2_runs/tmp}/${SLURM_JOB_ID:-$$}"; mkdir -p "${TMPDIR}"; trap 'rm -rf "${TMPDIR}"' EXIT
+echo "=== $(date -Is) job ${SLURM_JOB_ID:-none} host=$(hostname) qos=${SLURM_JOB_QOS:-?} SLURM_RESTART_COUNT=${SLURM_RESTART_COUNT:-0}"
 nvidia-smi --query-gpu=name --format=csv,noheader || true
 "${BASELINES_DIR}/run_baseline.sh" "$@"
