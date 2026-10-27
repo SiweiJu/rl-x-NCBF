@@ -101,11 +101,17 @@ def project_halfspace(u, a, G, cfg: ShieldConfig):
     return u + (delta / denom)[..., None] * a, ok
 
 
+def _safe_norm(d):
+    """L2 norm over the last axis with a finite gradient at 0 (unlike jnp.linalg.norm)."""
+    sq = jnp.sum(d * d, axis=-1)
+    return jnp.where(sq > 0.0, jnp.sqrt(jnp.where(sq > 0.0, sq, 1.0)), 0.0)
+
+
 def cap_correction(u0, u, max_delta_u):
     if max_delta_u <= 0.0:
         return u
     d = u - u0
-    n = jnp.linalg.norm(d, axis=-1)
+    n = jnp.sqrt(jnp.sum(d * d, axis=-1) + 1e-24)
     scale = jnp.minimum(1.0, max_delta_u / jnp.maximum(n, 1e-12))
     return u0 + scale[..., None] * d
 
@@ -216,12 +222,12 @@ class Shield:
         G_after = G0.at[idx].set(Ga_s)
         v_after = v0.at[idx].set(va_s)
         nproj = jnp.zeros((n,), jnp.int32).at[idx].set(nproj_s)
-        delta_u = jnp.linalg.norm(u_safe - u0, axis=-1)
+        delta_u = _safe_norm(u_safe - u0)
         active = active & (delta_u > 0.0)
 
         v_prev_next = jnp.where(stale[:, None], g_c, jax.lax.stop_gradient(v_after))
         out = {"active": active, "delta_u": delta_u, "G_before": G0, "G_after": G_after, "V": v0, "V_after": v_after,
-               "v_prev": v_prev, "gate_mask": gate, "grad_norm": jnp.linalg.norm(a0, axis=-1) * gate,
+               "v_prev": v_prev, "gate_mask": gate, "grad_norm": _safe_norm(a0) * gate,
                "nr_projections": nproj, "stale": stale, "logp": aux0["logp"], "min_margin": aux0["min_margin"]}
         return u_safe, {"v_prev": v_prev_next}, out
 
