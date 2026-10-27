@@ -50,6 +50,9 @@ class LocomotionEnv:
         self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand"))
         self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations"))
         self.record_transition_physics_state = bool(env_config.get("record_transition_physics_state", False))
+        # T11: record the world-model state x^- / x^+ (wm_state.extract_state), the DR vector xi after the DR step,
+        # the delayed (applied) action and the realized action delay in info["wm/..."] (project plan 4.2-4.4).
+        self.record_wm_state = bool(env_config.get("record_wm_state", False))
         self.obstacle_config = env_config.get("obstacles", {})
         self.use_obstacles = bool(self.obstacle_config.get("enabled", False))
         self.nr_obstacles = int(self.obstacle_config.get("nr_obstacles", 0)) if self.use_obstacles else 0
@@ -1437,6 +1440,9 @@ class LocomotionEnv:
 
         chosen_action = action[:self.nr_actuator_joints]
         delayed_action = self.domain_randomization_action_delay_function.delay_action(chosen_action, state.internal_state, action_delay_key)
+        if self.record_wm_state:
+            from rl_x.algorithms.ncbf_ppo.flax_full_jit import wm_state
+            wm_delay_steps = wm_state.realized_delay_steps(self, state.internal_state, action_delay_key)
 
         target_joint_positions = self.control_function.process_action(delayed_action, state.internal_state)
 
@@ -1456,6 +1462,8 @@ class LocomotionEnv:
 
         # x^-_{t+1}: physics state after the physics substeps and the qvel clip, before any shock / DR resampling.
         pre_shock_qpos, pre_shock_qvel = data.qpos, data.qvel
+        if self.record_wm_state:
+            wm_x_minus = wm_state.extract_state(self, data, state.internal_state, chosen_action)
         data, mjx_model, dr_resampled, perturbed = self.handle_domain_randomization(
             state.internal_state, state.mjx_model, data, domain_randomization_key, return_flags=True)
         state = state.replace(data=data, mjx_model=mjx_model)
@@ -1529,6 +1537,12 @@ class LocomotionEnv:
             new_info["transition/x_minus_qvel"] = pre_shock_qvel
             new_info["transition/x_plus_qpos"] = data.qpos
             new_info["transition/x_plus_qvel"] = data.qvel
+        if self.record_wm_state:
+            new_info["wm/x_minus"] = wm_x_minus
+            new_info["wm/x_plus"] = wm_state.extract_state(self, data, state.internal_state, chosen_action)
+            new_info["wm/xi_next"] = wm_state.extract_xi(self, mjx_model, state.internal_state)
+            new_info["wm/u_applied"] = jnp.asarray(delayed_action, dtype=jnp.float32)
+            new_info["wm/delay_steps"] = jnp.asarray(wm_delay_steps, dtype=jnp.int32)
         if self.use_obstacles:
             new_info["env_info/obstacle_collision"] = jnp.asarray(state.internal_state["obstacle_collision"], dtype=jnp.float32)
             new_info["env_info/obstacle_min_clearance"] = jnp.asarray(state.internal_state["obstacle_min_clearance"], dtype=jnp.float32)
@@ -2062,6 +2076,13 @@ class LocomotionEnv:
             info["transition/x_minus_qvel"] = jnp.zeros(nv)
             info["transition/x_plus_qpos"] = jnp.zeros(nq)
             info["transition/x_plus_qvel"] = jnp.zeros(nv)
+        if self.record_wm_state:
+            from rl_x.algorithms.ncbf_ppo.flax_full_jit import wm_state
+            info["wm/x_minus"] = jnp.zeros(wm_state.state_layout(self).dim, dtype=jnp.float32)
+            info["wm/x_plus"] = jnp.zeros(wm_state.state_layout(self).dim, dtype=jnp.float32)
+            info["wm/xi_next"] = jnp.zeros(wm_state.xi_layout(self).dim, dtype=jnp.float32)
+            info["wm/u_applied"] = jnp.zeros(self.nr_actuator_joints, dtype=jnp.float32)
+            info["wm/delay_steps"] = jnp.asarray(0, dtype=jnp.int32)
 
 
     def handle_domain_randomization(self, internal_state, mjx_model, data, key, is_episode_start=False, return_flags=False):
