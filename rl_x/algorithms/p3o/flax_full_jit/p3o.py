@@ -90,7 +90,8 @@ class P3O:
         self.cat_clip_reward_at_zero = bool(cat_config.clip_reward_at_zero)
         if self.cat_source not in cat.CONSTRAINT_SOURCES:
             raise ValueError(f"Unknown cat.constraint_source {self.cat_source!r}")
-        if self.cat_enabled and self.cat_source in ("collision", "penetration"):
+        # Training only: evaluation (runner.mode=test) runs the obstacle env with collision terminations.
+        if self.cat_enabled and self.cat_source in ("collision", "penetration") and config.runner.mode == "train":
             obstacle_config = getattr(env, "obstacle_config", {})
             if not getattr(env, "use_obstacles", False):
                 raise ValueError(f"cat.constraint_source={self.cat_source} needs environment.obstacles.enabled=True")
