@@ -3,6 +3,8 @@
 #   MODE=smoke   20 updates (2.6M steps at 1024 envs, eval + save at the end), <= 20 min:
 #                p3o d=0.01, ppo_lag_gradient d=0.01 (same-commit speed reference), ppo_cat on Go2 obstacles
 #   MODE=sanity  1e9 steps, seed 0 (T08 settings): p3o d in {0.01, 0.05}; ppo_cat on Go2 obstacles
+#   MEM_PER_CPU (default 5G; overrides train_go2.sbatch). Smoke MaxRSS: P3O / PPO-Lag 8.1 GB, PPO+CaT obstacles
+#               9.5 GB of the 10 GB that 2 x 5G gives -> consider MEM_PER_CPU=8G for ppo_cat (needs the main session's OK)
 #   KAPPA (default 20), SEEDS (default 0), TIME (default smoke 0:20:00, sanity 12:00:00), DRY_RUN=1 prints only (default)
 # Run it from a fixed tree per commit (/home/ju/repo/pncbf/p3o-<shortsha>), never from a tree you keep editing.
 # Obstacle setting = cluster_runner/train_go2_obstacles_sl_off.sh (2 obstacles, speed (0.5, 3.0) with curriculum)
@@ -15,13 +17,14 @@ MODE="${MODE:-sanity}"
 SEEDS="${SEEDS:-0}"
 KAPPA="${KAPPA:-20.0}"
 DRY_RUN="${DRY_RUN:-1}"
+MEM_PER_CPU="${MEM_PER_CPU:-5G}"
 # Variables go through the environment (--export=ALL): values such as "(0.5, 3.0)" contain commas.
 OBSTACLE_VARS=(OBSTACLES_ENABLED=True OBSTACLES_NR=2 "OBSTACLES_SPEED_RANGE=(0.5, 3.0)" OBSTACLES_SPEED_CURRICULUM=True OBSTACLES_PRESET=train)
 
 submit() {  # submit <job name> VAR=VALUE ...
     local name="$1"; shift
     local cmd=(env "$@" sbatch --qos=normal --time="${TIME}" --job-name="${name}" --output="log/${name}_%j.txt"
-               --export=ALL train_go2.sbatch)
+               --mem-per-cpu="${MEM_PER_CPU}" --export=ALL train_go2.sbatch)
     printf '%q ' "${cmd[@]}"; echo
     if [[ "${DRY_RUN}" == "0" ]]; then "${cmd[@]}"; fi
 }
