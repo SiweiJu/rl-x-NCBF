@@ -1,0 +1,8 @@
+# T13 sweep, one change at a time from the baseline (512x3, k_train 8, method A, xi on). RUN_NAME extra-args.
+# Common args come from the ARGS env var of train_wm.sbatch (data subset, updates).
+T13_base
+T13_w256 --width 256
+T13_d4 --depth 4
+T13_k4 --k_train 4
+T13_methodB --method B
+T13_noxi --use_xi 0

@@ -21,6 +21,12 @@
 set -euo pipefail
 COMMIT=${COMMIT:?set COMMIT}
 TREE=/home/ju/repo/pncbf/wm-model-${COMMIT:0:7}
+# Sweep: SWEEP_FILE with one "RUN_NAME extra args..." line per array task (sbatch --array=0-<n-1>%3).
+if [[ -n "${SWEEP_FILE:-}" ]]; then
+  LINE=$(grep -v '^#' "$SWEEP_FILE" | grep -v '^\s*$' | sed -n "$(( ${SLURM_ARRAY_TASK_ID:?} + 1 ))p")
+  RUN=$(echo "$LINE" | awk '{print $1}')
+  ARGS="${ARGS:-} $(echo "$LINE" | sed 's/^[^ ]*//')"
+fi
 RUN=${RUN:?set RUN (run name, also the run dir name)}
 DATA=${DATA:?set DATA (glob or synthetic)}
 RUN_DIR=/home/ju/repo/pncbf/p1_wm_runs/$RUN
