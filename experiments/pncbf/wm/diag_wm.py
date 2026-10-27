@@ -22,6 +22,7 @@ def main():
     p.add_argument("--ks", default="1,8")
     p.add_argument("--max_windows", type=int, default=50000)
     p.add_argument("--max_envs_per_shard", type=int, default=0)
+    p.add_argument("--groups", default="imu_height,roll_pitch,base_yaw")
     p.add_argument("--out", default=None)
     a = p.parse_args()
     wm, bundle, meta = WE.load_bundle(a.wm)
@@ -74,6 +75,19 @@ def main():
             print(name[:47].ljust(48) + f"{r['frac_windows']:.3f} " +
                   " ".join(f"{r[g]['share_mse_model']:11.2f}" for g in groups))
         print("  (numbers = share of the model's MSE of that group coming from the category)")
+        for g in [x for x in a.groups.split(",") if x in gi]:
+            idx = gi[g]
+            ae = np.abs(em[:, idx]).max(1)
+            q = np.quantile(ae, [0.5, 0.9, 0.99, 0.999])
+            top = np.argsort(-ae)[:8]
+            print(f"  {g}: |err| quantiles 50/90/99/99.9% = " + " ".join(f"{v:.4g}" for v in q)
+                  + f"; top-1% windows hold {np.sort(ae ** 2)[-len(ae) // 100:].sum() / (ae ** 2).sum():.2f} of the squared error")
+            xin = WD.rows_arrays(data, starts[top])[0]
+            for j, w in enumerate(top):
+                r = last[w]
+                print(f"    row {r} ep_step {int(data['episode_step'][r])} done {int(data['done'][r])} "
+                      f"shock_prev {int(data['shock_next'][r - 1]) if r > 0 else -1} err {em[w, idx].round(4).tolist()} "
+                      f"input {xin[j, idx].round(4).tolist()} rp_in {xin[j, rp].round(3).tolist() if rp is not None else ''}")
     if a.out:
         json.dump(out, open(a.out, "w"), indent=1)
 
