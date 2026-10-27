@@ -5,8 +5,8 @@
 #   MODE=sanity  1e9 steps, seed 0: p3o d in {0.01, 0.05}; ppo_cat on Go2 obstacles
 #   ENV_PRESET   sanity default t06b (T06b env, the P2 setting; see run_baseline.sh), t08 = the T08 env; smoke: t08
 #   WHAT         sanity only: p3o | cat | both (default both)
-#   MEM_PER_CPU (default 5G; overrides train_go2.sbatch). Smoke MaxRSS: P3O / PPO-Lag 8.1 GB, PPO+CaT obstacles
-#               9.5 GB of the 10 GB that 2 x 5G gives -> consider MEM_PER_CPU=8G for ppo_cat (needs the main session's OK)
+#   MEM_PER_CPU (default 5G; overrides train_go2.sbatch). Obstacle-task jobs: 8G approved by the user (2026-10-27).
+#               (smoke MaxRSS: PPO+CaT obstacles 9.5 GB of the 10 GB of 2 x 5G)
 #   KAPPA (default 20), SEEDS (default 0), TIME (default smoke 0:20:00, sanity 12:00:00), DRY_RUN=1 prints only (default)
 # Run it from a fixed tree per commit (/home/ju/repo/pncbf/p3o-<shortsha>), never from a tree you keep editing.
 # Obstacle setting = cluster_runner/train_go2_obstacles_sl_off.sh (2 obstacles, speed (0.5, 3.0) with curriculum)

@@ -5,6 +5,7 @@
 #   KAPPA     kappa used in the sanity run names (default 20.0)
 #   ENV_PRESET t06b (default; T06b env args + G0 part 2 protocol, the D comparison) | t08 (T08 env + protocol_default)
 #   OUT_DIR   default /home/ju/repo/pncbf/p2_runs/T09_T10/eval
+#   EVAL_CONCURRENCY max running array tasks (default 3; agent limit is 3 GPU jobs in total)
 #   DRY_RUN=1 writes the checkpoint lists and prints the sbatch commands only
 # P3O: T04 sweep, mode A, flat + hfield: 2 checkpoints x 2 terrains. t06b: G0 part 2 protocol (as T06b / D); t08: protocol_default (as T08).
 # CaT: Go2 obstacles, flat, no perturbation (action_noise p = 0), one entry per obstacle speed 0.5..4.0 m/s
@@ -71,20 +72,20 @@ for name, entries in (("t09_p3o", p3o), ("t10_cat", cat)):
     print(f"{lists}/{name}.json: {len(entries)} entries")
 EOF
 
-submit() {  # submit <name> <checkpoints json> <sweep args>
-    local name="$1" ckpts="$2" sweep_args="$3"
+submit() {  # submit <name> <checkpoints json> <sweep args> <mem per cpu>
+    local name="$1" ckpts="$2" sweep_args="$3" mem="$4"
     local n
     n=$(PYTHONPATH="$(cd .. && pwd)" "${PY}" pncbf/eval/run_eval_sweep.py --checkpoints_file "${ckpts}" --out_dir "${OUT_DIR}" ${sweep_args} --list_jobs | tail -1 | sed -E 's/^([0-9]+) jobs.*/\1/')
-    local cmd=(sbatch --qos=normal --time=1:00:00 --array="0-$((n-1))%3" --job-name="${name}" --output="log/${name}_%A_%a.txt"
+    local cmd=(sbatch --qos=normal --time=1:00:00 --array="0-$((n-1))%${EVAL_CONCURRENCY:-3}" --job-name="${name}" --output="log/${name}_%A_%a.txt" --mem-per-cpu="${mem}"
                --export=ALL,TMPDIR="${TMPDIR_EVAL}",CHECKPOINTS_FILE="${ckpts}",OUT_DIR="${OUT_DIR}",SWEEP_ARGS="${sweep_args}" pncbf/eval/eval_sweep.sbatch)
     echo "${cmd[*]}"
     if [[ "${DRY_RUN:-0}" != "1" ]]; then "${cmd[@]}"; fi
 }
 if [[ "${WHAT}" == "p3o" || "${WHAT}" == "both" ]]; then
     [[ "${DRY_RUN:-0}" == "1" ]] || mkdir -p "${TMPDIR_EVAL}"
-    submit t09_eval "${LISTS}/t09_p3o.json" "--protocol ${PROTOCOL} --modes A"
+    submit t09_eval "${LISTS}/t09_p3o.json" "--protocol ${PROTOCOL} --modes A" 5G
 fi
 if [[ "${WHAT}" == "cat" || "${WHAT}" == "both" ]]; then
     [[ "${DRY_RUN:-0}" == "1" ]] || mkdir -p "${TMPDIR_EVAL}"
-    submit t10_eval "${LISTS}/t10_cat.json" "--protocol ${PROTOCOL} --modes A --terrains flat --perturbations action_noise --sampling_probs 0.0"
+    submit t10_eval "${LISTS}/t10_cat.json" "--protocol ${PROTOCOL} --modes A --terrains flat --perturbations action_noise --sampling_probs 0.0" 8G   # obstacle task: 8G/CPU approved by the user (2026-10-27)
 fi
