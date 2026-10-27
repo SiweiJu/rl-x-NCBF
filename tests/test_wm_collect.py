@@ -135,3 +135,29 @@ def test_collect_smoke_shard_contents(shard):
                 assert margin[p, k, f] < 0 and np.all(margin[p, k, :f] >= 0)
     meta = json.load(open(os.path.join(path, "meta.json")))
     assert meta["push_prob"] == 0.3 and meta["oracle"]["horizon"] == 12
+
+
+def test_fall_episode_stats():
+    T, N = 10, 3
+    fallen = np.zeros((T, N), bool)
+    term = np.zeros((T, N), bool)
+    done = np.zeros((T, N), bool)
+    fallen[2:6, 0] = True  # env 0: fallen 4 steps, never terminates (window end)
+    fallen[1:5, 1] = True
+    term[4, 1] = done[4, 1] = True  # env 1: fallen 4 steps then terminates
+    fallen[0:2, 2] = True  # env 2: fallen only 2 steps, truncated at 6
+    done[6, 2] = True
+    s = wm_collect.fall_episode_stats(fallen, term, done, min_steps=3)
+    assert s["fell_long_not_terminated"] == 1 and s["fell_long_not_terminated_window_end"] == 1
+    assert s["fell_long_and_terminated"] == 1 and s["episodes_terminated"] == 1
+    assert s["episodes"] == 5  # env0: 1, env1: 2, env2: 2
+
+
+def test_smoke_summary_has_fall_breakdown(shard):
+    _, path, _ = shard
+    summary = json.load(open(os.path.join(path, "summary.json")))
+    causes = summary["termination_causes"]
+    assert sum(causes.values()) == summary["nr_terminations"] and causes["other"] == 0
+    phys = np.load(os.path.join(path, "margin_physical_next.npy"))
+    term = np.load(os.path.join(path, "terminated.npy"))
+    assert np.all(phys[term] < 0)  # a robot whose IMU is below the ground is also physically fallen

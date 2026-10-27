@@ -331,6 +331,13 @@
   "tilt_scale": 0.2,
   "qvel_scale": 10.0
  },
+ "margin_physical": {
+  "enabled": true,
+  "height_fraction": 0.5,
+  "tilt_threshold": 1.0,
+  "height_scale": 0.05,
+  "tilt_scale": 0.2
+ },
  "label_horizons": [
   1,
   10,
@@ -518,6 +525,30 @@
    "dtype": "float32",
    "doc": "wm_state.margin_fall(x_plus_next, xi_table[xi_next_idx]); < 0 iff terminated"
   },
+  "margin_height_next": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "float32",
+   "doc": "height term of the termination margin (m); < 0 iff the env's height termination fired"
+  },
+  "margin_qvel_next": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "float32",
+   "doc": "qvel-limit term (m/s); < 0 iff the qvel-limit termination fired"
+  },
+  "margin_physical_next": {
+   "shape": [
+    "T",
+    "N"
+   ],
+   "dtype": "float32",
+   "doc": "wm_state.margin_fall_physical(x_plus_next, xi_next): < 0 = physically fallen (height < frac * nominal or tilt > thr), not a termination"
+  },
   "fail_within": {
    "shape": [
     "T",
@@ -595,6 +626,15 @@
    ],
    "dtype": "float32",
    "doc": "margin_fall of oracle_x_plus_next"
+  },
+  "oracle_margin_physical": {
+   "shape": [
+    "P",
+    "K",
+    "H"
+   ],
+   "dtype": "float32",
+   "doc": "margin_fall_physical of oracle_x_plus_next"
   },
   "oracle_terminated": {
    "shape": [
