@@ -45,9 +45,10 @@ def main():
         r["grad_med_band"] = float(np.median(gb)) if len(gb) else None
         r["grad_med_other"] = float(np.median(go)) if len(go) else None
         r["grad_n"] = [int(len(gb)), int(len(go))]
-        need = sum(g["by_T_l"][T]["gate"]["0.25"]["need"] for g in gates)
-        missed = sum(g["by_T_l"][T]["gate"]["0.25"]["missed_frac"] * g["by_T_l"][T]["gate"]["0.25"]["need"] for g in gates)
-        over = np.mean([g["by_T_l"][T]["gate"]["0.25"]["overflow_steps_frac"] for g in gates])
+        gk = lambda g: next(k for k in g["by_T_l"] if float(k) == float(T))   # json keys "1.0", npz keys "1"
+        need = sum(g["by_T_l"][gk(g)]["gate"]["0.25"]["need"] for g in gates)
+        missed = sum(g["by_T_l"][gk(g)]["gate"]["0.25"]["missed_frac"] * g["by_T_l"][gk(g)]["gate"]["0.25"]["need"] for g in gates)
+        over = np.mean([g["by_T_l"][gk(g)]["gate"]["0.25"]["overflow_steps_frac"] for g in gates])
         r["gate25_missed_frac"], r["gate25_overflow_steps_frac"] = missed / max(need, 1), float(over)
         out["by_T_l"][T] = r
         fmt = lambda x: "–" if x is None else f"{x:.3g}"

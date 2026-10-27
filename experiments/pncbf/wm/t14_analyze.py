@@ -160,6 +160,8 @@ def main():
     # splits: oracle fall H=25, by setting and by checkpoint
     split_preds = {k: v for k, v in preds.items() if k in (f"WM T_l={Tm:g}", f"persistence T_l={Tm:g}", "critic(u0)")}
     res["by_setting"] = {s: metric_cells(d, split_preds, d["setting"] == s, 0, rng, ci=False) for s in np.unique(d["setting"])}
+    res["by_setting_ii_h25"] = {s: metric_cells(d, split_preds, (d["setting"] == s) & is_ii, 0, rng, ci=False)
+                                for s in np.unique(d["setting"])}
     res["by_checkpoint"] = {meta[i]["checkpoint"]: metric_cells(d, split_preds, d["ckpt"] == i, 0, rng, ci=False)
                             for i in range(len(meta))}
     if a.out:
@@ -182,6 +184,9 @@ def main():
         print(f"{k}: P>0.5 det {v['p0.5']['detected_frac']:.3f} lead {v['p0.5']['lead_median']} | FPR5% (thr {v['thr_fpr5']:.3g}) det {v['fpr5']['detected_frac']:.3f} lead {v['fpr5']['lead_median']} ({v['p0.5']['events']} events)")
     print("\n## by setting (oracle fall H25 AUC / Brier)")
     for s, cells in res["by_setting"].items():
+        print(s + ": " + "; ".join(f"{p} {fmt(c.get('oracle_fall_H25'), 'auc')}/{fmt(c.get('oracle_fall_H25'), 'brier')}" for p, c in cells.items()))
+    print("\n## by setting, ii_h25 checkpoints only (oracle fall H25 AUC / Brier)")
+    for s, cells in res["by_setting_ii_h25"].items():
         print(s + ": " + "; ".join(f"{p} {fmt(c.get('oracle_fall_H25'), 'auc')}/{fmt(c.get('oracle_fall_H25'), 'brier')}" for p, c in cells.items()))
     print("\n## by checkpoint (oracle fall H25 AUC / Brier)")
     for s, cells in res["by_checkpoint"].items():
