@@ -39,5 +39,5 @@ python pncbf/wm/t15_shield_check.py --gate_wm "$WM" --gate_out "$OUT" --gate_mod
   --environment.command.max_velocity_per_m_factor=2.0 --environment.command.clip_max_velocity=2.0 \
   "--environment.command.velocity_ratio=(1.0,1.0,1.0)" --environment.termination.height_curriculum_scaled=True \
   --environment.termination.body_tilt_threshold=1000000.0 --environment.record_wm_state=True \
-  2>&1 | grep -vE "GLFW|warnings.warn"
+  2>&1 | grep --line-buffered -vE "GLFW|warnings.warn"
 echo "=== $(date -Is) finished"
