@@ -132,8 +132,34 @@ def _set(config, dotted, value):
     node[leaf] = value
 
 
+def test_defaults_after_t06c():
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit.default_config import get_config as get_algorithm_config
+    algorithm = get_algorithm_config("ncbf_ppo.flax_full_jit")
+    # T06c result: the policy LayerNorm is the new v2 default; the other switches keep the v2 behavior.
+    assert algorithm.policy_layer_norm is True
+    assert algorithm.value_layer_norm is False and algorithm.gae_stop_at_truncation is True
+    assert algorithm.policy_logstd_clip is True and algorithm.ncbf.anticipation_style == "mean_action"
+
+
+def _strip_key_from_checkpoint(model_file, key):
+    """Rewrite latest.model as written by code that did not have `key` (an old checkpoint)."""
+    import json, os, shutil, zipfile
+    tmp = model_file + "_unpacked"
+    zipfile.ZipFile(model_file).extractall(tmp)
+    cfg_file = os.path.join(tmp, "config_algorithm.json")
+    cfg = json.load(open(cfg_file))
+    cfg.pop(key)
+    json.dump(cfg, open(cfg_file, "w"))
+    os.remove(model_file)
+    shutil.make_archive(model_file, "zip", tmp)
+    os.rename(model_file + ".zip", model_file)
+    shutil.rmtree(tmp)
+
+
 @pytest.mark.parametrize("paper_switches", [False, True])
 def test_tiny_ppo_run_with_switches_trains_and_reloads(paper_switches, tmp_path):
+    """paper_switches=False: the pre-T06c v2 network (no policy LayerNorm), saved without the policy_layer_norm key like
+    every older checkpoint, must still load with the new default (True) in the loading config."""
     from rl_x.algorithms.ncbf_ppo.flax_full_jit.default_config import get_config as get_algorithm_config
     from rl_x.algorithms.ncbf_ppo.flax_full_jit.ppo import PPO
     from rl_x.environments.ncbf_mujoco.robot_locomotion.mjx.create_env import create_env
@@ -159,6 +185,8 @@ def test_tiny_ppo_run_with_switches_trains_and_reloads(paper_switches, tmp_path)
     if paper_switches:
         for key, value in PAPER_PPO_SWITCHES.items():
             _set(algorithm, key, value)
+    else:
+        algorithm.policy_layer_norm = False
     runner = get_runner_config("train")
     runner.save_model = True
     config = config_dict.ConfigDict({"algorithm": algorithm, "environment": env_config, "runner": runner})
@@ -168,10 +196,13 @@ def test_tiny_ppo_run_with_switches_trains_and_reloads(paper_switches, tmp_path)
     assert has_ln == paper_switches
     before = jax.tree_util.tree_leaves(model.policy_state.params)
     model.train()
+    if not paper_switches:
+        _strip_key_from_checkpoint(f"{model.save_path}/latest.model", "policy_layer_norm")
 
     load_config = config_dict.ConfigDict(config.to_dict())
     load_config.algorithm = get_algorithm_config("ncbf_ppo.flax_full_jit")  # defaults: switches come from the checkpoint
     load_config.algorithm.device = "cpu"
+    assert load_config.algorithm.policy_layer_norm is True
     load_config.runner.load_model = f"{model.save_path}/latest.model"
     loaded = PPO.load(load_config, env, str(tmp_path / "load"), None, set())
     assert loaded.config.algorithm.policy_layer_norm == paper_switches

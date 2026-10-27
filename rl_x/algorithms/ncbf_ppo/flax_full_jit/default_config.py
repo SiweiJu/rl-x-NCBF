@@ -36,7 +36,7 @@ def get_config(algorithm_name):
     config.use_history_latent_for_value = False
     config.use_decoder_output_for_policy = False
     # T06c (paper_compat.py): PPO-side differences to the paper code (ncbf-q); defaults = pncbf-v2, paper values in comments
-    config.policy_layer_norm = False  # paper True: LayerNorm after the first hidden layer of the policy
+    config.policy_layer_norm = True  # T06c result: paper code had it; False = v2 before 2026-10-27 (checkpoints without the key load as False)
     config.value_layer_norm = False  # paper True: same for the value network
     config.gae_stop_at_truncation = True  # paper False: GAE recursion cut only at terminations, not at truncations
     config.policy_logstd_clip = True  # paper False: no clip of the policy log-std to [-5, 2]

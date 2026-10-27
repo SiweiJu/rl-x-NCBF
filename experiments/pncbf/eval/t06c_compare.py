@@ -20,11 +20,11 @@ MATCHED_SEEDS = (1042, 1142, 1242)
 REFERENCES = ("T05", "T06b")
 
 
-def per_seed_means(success, group, mode="A", method="ppo"):
-    """{seed: (mean success over the points, nr points)} for one group."""
+def per_seed_means(success, group, mode="A", method="ppo", setting_filter=None):
+    """{seed: (mean success over the points, nr points)} for one group (optionally one setting only)."""
     by_seed = defaultdict(list)
     for (g, m, md, setting, x), per_ckpt in success.items():
-        if g != group or m != method or md != mode:
+        if g != group or m != method or md != mode or (setting_filter and setting != setting_filter):
             continue
         for label, values in per_ckpt.items():
             by_seed[int(label.rsplit("_s", 1)[1])].append(float(np.mean(values)))
@@ -71,6 +71,14 @@ def main():
         closed = f"{(stat[0] - t06b[0]) / (t05[0] - t06b[0]):.0%}" if stat and t05 and t06b and t05[0] != t06b[0] else "–"
         md.append(f"| {g} | {points} | {fmt(stat)} | {d05} | {d06} | {closed} |")
     md += ["", "gap closed = (group − T06b) / (T05 − T06b) on the matched seeds; 22 points per seed when complete.", ""]
+    settings = sorted({k[3] for k in success if k[0] in seed_means})
+    md += ["## Per setting (mean over the x levels of the setting; matched seeds for T05 / T06b)", "",
+           "| group | " + " | ".join(settings) + " |", "|---|" + "---|" * len(settings)]
+    for g in (*REFERENCES, *groups):
+        seeds = MATCHED_SEEDS if g in REFERENCES else None
+        cells = [fmt(summarize(per_seed_means(success, g, setting_filter=st), seeds)).split(" (n=")[0] for st in settings]
+        md.append(f"| {g} | " + " | ".join(cells) + " |")
+    md.append("")
     out = Path(args.out or args.root)
     out.mkdir(parents=True, exist_ok=True)
     (out / "t06c_compare.md").write_text("\n".join(md))

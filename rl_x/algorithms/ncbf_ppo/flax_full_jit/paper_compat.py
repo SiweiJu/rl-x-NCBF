@@ -1,7 +1,9 @@
 """T06c: switches for the PPO-side differences between the paper code (ncbf-q @ cacffe7) and pncbf-v2.
 
 Each switch defaults to the pncbf-v2 behavior; the paper value is given per switch.
-  algorithm.policy_layer_norm   False | paper True: LayerNorm after the first hidden layer of the policy (policy.py)
+Exception: policy_layer_norm defaults to True since 2026-10-27. The T06c bisect showed it alone explains the PPO robustness
+regression of v2 vs the paper code. Checkpoints without the key load as False (PPO.load).
+  algorithm.policy_layer_norm   True (v2 before T06c: False) | paper True: LayerNorm after the first hidden layer of the policy (policy.py)
   algorithm.value_layer_norm    False | paper True: same for the value network (critic.py)
   algorithm.gae_stop_at_truncation  True | paper False: the GAE recursion also stops at truncations (1 - dones);
                                 the paper stopped only at terminations (1 - terminations), so the advantage of the

@@ -50,6 +50,10 @@ class LocomotionEnv:
         self.use_capsule_hand = self.use_ball_plate and bool(self.ball_plate_config.get("use_capsule_hand"))
         self.include_ball_plate_observations = self.use_ball_plate and bool(self.ball_plate_config.get("include_observations"))
         self.record_transition_physics_state = bool(env_config.get("record_transition_physics_state", False))
+        # F13 (default off, it changes observations): run mjx.forward after the reset writes and after the post-physics
+        # DR / shock writes, so site poses and sensors (IMU) match qpos/qvel. Off = legacy: the first observation of an
+        # episode and the observation right after a shock carry stale IMU values.
+        self.forward_after_state_writes = bool(env_config.get("forward_after_state_writes", False))
         # T11: record the world-model state x^- / x^+ (wm_state.extract_state), the DR vector xi after the DR step,
         # the delayed (applied) action and the realized action delay in info["wm/..."] (project plan 4.2-4.4).
         self.record_wm_state = bool(env_config.get("record_wm_state", False))
@@ -1369,6 +1373,8 @@ class LocomotionEnv:
         self.domain_randomization_action_delay_function.setup(new_internal_state)
         data, mjx_model = self.handle_domain_randomization(new_internal_state, mjx_model, data, domain_randomization_key, is_episode_start=True)
         data, mjx_model = self._reset_ball_plate_state(data, mjx_model, new_internal_state, ball_plate_key)
+        if self.forward_after_state_writes:  # F13
+            data = mjx.forward(mjx_model, data)
         new_internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
         new_internal_state["imu_orientation_rotation_inverse"] = new_internal_state["imu_orientation_rotation"].inv()
         new_internal_state["imu_orientation_euler"] = new_internal_state["imu_orientation_rotation"].as_euler("xyz")
@@ -1466,6 +1472,11 @@ class LocomotionEnv:
             wm_x_minus = wm_state.extract_state(self, data, state.internal_state, chosen_action)
         data, mjx_model, dr_resampled, perturbed = self.handle_domain_randomization(
             state.internal_state, state.mjx_model, data, domain_randomization_key, return_flags=True)
+        if self.forward_after_state_writes:  # F13: sensors / site poses after the shock and DR writes
+            data = mjx.forward(mjx_model, data)
+            state.internal_state["imu_orientation_rotation"] = Rotation.from_matrix(data.site_xmat[self.imu_site_id].reshape(3, 3))
+            state.internal_state["imu_orientation_rotation_inverse"] = state.internal_state["imu_orientation_rotation"].inv()
+            state.internal_state["imu_orientation_euler"] = state.internal_state["imu_orientation_rotation"].as_euler("xyz")
         state = state.replace(data=data, mjx_model=mjx_model)
 
         self.terrain_function.pre_step(data, state.internal_state)

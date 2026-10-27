@@ -1856,6 +1856,9 @@ class PPO:
             if f"algorithm.{key}" not in explicitly_set_algorithm_params and key in config.algorithm:
                 config.algorithm[key] = value
 
+        if "policy_layer_norm" not in loaded_algorithm_config and "algorithm.policy_layer_norm" not in explicitly_set_algorithm_params:
+            # Checkpoints written before the T06c switch (2026-10-26) have a policy without LayerNorm; the default is now True.
+            config.algorithm.policy_layer_norm = False
         loaded_ncbf_config = loaded_algorithm_config.get("ncbf", {})
         checkpoint_family = checkpoint_code_family(loaded_algorithm_config)
         if checkpoint_family == "paper":
