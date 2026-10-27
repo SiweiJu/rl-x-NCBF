@@ -48,7 +48,7 @@ def key_table(res, ks, groups=("imu_height", "roll_pitch")):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--wm", required=True)
+    p.add_argument("--wm", required=True, help="wm_final.msgpack, or a comma list (data is loaded once)")
     p.add_argument("--data", required=True)
     p.add_argument("--heldout_pattern", default="seed_145/,seed_245/,seed_1342/,seed_1442/")
     p.add_argument("--ks", default="1,2,4,8,16,25,32,50")
@@ -57,38 +57,55 @@ def main():
     p.add_argument("--max_windows", type=int, default=50000)
     p.add_argument("--max_envs_per_shard", type=int, default=0)
     p.add_argument("--split", default="heldout", choices=["heldout", "train"], help="train = in-sample (dev checks)")
-    p.add_argument("--matmul_dtype", default="", help="override the forward's matmul dtype, e.g. bfloat16")
-    p.add_argument("--out", required=True)
+    p.add_argument("--matmul_dtype", default="", help="forward matmul dtype(s), comma list, e.g. float32,bfloat16 "
+                                                      "('' = as trained)")
+    p.add_argument("--out", default="", help="output .json for a single --wm / dtype; else <run dir>/<out_name>_<dtype>.json")
+    p.add_argument("--out_name", default="eval_heldout")
     args = p.parse_args()
-    wm, bundle, meta = WE.load_bundle(args.wm)
-    if args.matmul_dtype:   # same params, forward with bf16 matmuls (f32 accumulation)
-        import dataclasses
-        from rl_x.algorithms.ncbf_ppo.flax_full_jit import world_model as W
-        wm = W.WorldModel(wm.layout, dataclasses.replace(wm.cfg, matmul_dtype=args.matmul_dtype))
+    import dataclasses
+    from rl_x.algorithms.ncbf_ppo.flax_full_jit import world_model as W
+    wms = [w for w in args.wm.split(",") if w]
+    dtypes = args.matmul_dtype.split(",") if args.matmul_dtype else [""]
+    loaded = [WE.load_bundle(w) for w in wms]
+    held_full = None
     if args.data == "synthetic":
-        a = meta["args"]
-        held, _ = WD.synthetic_dataset(n_envs=max(a["synthetic_envs"] // 4, 8), T=a["synthetic_T"], seed=a["seed"] + 1000)
+        a = loaded[0][2]["args"]
+        held_full, _ = WD.synthetic_dataset(n_envs=max(a["synthetic_envs"] // 4, 8), T=a["synthetic_T"], seed=a["seed"] + 1000)
     elif WD.find_shard_dirs(args.data):
-        held, _ = WD.load_wmdata(args.data, args.heldout_pattern.split(","), args.max_envs_per_shard,
-                                 which=(args.split,))[args.split]
-        held = WD.select_xi_dims(held, np.asarray(meta["schema"]["xi_active"]))
+        held_full, _ = WD.load_wmdata(args.data, args.heldout_pattern.split(","), args.max_envs_per_shard,
+                                      which=(args.split,))[args.split]
     else:
-        pats = [q for q in (meta["schema"].get("heldout_patterns") or args.heldout_pattern.split(",")) if q]
+        meta0 = loaded[0][2]
+        pats = [q for q in (meta0["schema"].get("heldout_patterns") or args.heldout_pattern.split(",")) if q]
         paths = [q for q in WD.find_shards(args.data) if any(t in q for t in pats)]
-        held, _ = WD.load_shards(paths, meta["schema"].get("field_map"))
+        held_full, _ = WD.load_shards(paths, meta0["schema"].get("field_map"))
     ks = [int(k) for k in args.ks.split(",")]
-    res = WE.evaluate(wm, bundle, held, ks, args.near_failure_window, args.max_windows)
-    res["meta"] = {"wm": args.wm, "split": args.split, "matmul_dtype": wm.cfg.matmul_dtype, "heldout_pattern": args.heldout_pattern, "rows": int(WD.n_rows(held)),
-                   "terminations": int(held["terminated"].sum()), "train_args": meta.get("args")}
-    with open(args.out, "w") as f:
-        json.dump(res, f, indent=1)
-    tks = [int(k) for k in args.table_ks.split(",")]
-    key = key_table(res, [k for k in (8, 16, 25) if k in ks])
-    md = (key + "\n" + f"### overall (RMSE, physical units)\n{table(res, 'overall', tks)}\n\n"
-          f"### near failure (last {args.near_failure_window} steps before a termination)\n{table(res, 'near_failure', tks)}\n")
-    with open(os.path.splitext(args.out)[0] + ".md", "w") as f:
-        f.write(md)
-    print(md)
+    dev_cache = {}
+    for wpath, (wm0, bundle, meta) in zip(wms, loaded):
+        act = meta["schema"].get("xi_active")
+        sig = tuple(act) if act is not None else None
+        held = WD.select_xi_dims(held_full, np.asarray(act)) if act is not None else held_full
+        if sig not in dev_cache:
+            dev_cache.clear()
+            dev_cache[sig] = WD.to_device(held)
+        for dt in dtypes:
+            wm = W.WorldModel(wm0.layout, dataclasses.replace(wm0.cfg, matmul_dtype=dt)) if dt else wm0
+            res = WE.evaluate(wm, bundle, held, ks, args.near_failure_window, args.max_windows, dev=dev_cache[sig])
+            res["meta"] = {"wm": wpath, "split": args.split, "matmul_dtype": wm.cfg.matmul_dtype,
+                           "heldout_pattern": args.heldout_pattern, "rows": int(WD.n_rows(held)),
+                           "terminations": int(held["terminated"].sum()), "train_args": meta.get("args")}
+            out = args.out if (args.out and len(wms) == 1 and len(dtypes) == 1) else os.path.join(
+                os.path.dirname(os.path.abspath(wpath)), f"{args.out_name}_{wm.cfg.matmul_dtype}.json")
+            with open(out, "w") as f:
+                json.dump(res, f, indent=1)
+            tks = [int(k) for k in args.table_ks.split(",")]
+            key = key_table(res, [k for k in (8, 16, 25) if k in ks])
+            md = (key + "\n" + f"### overall (RMSE, physical units)\n{table(res, 'overall', tks)}\n\n"
+                  f"### near failure (last {args.near_failure_window} steps before a termination)\n"
+                  f"{table(res, 'near_failure', tks)}\n")
+            with open(os.path.splitext(out)[0] + ".md", "w") as f:
+                f.write(md)
+            print(f"===== {wpath} matmul={wm.cfg.matmul_dtype} -> {out}\n{md}", flush=True)
 
 
 if __name__ == "__main__":

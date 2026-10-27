@@ -26,7 +26,8 @@ if [[ "${TOOL:-eval}" == diag ]]; then   # error breakdown by row category (diag
   python experiments/pncbf/wm/diag_wm.py --wm "${WM:?}" --data "${DATA:?}" --out "${OUT:?}" --split "${SPLIT:-heldout}" \
     --max_envs_per_shard "${MAX_ENVS:-0}" --max_windows "${MAX_WINDOWS:-50000}" --ks "${KS:-1,2,8,25}"
 else
-  python experiments/pncbf/wm/eval_wm.py --wm "${WM:?}" --data "${DATA:?}" --out "${OUT:?}" --split "${SPLIT:-heldout}" \
+  # WM may be a comma list; MATMUL a comma list (float32,bfloat16); OUT only for a single model/dtype
+  python experiments/pncbf/wm/eval_wm.py --wm "${WM:?}" --data "${DATA:?}" ${OUT:+--out $OUT} --split "${SPLIT:-heldout}" \
     --max_envs_per_shard "${MAX_ENVS:-0}" --max_windows "${MAX_WINDOWS:-50000}" ${MATMUL:+--matmul_dtype $MATMUL}
 fi
 echo "=== $(date -Is) finished"
