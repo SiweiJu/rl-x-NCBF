@@ -92,6 +92,15 @@ def test_consistent_normalization_keeps_the_activation_decision():
         adv, off = penalty.normalize_cost_advantages(raw, offset, "consistent")
         normalized = float(penalty.penalty(ratio, adv, off, 1.0, 0.1, clip=False)[1])
         assert normalized == pytest.approx(unnormalized / sigma, rel=1e-3, abs=1e-5)
+    # scaled (default): the critic-bias mean is dropped, so at pi = pi_k the penalty is active iff J_c > d.
+    biased = raw - 0.05  # strongly negative mean cost advantage (over-estimating cost critic)
+    for offset in (-1e-4, 1e-4):
+        adv, off = penalty.normalize_cost_advantages(biased, offset, "scaled")
+        assert off == pytest.approx(offset / sigma, rel=1e-3)
+        violation = float(penalty.penalty(jnp.ones_like(adv), adv, off, 1.0, 0.1)[1])
+        assert (violation > 0) == (offset > 0)
+        adv_c, off_c = penalty.normalize_cost_advantages(biased, offset, "consistent")
+        assert float(penalty.penalty(jnp.ones_like(adv_c), adv_c, off_c, 1.0, 0.1)[1]) < 0  # N-P3O: bias switches it off
     adv, off = penalty.normalize_cost_advantages(raw, 1e-3, "standardize")
     assert off == 1e-3 and float(jnp.std(adv)) == pytest.approx(1.0, rel=1e-4)
     adv, off = penalty.normalize_cost_advantages(raw, 1e-3, "center")
@@ -222,6 +231,10 @@ def test_end_to_end_training_has_no_nan(go2_env, overrides):
                 "constraint/measured_cost"):
         assert key in logged
     assert "cat/termination_prob" not in logged
+    if overrides.get("p3o.cost_advantage_normalization", "scaled") == "scaled":
+        # At pi_k (first minibatch of each update) the penalty is on iff J_c > d.
+        active = [a == 1.0 for a in logged["p3o/penalty_active_at_start"]]
+        assert active == [j > overrides["cost_limit"] for j in logged["constraint/measured_cost"]], (active, logged["constraint/measured_cost"])
 
 
 def test_p3o_disabled_is_plain_ppo_loss(go2_env):

@@ -40,7 +40,7 @@ def get_config(algorithm_name):
     config.p3o.kappa = 20.0  # penalty factor; paper Table (all tasks) and OmniSafe P3O.yaml: 20
     config.p3o.clip_cost_surrogate = True  # paper eq. 7: max(r A_C, clip(r) A_C); False = OmniSafe (r A_C)
     config.p3o.constraint_normalization = "per_step"  # per_step | one_minus_gamma | none
-    config.p3o.cost_advantage_normalization = "consistent"  # consistent (N-P3O) | standardize | center | none
+    config.p3o.cost_advantage_normalization = "scaled"  # scaled (default, see penalty.py) | consistent (N-P3O) | standardize | center | none
 
     # CaT (Chane-Sane et al. 2024), see cat.py. Off by default.
     config.cat = config_dict.ConfigDict()

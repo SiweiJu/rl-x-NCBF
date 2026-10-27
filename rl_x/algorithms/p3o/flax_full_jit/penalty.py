@@ -20,6 +20,11 @@ mean episode length (same argument as CPO's ``cost_violation_normalization=per_s
   * ``none``            J_c - d  (OmniSafe p3o.py: ``Jc = EpCost - cost_limit``)
 
 Cost-advantage normalization (``cost_advantage_normalization``), per minibatch like the reward advantages:
+  * ``scaled``     (default) A~ = (A - mu)/sigma and the constant becomes offset/sigma. Units as ``consistent``, but the
+                   minibatch mean mu is dropped (E_{pi_k}[A^{pi_k}] = 0 by definition, so mu is critic bias / noise):
+                   at pi = pi_k the relu argument is exactly offset/sigma, so the penalty is active iff J_c > d.
+                   (T09 smoke: with ``consistent`` the critic bias mu < -offset switched the penalty off at J_c = 0.98,
+                   d = 0.01.)
   * ``consistent`` N-P3O, Lee et al. 2023 (arXiv 2309.15430) eq. 16: A~ = (A - mu)/sigma and the constant
                    becomes (offset + mu)/sigma, so relu(.) is the unnormalized condition divided by sigma > 0:
                    the activation decision is unchanged by the normalization.
@@ -33,7 +38,7 @@ import jax.numpy as jnp
 
 
 CONSTRAINT_NORMALIZATIONS = ("per_step", "one_minus_gamma", "none")
-COST_ADVANTAGE_NORMALIZATIONS = ("consistent", "standardize", "center", "none")
+COST_ADVANTAGE_NORMALIZATIONS = ("scaled", "consistent", "standardize", "center", "none")
 
 
 def constraint_offset(measured_cost, cost_limit, horizon, gamma, normalization):
@@ -58,6 +63,8 @@ def normalize_cost_advantages(cost_advantages, offset, mode, eps=1e-8):
     std = jnp.std(cost_advantages) + eps
     if mode == "standardize":
         return (cost_advantages - mean) / std, offset
+    if mode == "scaled":
+        return (cost_advantages - mean) / std, offset / std
     if mode == "consistent":
         return (cost_advantages - mean) / std, (offset + mean) / std
     raise ValueError(f"Unknown cost_advantage_normalization {mode!r}, expected one of {COST_ADVANTAGE_NORMALIZATIONS}")
