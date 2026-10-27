@@ -32,13 +32,27 @@ def table(res, split, ks):
     return "\n".join(lines)
 
 
+def key_table(res, ks, groups=("imu_height", "roll_pitch")):
+    """imu_height (m) and roll_pitch (rad) at k = 8 / 16 / 25, overall and near failure: model / persistence."""
+    lines = ["### key: model / persistence RMSE (imu_height in m, roll_pitch in rad)",
+             "| group | split | " + " | ".join(f"k={k}" for k in ks) + " |", "|---|---|" + "---|" * len(ks)]
+    for g in groups:
+        for split in ("overall", "near_failure"):
+            cells = []
+            for k in ks:
+                v = res[split].get(k) or res[split].get(str(k))
+                cells.append("–" if v is None or g not in v else f"{v[g]['model']:.4f} / {v[g]['persist']:.4f}")
+            lines.append(f"| {g} | {split} | " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--wm", required=True)
     p.add_argument("--data", required=True)
     p.add_argument("--heldout_pattern", default="seed_145/,seed_245/,seed_1342/,seed_1442/")
     p.add_argument("--ks", default="1,2,4,8,16,25,32,50")
-    p.add_argument("--table_ks", default="1,8,25,50")
+    p.add_argument("--table_ks", default="1,8,16,25,50")
     p.add_argument("--near_failure_window", type=int, default=50)
     p.add_argument("--max_windows", type=int, default=50000)
     p.add_argument("--max_envs_per_shard", type=int, default=0)
@@ -69,7 +83,8 @@ def main():
     with open(args.out, "w") as f:
         json.dump(res, f, indent=1)
     tks = [int(k) for k in args.table_ks.split(",")]
-    md = (f"### overall (RMSE, physical units)\n{table(res, 'overall', tks)}\n\n"
+    key = key_table(res, [k for k in (8, 16, 25) if k in ks])
+    md = (key + "\n" + f"### overall (RMSE, physical units)\n{table(res, 'overall', tks)}\n\n"
           f"### near failure (last {args.near_failure_window} steps before a termination)\n{table(res, 'near_failure', tks)}\n")
     with open(os.path.splitext(args.out)[0] + ".md", "w") as f:
         f.write(md)

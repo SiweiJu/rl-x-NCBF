@@ -343,3 +343,16 @@ def test_roll_wrap_and_post_shock_mask(toy):
     np.testing.assert_allclose(W.k_step_loss_single(wm, p1, bundle["norm"], b2, "A")[0], l0, rtol=1e-6)
     wm_off = _wm(layout, mask_post_shock_step=False)
     assert float(W.k_step_loss_single(wm_off, p1, bundle["norm"], b2, "A")[0]) > float(l0) + 1e-3
+
+
+def test_k_curriculum_step_mask(toy):
+    data, schema, layout = toy
+    wm = _wm(layout)
+    bundle = wm.init(jax.random.PRNGKey(7))
+    p1 = jax.tree_util.tree_map(lambda a: a[0], bundle["params"])
+    pos, _ = WD.split_window_starts(data, 6)
+    b = _batch(data, pos[:5], 6)
+    b3 = dict(b, step_mask=jnp.asarray([1, 1, 1, 0, 0, 0], jnp.float32))
+    l3 = W.k_step_loss_single(wm, p1, bundle["norm"], b3, "A")[0]
+    b_short = {f: v[:, :3] for f, v in b.items()}
+    np.testing.assert_allclose(l3, W.k_step_loss_single(wm, p1, bundle["norm"], b_short, "A")[0], rtol=1e-5)

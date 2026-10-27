@@ -48,6 +48,10 @@ def parse_args(argv=None):
     p.add_argument("--last_action_source", default="chosen")
     # training
     p.add_argument("--k_train", type=int, default=8)
+    p.add_argument("--k_curriculum_start", type=int, default=0,
+                   help="> 0: the loss covers only the first k_cur steps of each k_train window, k_cur growing "
+                        "linearly from this value to k_train over the first --k_curriculum_frac of the updates")
+    p.add_argument("--k_curriculum_frac", type=float, default=0.2)
     p.add_argument("--method", default="A", choices=["A", "B"])
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--grad_clip", type=float, default=1.0)
@@ -58,7 +62,7 @@ def parse_args(argv=None):
     p.add_argument("--updates_per_call", type=int, default=50)
     p.add_argument("--eval_every", type=int, default=5000)
     p.add_argument("--log_every", type=int, default=1000)
-    p.add_argument("--eval_ks", default="1,8,25,50")
+    p.add_argument("--eval_ks", default="1,8,16,25,50")
     p.add_argument("--eval_windows", type=int, default=20000)
     p.add_argument("--save_minutes", type=float, default=15.0)
     p.add_argument("--seed", type=int, default=0)
@@ -171,11 +175,19 @@ def main(argv=None):
 
     sampler = WD.make_window_sampler(pos, neg, args.k_train, args.batch, args.neg_ratio)
 
+    def k_cur_at(update):
+        if args.k_curriculum_start <= 0:
+            return float(args.k_train)
+        frac = min(1.0, update / max(args.k_curriculum_frac * args.updates, 1.0))
+        return args.k_curriculum_start + frac * (args.k_train - args.k_curriculum_start)
+
     @jax.jit
-    def train_chunk(params, opt_state, norm, key, dev):
+    def train_chunk(params, opt_state, norm, key, dev, k_cur):
         def one(carry, k):
             params, opt_state = carry
             batch = sampler(k, dev)
+            if args.k_curriculum_start > 0:
+                batch["step_mask"] = (jnp.arange(args.k_train) < jnp.round(k_cur)).astype(jnp.float32)
             (loss, aux), grads = jax.value_and_grad(
                 lambda p: W.k_step_loss(wm, p, norm, batch, args.method), has_aux=True)(params)
             gnorm = optax.global_norm(grads)
@@ -220,7 +232,8 @@ def main(argv=None):
     t_train, step0 = time.time(), step
     while step < args.updates:
         key, sub = jax.random.split(state["key"])
-        params, opt_state, m = train_chunk(state["params"], state["opt_state"], state["norm"], sub, dev)
+        k_cur = k_cur_at(step)
+        params, opt_state, m = train_chunk(state["params"], state["opt_state"], state["norm"], sub, dev, k_cur)
         state.update(params=params, opt_state=opt_state, key=key)
         step += args.updates_per_call
         crossed = lambda every: every and step // every != (step - args.updates_per_call) // every
@@ -231,6 +244,7 @@ def main(argv=None):
                 state["key"] = key
                 m["heldout_loss"] = float(held_loss(state["params"], state["norm"], hk, held_dev))
             m["updates_per_s"] = (step - step0) / max(time.time() - t_train, 1e-9)
+            m["k_cur"] = k_cur
             log(f"update {step}: " + " ".join(f"{k}={v:.4g}" for k, v in m.items()))
             if wb:
                 wb.log({f"train/{k}": v for k, v in m.items()}, step=step)

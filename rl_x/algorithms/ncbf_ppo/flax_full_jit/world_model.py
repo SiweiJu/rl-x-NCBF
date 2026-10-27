@@ -309,14 +309,15 @@ def k_step_loss_single(wm: WorldModel, params_1, norm, batch, method="A"):
     step_fn = lambda x, u, xi, uc: wm.step_single(params_1, norm, x, u, xi, uc)
     preds = k_step_rollout_on_window(wm, step_fn, batch, teacher_forcing=(method == "A"))
     err = state_error(wm.layout, preds, batch["x_minus_next"])[..., pred_idx(wm.layout, wm.cfg)] / norm["err_scale"]
+    step_w = jnp.ones(err.shape[:2])
     if method == "A" and wm.cfg.mask_post_shock_step:
         # The step after a shock starts from the recorded x+, whose IMU groups the env did not recompute after the
         # shock (stale); its target is not predictable from that input, so it gets no loss.
-        step_w = jnp.concatenate([jnp.ones_like(batch["shock_next"][:, :1]),
-                                  1.0 - (batch["shock_next"][:, :-1] > 0).astype(jnp.float32)], axis=1)
-        per_window = jnp.sum(jnp.mean(err ** 2, axis=2) * step_w, axis=1) / jnp.maximum(jnp.sum(step_w, axis=1), 1.0)
-    else:
-        per_window = jnp.mean(err ** 2, axis=(1, 2))
+        step_w = step_w * jnp.concatenate([jnp.ones_like(batch["shock_next"][:, :1]),
+                                           1.0 - (batch["shock_next"][:, :-1] > 0).astype(jnp.float32)], axis=1)
+    if "step_mask" in batch:   # (k,): k-curriculum, only the first k_cur steps count
+        step_w = step_w * batch["step_mask"][None, :]
+    per_window = jnp.sum(jnp.mean(err ** 2, axis=2) * step_w, axis=1) / jnp.maximum(jnp.sum(step_w, axis=1), 1.0)
     mask = jnp.ones(per_window.shape)
     if method == "B":
         mask = window_mask_method_b(batch["shock_next"]).astype(jnp.float32)
