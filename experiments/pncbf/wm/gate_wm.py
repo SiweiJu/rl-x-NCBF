@@ -49,6 +49,16 @@ def safety_value(margins, T_l):
     return logp - jnp.log(-jnp.expm1(jnp.minimum(logp, -1e-12)))
 
 
+def _auc(score, label):
+    """P(score of a positive > score of a negative), ties count 1/2."""
+    if label.all() or not label.any():
+        return None
+    from scipy.stats import rankdata
+    r = rankdata(score)
+    n1 = label.sum()
+    return float((r[label].sum() - n1 * (n1 + 1) / 2) / (n1 * (~label).sum()))
+
+
 def run(model, _episodes):
     import dataclasses
     from rl_x.algorithms.ncbf_ppo.flax_full_jit import wm_state
@@ -91,7 +101,7 @@ def run(model, _episodes):
         missed = {f"d{dl:g}_frac{fr:g}": 0 for dl in deltas for fr in fracs}
         overflow = {f"d{dl:g}_frac{fr:g}": 0 for dl in deltas for fr in fracs}
         n_states = 0
-        vs, fails = [], []
+        vs, fails, step_need = [], [], []
         for t in times:
             ok = np.asarray(ld("episode_step")[t, envs]) != 0
             x0 = jnp.asarray(ld("x_plus")[t, envs])
@@ -112,6 +122,7 @@ def run(model, _episodes):
                     missed[f"d{dl:g}_frac{fr:g}"] += int((need & ~sel).sum())
                     overflow[f"d{dl:g}_frac{fr:g}"] += int(need.sum() > k)
             n_states += int(ok.sum())
+            step_need.append(float((v < gamma_c).sum() / max(ok.sum(), 1)))
             vs.append(v[ok])
             fw = np.asarray(ld("fail_within")[t, envs])        # actual failure within H in {1,10,25,50}
             fails.append(fw[ok, 2] if fw.ndim == 2 else fw[ok])
@@ -124,6 +135,8 @@ def run(model, _episodes):
             "steps_with_overflow_frac": {k: c / len(times) for k, c in overflow.items()},
             "V_quantiles": {q: float(np.quantile(vcat, q)) for q in (0.01, 0.05, 0.1, 0.25, 0.5)},
             "actual_fail25_rate": float(fcat.mean()),
+            "need_frac_per_step_max": float(np.max(step_need)), "need_frac_per_step_p99": float(np.quantile(step_need, 0.99)),
+            "auc_V_vs_actual_fail25": _auc(-vcat, fcat),
             "mean_V_failing25": float(vcat[fcat].mean()) if fcat.any() else None,
             "mean_V_not_failing25": float(vcat[~fcat].mean()),
         }

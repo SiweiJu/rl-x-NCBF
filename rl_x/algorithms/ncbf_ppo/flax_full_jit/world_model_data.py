@@ -198,8 +198,11 @@ def shard_meta(path):
 
 
 def _tm(a, envs):
-    """[T, N, ...] mmap -> env-major flat [n*T, ...] for the selected envs."""
-    a = np.asarray(a[:, envs])
+    """[T, N, ...] mmap -> env-major flat [n*T, ...] for the selected envs (a contiguous range is sliced)."""
+    if len(envs) and np.all(np.diff(envs) == 1):
+        a = np.asarray(a[:, int(envs[0]):int(envs[-1]) + 1])
+    else:
+        a = np.asarray(a[:, envs])
     return np.ascontiguousarray(np.swapaxes(a, 0, 1)).reshape((-1,) + a.shape[2:])
 
 
@@ -209,8 +212,9 @@ def load_wmdata_shard(path, max_envs=0, seed=0, check=False):
     done_tm = ld("done")
     T, N = done_tm.shape
     envs = np.arange(N)
-    if max_envs and max_envs < N:
-        envs = np.sort(np.random.default_rng(seed).choice(N, max_envs, replace=False))
+    if max_envs and max_envs < N:   # a contiguous block (envs are i.i.d.; reads ~max_envs/N of each file)
+        e0 = int(np.random.default_rng(seed).integers(0, N - max_envs + 1))
+        envs = np.arange(e0, e0 + max_envs)
     d = {"x_plus": _tm(ld("x_plus"), envs).astype(np.float32),
          "u_applied": _tm(ld("u_applied"), envs).astype(np.float32),
          "u_chosen": _tm(ld("u_cmd"), envs).astype(np.float32),
@@ -220,7 +224,11 @@ def load_wmdata_shard(path, max_envs=0, seed=0, check=False):
          "shock_next": (_tm(ld("perturbed_next"), envs) | _tm(ld("dr_resampled_next"), envs)).astype(np.float32),
          "episode_step": np.minimum(_tm(ld("episode_step"), envs), 32767).astype(np.int16),
          "track_id": np.repeat(np.arange(len(envs)), T)}
-    d["start_ok"] = d["episode_step"] != 0       # the first transition of an episode has stale IMU values
+    # Windows may not start at a state with stale IMU groups: the first state of an episode (no mjx.forward at the
+    # reset) and the state right after a shock / DR step (the env does not recompute the IMU data after it).
+    prev_shock = np.concatenate([[False], d["shock_next"][:-1] > 0])
+    prev_shock[::T] = False
+    d["start_ok"] = (d["episode_step"] != 0) & ~prev_shock
     xm = _tm(ld("x_minus_next"), envs).astype(np.float32)
     S = len(d["done"])
     last_of_track = np.zeros(S, bool)
@@ -305,6 +313,7 @@ def load_wmdata(pattern, heldout_patterns=(), max_envs_per_shard=0, seed=0, whic
     dirs = find_shard_dirs(pattern)
     if not dirs:
         raise FileNotFoundError(f"no shard directories (with x_plus.npy) match {pattern}")
+    # (find_shard_dirs on a root walks all subdirectories; the split comes from meta.json)
     groups = {"train": [], "heldout": []}
     for d in dirs:
         m = shard_meta(d)

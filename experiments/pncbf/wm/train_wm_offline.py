@@ -35,7 +35,9 @@ def parse_args(argv=None):
     p.add_argument("--heldout_pattern", default="seed_145/,seed_245/,seed_1342/,seed_1442/",
                    help="comma-separated substrings; shards whose path contains one are held out (default: the last two "
                         "seeds per method; use the split from schema.json when it states one)")
-    p.add_argument("--max_envs_per_shard", type=int, default=0, help="0 = all envs of every shard")
+    p.add_argument("--max_envs_per_shard", type=int, default=0, help="train shards: 0 = all envs of every shard")
+    p.add_argument("--max_envs_per_heldout_shard", type=int, default=128,
+                   help="held-out shards loaded for the validation loss / in-training eval (0 = all)")
     # model
     p.add_argument("--width", type=int, default=512)
     p.add_argument("--depth", type=int, default=3)
@@ -90,8 +92,10 @@ def load_data(args):
         held, _ = WD.synthetic_dataset(n_envs=max(args.synthetic_envs // 4, 8), T=args.synthetic_T, seed=args.seed + 1000)
         return train, held, schema, {"train": ["synthetic"], "heldout": ["synthetic_heldout"]}
     if WD.find_shard_dirs(args.data):   # wm-data shard directories (schema pncbf-p1-wmdata/v1)
-        L = WD.load_wmdata(args.data, args.heldout_pattern.split(","), args.max_envs_per_shard, args.seed, log=log)
-        (train, tr_info), (held, he_info) = L["train"], L["heldout"]
+        pats = args.heldout_pattern.split(",")
+        train, tr_info = WD.load_wmdata(args.data, pats, args.max_envs_per_shard, args.seed, which=("train",), log=log)["train"]
+        held, he_info = WD.load_wmdata(args.data, pats, args.max_envs_per_heldout_shard, args.seed + 7919,
+                                       which=("heldout",), log=log)["heldout"]
         schema_path = args.schema or WD.find_schema(tr_info[0]["path"])
         log(f"schema: {schema_path}")
         raw = WD.load_schema(schema_path)

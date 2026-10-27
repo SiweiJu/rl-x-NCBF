@@ -267,10 +267,13 @@ def test_wmdata_shard_loader_matches_dense(toy, tmp_path):
     comp, info = L["train"]
     assert L["heldout"][0] is not None and info[0]["x_minus_ne_next_x_plus_outside_kept"] == 0
     assert "x_minus_next" not in comp and "xi_table" in comp
-    # window starts: same as dense except starts at episode_step == 0
+    # window starts: same as dense except starts at episode_step == 0 or right after a shock (stale IMU)
     k = 8
     dense_starts = WD.valid_window_starts(data["track_id"], data["done"], k)
-    np.testing.assert_array_equal(WD.data_window_starts(comp, k), dense_starts[ep_step[dense_starts] != 0])
+    prev_shock = np.concatenate([[0], data["shock_next"][:-1]]) > 0
+    prev_shock[::T] = False
+    keep = (ep_step[dense_starts] != 0) & ~prev_shock[dense_starts]
+    np.testing.assert_array_equal(WD.data_window_starts(comp, k), dense_starts[keep])
     s = jnp.asarray(dense_starts[::7], jnp.int32)
     bd = WD.gather_windows(WD.to_device(data), s, k)
     bc = WD.gather_windows(WD.to_device(comp), s, k)
@@ -312,3 +315,31 @@ def test_gated_grad_and_bf16(toy):
     x32 = wm.step(bundle, x0, u0, xi, u0)
     assert x16.dtype == jnp.float32
     np.testing.assert_allclose(x16, x32, atol=5e-2)
+
+
+def test_roll_wrap_and_post_shock_mask(toy):
+    data, schema, layout = toy
+    sch = dict(schema)
+    sch["groups"] = dict(schema["groups"], roll_pitch=list(schema["groups"]["q"][:1]) + [schema["groups"]["q"][0] + 2])
+    lay = W.WMLayout.from_schema(sch)          # roll = first dim of q (toy stand-in)
+    assert lay.angle_idx == (schema["groups"]["q"][0],)
+    cfg = W.WMConfig()
+    r = lay.angle_idx[0]
+    x = jnp.zeros((1, lay.state_dim)).at[0, r].set(3.1)
+    xn = x.at[0, r].set(-3.1)                  # +3.1 -> -3.1 is a +0.083 rad turn, not -6.2
+    d = W.state_delta(lay, cfg, x, xn)
+    pidx = list(W.pred_idx(lay, cfg))
+    np.testing.assert_allclose(d[0, pidx.index(r)], 2 * np.pi - 6.2, atol=1e-5)
+    back = W.apply_delta(lay, cfg, x, d, u_chosen=jnp.zeros((1, lay.action_dim)))
+    np.testing.assert_allclose(W.state_error(lay, back, xn)[0, r], 0, atol=1e-5)
+    # post-shock step mask: corrupting the target of the step after a shock does not change the method-A loss
+    wm = _wm(layout)
+    bundle = wm.init(jax.random.PRNGKey(6))
+    p1 = jax.tree_util.tree_map(lambda a: a[0], bundle["params"])
+    b = _shock_batch(data, layout, 6, shock_at=2)
+    l0 = W.k_step_loss_single(wm, p1, bundle["norm"], b, "A")[0]
+    b2 = dict(b)
+    b2["x_minus_next"] = b["x_minus_next"].at[0, 3].add(9.0)
+    np.testing.assert_allclose(W.k_step_loss_single(wm, p1, bundle["norm"], b2, "A")[0], l0, rtol=1e-6)
+    wm_off = _wm(layout, mask_post_shock_step=False)
+    assert float(W.k_step_loss_single(wm_off, p1, bundle["norm"], b2, "A")[0]) > float(l0) + 1e-3

@@ -33,9 +33,13 @@ class WMLayout:
     xy_idx: Tuple[int, ...] = ()                      # 2 dims or empty
     yaw_idx: Tuple[int, ...] = ()                     # 1 dim or empty
     last_action_idx: Tuple[int, ...] = ()             # action_dim dims or empty
+    angle_idx: Tuple[int, ...] = ()                   # other angles: delta and error wrapped to (-pi, pi] (roll)
 
     @staticmethod
-    def from_schema(schema, xy_group="base_xy", yaw_group="base_yaw", last_action_group="last_action"):
+    def from_schema(schema, xy_group="base_xy", yaw_group="base_yaw", last_action_group="last_action",
+                    angle_dims=(("roll_pitch", 0),)):
+        """angle_dims: (group, offset) of further wrapped angles; default roll (euler xyz roll jumps at +-pi when
+        the robot is on its back; pitch stays in [-pi/2, pi/2])."""
         groups = schema["groups"]
         if isinstance(groups, dict):
             groups = [(name, int(se[0]), int(se[1])) for name, se in groups.items()]
@@ -52,7 +56,9 @@ class WMLayout:
             raise ValueError("base_xy and base_yaw must both be present or both absent")
         if la and len(la) != int(schema["action_dim"]):
             raise ValueError(f"{last_action_group} has {len(la)} dims, action_dim is {schema['action_dim']}")
-        return WMLayout(int(schema["state_dim"]), int(schema["action_dim"]), int(schema["xi_dim"]), groups, xy, yaw, la)
+        ang = tuple(by_name[g][o] for g, o in angle_dims if g in by_name and o < len(by_name[g]))
+        return WMLayout(int(schema["state_dim"]), int(schema["action_dim"]), int(schema["xi_dim"]), groups, xy, yaw, la,
+                        ang)
 
     def group_index(self):
         return {n: np.arange(s, e) for n, s, e in self.groups}
@@ -69,6 +75,7 @@ class WMConfig:
     last_action_source: str = "chosen"     # chosen | applied | predict
     std_floor: float = 1e-6                # normalization std floor (inputs and deltas)
     matmul_dtype: str = "float32"          # "bfloat16": bf16 matmul inputs with f32 accumulation/output
+    mask_post_shock_step: bool = True      # method A: no loss on the step right after a shock (stale IMU input)
     err_std_floor: float = 1e-3            # floor of the per-dim loss scale (delta std), physical units
 
 
@@ -108,6 +115,9 @@ def state_delta(layout, cfg, x, x_next):
         xy, yaw = np.array(layout.xy_idx), layout.yaw_idx[0]
         d = d.at[..., xy].set(_rot(x[..., yaw], d[..., xy], inverse=True))
         d = d.at[..., yaw].set(wrap_angle(d[..., yaw]))
+    if layout.angle_idx:
+        ang = np.array(layout.angle_idx)
+        d = d.at[..., ang].set(wrap_angle(d[..., ang]))
     return d[..., pidx]
 
 
@@ -121,6 +131,9 @@ def apply_delta(layout, cfg, x, delta, u_chosen=None, u_applied=None):
     x_next = x + full
     if _pose_mode(layout):
         x_next = x_next.at[..., yaw].set(wrap_angle(x_next[..., yaw]))
+    if layout.angle_idx:
+        ang = np.array(layout.angle_idx)
+        x_next = x_next.at[..., ang].set(wrap_angle(x_next[..., ang]))
     if layout.last_action_idx and cfg.last_action_source != "predict":
         la = np.array(layout.last_action_idx)
         u = u_chosen if cfg.last_action_source == "chosen" else u_applied
@@ -131,11 +144,14 @@ def apply_delta(layout, cfg, x, delta, u_chosen=None, u_applied=None):
 
 
 def state_error(layout, x_hat, x_true):
-    """x_hat - x_true with the yaw difference wrapped. Shape (..., state_dim)."""
+    """x_hat - x_true with the yaw / angle differences wrapped. Shape (..., state_dim)."""
     e = x_hat - x_true
     if _pose_mode(layout):
         yaw = layout.yaw_idx[0]
         e = e.at[..., yaw].set(wrap_angle(e[..., yaw]))
+    if layout.angle_idx:
+        ang = np.array(layout.angle_idx)
+        e = e.at[..., ang].set(wrap_angle(e[..., ang]))
     return e
 
 
@@ -293,7 +309,14 @@ def k_step_loss_single(wm: WorldModel, params_1, norm, batch, method="A"):
     step_fn = lambda x, u, xi, uc: wm.step_single(params_1, norm, x, u, xi, uc)
     preds = k_step_rollout_on_window(wm, step_fn, batch, teacher_forcing=(method == "A"))
     err = state_error(wm.layout, preds, batch["x_minus_next"])[..., pred_idx(wm.layout, wm.cfg)] / norm["err_scale"]
-    per_window = jnp.mean(err ** 2, axis=(1, 2))
+    if method == "A" and wm.cfg.mask_post_shock_step:
+        # The step after a shock starts from the recorded x+, whose IMU groups the env did not recompute after the
+        # shock (stale); its target is not predictable from that input, so it gets no loss.
+        step_w = jnp.concatenate([jnp.ones_like(batch["shock_next"][:, :1]),
+                                  1.0 - (batch["shock_next"][:, :-1] > 0).astype(jnp.float32)], axis=1)
+        per_window = jnp.sum(jnp.mean(err ** 2, axis=2) * step_w, axis=1) / jnp.maximum(jnp.sum(step_w, axis=1), 1.0)
+    else:
+        per_window = jnp.mean(err ** 2, axis=(1, 2))
     mask = jnp.ones(per_window.shape)
     if method == "B":
         mask = window_mask_method_b(batch["shock_next"]).astype(jnp.float32)
